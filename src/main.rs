@@ -11,6 +11,9 @@ use ui::task_panel::TaskPanel;
 
 fn main() {
     application().run(|cx: &mut App| {
+        // Initialize gpui-component
+        gpui_component::init(cx);
+
         // Create async store
         let (store, runtime) = create_store();
 
