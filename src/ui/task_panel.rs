@@ -14,15 +14,11 @@ pub struct TaskPanel {
 
 impl TaskPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        eprintln!("[DEBUG] TaskPanel::new called");
-
         // 创建 InputState，设置 placeholder
         let input_state = cx.new(|cx| {
-            eprintln!("[DEBUG] Creating InputState");
             InputState::new(window, cx)
                 .placeholder("!! 高优先级任务 | ! 普通任务 | 直接输入")
         });
-        eprintln!("[DEBUG] InputState created: {:?}", input_state);
 
         // 订阅输入事件
         let _subscription = cx.subscribe_in(
