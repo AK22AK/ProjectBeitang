@@ -10,7 +10,9 @@ use ui::sidebar::{Panel, Sidebar};
 use ui::task_panel::TaskPanel;
 
 fn main() {
-    application().run(|cx: &mut App| {
+    let app = application().with_assets(gpui_component_assets::Assets);
+
+    app.run(|cx: &mut App| {
         // Initialize gpui-component (REQUIRED before using any components)
         gpui_component::init(cx);
 
@@ -28,34 +30,43 @@ fn main() {
             runtime.run(db_path).await.ok();
         }).detach();
 
+        // Calculate window bounds in sync context
+        let window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1200.0), px(800.0)),
+            cx,
+        )));
+
         // Open main window with Root wrapper (required by gpui-component)
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1200.0), px(800.0)),
-                    cx,
-                ))),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| MainView::new(store, cx));
-                cx.new(|cx| gpui_component::Root::new(view, window, cx))
-            },
-        ).unwrap();
+        cx.spawn(async move |cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| MainView::new(store, window, cx));
+                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                },
+            )?;
+            Ok::<_, anyhow::Error>(())
+        }).detach();
     });
 }
 
 pub struct MainView {
     store: Store,
     current_panel: Panel,
+    task_panel: Entity<TaskPanel>,
 }
 
 impl MainView {
-    pub fn new(store: Store, _cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let task_panel = cx.new(|cx| TaskPanel::new(store.clone(), window, cx));
         Self {
             store,
             current_panel: Panel::Tasks,
+            task_panel,
         }
     }
 }
@@ -70,15 +81,15 @@ impl Render for MainView {
         div()
             .size_full()
             .flex()
-            .bg(rgb(0x1a1a1a))
-            .text_color(rgb(0xffffff))
+            .bg(rgb(0xf0f0f0))
+            .text_color(rgb(0x000000))
             .child(Sidebar::new(move |panel, _window, _cx| on_panel_change(&panel, _window, _cx)).with_panel(current_panel))
             .child(
                 div()
                     .flex_1()
                     .p(px(24.0))
                     .child(match self.current_panel {
-                        Panel::Tasks => cx.new(|cx| TaskPanel::new(self.store.clone(), _window, cx)).into_any_element(),
+                        Panel::Tasks => self.task_panel.clone().into_any_element(),
                         _ => div().child(format!("{:?} Panel", self.current_panel)).into_any_element(),
                     })
             )

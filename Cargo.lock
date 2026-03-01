@@ -510,6 +510,7 @@ dependencies = [
  "dirs 5.0.1",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
  "rusqlite",
  "serde",
@@ -886,7 +887,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.1",
@@ -1231,7 +1232,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2104,7 +2105,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -2220,6 +2221,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-component-assets"
+version = "0.5.1"
+source = "git+https://github.com/longbridge/gpui-component#c2423239ed8237426abc4848aa2498eb3a03fe0f"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "rust-embed",
+]
+
+[[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
 source = "git+https://github.com/longbridge/gpui-component#c2423239ed8237426abc4848aa2498eb3a03fe0f"
@@ -2303,7 +2314,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2327,7 +2338,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "anyhow",
  "log",
@@ -2572,7 +2583,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3281,7 +3292,7 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3844,7 +3855,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "collections",
  "serde",
@@ -4420,7 +4431,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "derive_refineable",
 ]
@@ -4533,6 +4544,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rust-embed-utils",
+ "shellexpand",
  "syn",
  "walkdir",
 ]
@@ -4697,7 +4709,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "async-task",
  "backtrace",
@@ -4951,6 +4963,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs 5.0.1",
 ]
 
 [[package]]
@@ -5212,7 +5233,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "arrayvec",
  "log",
@@ -5930,7 +5951,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 [[package]]
 name = "util"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -5969,7 +5990,7 @@ dependencies = [
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "perf",
  "quote",
@@ -7326,7 +7347,7 @@ dependencies = [
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7343,7 +7364,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -7354,7 +7375,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#a66d37a44833e819fe70972046e8414783dbaab3"
+source = "git+https://github.com/zed-industries/zed#14358b711c9d789a1b39fb4683477e25fde783dc"
 
 [[package]]
 name = "zune-core"

@@ -48,7 +48,7 @@ impl RenderOnce for Sidebar {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .bg(rgb(0x252525))
+            .bg(rgb(0x333333))
             .p(px(12.0))
             .children(items.into_iter().enumerate().map(move |(idx, (panel, label))| {
                 let is_active = self.current_panel == panel;
