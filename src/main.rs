@@ -6,6 +6,7 @@ mod ui;
 use gpui::*;
 use store::{create_store, Store};
 use ui::sidebar::{Panel, Sidebar};
+use ui::task_panel::TaskPanel;
 
 fn main() {
     App::new().run(|cx: &mut AppContext| {
@@ -75,7 +76,10 @@ impl Render for MainView {
                 div()
                     .flex_1()
                     .p(px(24.0))
-                    .child(format!("{:?} Panel", current_panel))
+                    .child(match self.current_panel {
+                        Panel::Tasks => cx.new_view(|cx| TaskPanel::new(self.store.clone(), cx)).into_any_element(),
+                        _ => div().child(format!("{:?} Panel", self.current_panel)).into_any_element(),
+                    })
             )
     }
 }
