@@ -16,6 +16,13 @@ fn main() {
         // Initialize gpui-component (REQUIRED before using any components)
         gpui_component::init(cx);
 
+        // Force light theme to ensure text is visible
+        gpui_component::Theme::change(
+            gpui::WindowAppearance::VibrantLight,
+            None,
+            cx,
+        );
+
         // Create async store
         let (store, runtime) = create_store();
 
