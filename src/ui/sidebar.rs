@@ -13,13 +13,13 @@ pub enum Panel {
 #[derive(IntoElement)]
 pub struct Sidebar {
     current_panel: Panel,
-    on_panel_select: Arc<dyn Fn(Panel, &mut WindowContext)>,
+    on_panel_select: Arc<dyn Fn(Panel, &mut Window, &mut App)>,
 }
 
 impl Sidebar {
     pub fn new<F>(on_select: F) -> Self
     where
-        F: Fn(Panel, &mut WindowContext) + 'static,
+        F: Fn(Panel, &mut Window, &mut App) + 'static,
     {
         Self {
             current_panel: Panel::Tasks,
@@ -34,7 +34,7 @@ impl Sidebar {
 }
 
 impl RenderOnce for Sidebar {
-    fn render(self, _cx: &mut WindowContext) -> impl IntoElement {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let items = vec![
             (Panel::Tasks, "任务"),
             (Panel::Records, "记录"),
@@ -66,7 +66,7 @@ impl RenderOnce for Sidebar {
                     .items_center()
                     .child(label)
                     .id(idx)
-                    .on_click(move |_event, cx| on_click(panel, cx))
+                    .on_click(move |_event, window, cx| on_click(panel, window, cx))
             }))
     }
 }

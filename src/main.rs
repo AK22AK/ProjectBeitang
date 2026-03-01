@@ -4,17 +4,18 @@ mod store;
 mod ui;
 
 use gpui::*;
+use gpui_platform::application;
 use store::{create_store, Store};
 use ui::sidebar::{Panel, Sidebar};
 use ui::task_panel::TaskPanel;
 
 fn main() {
-    App::new().run(|cx: &mut AppContext| {
+    application().run(|cx: &mut App| {
         // Create async store
         let (store, runtime) = create_store();
 
         // Spawn store runtime in background
-        cx.spawn(|_| async move {
+        cx.spawn(|_cx: &mut AsyncApp| async move {
             let data_dir = dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("beitang");
@@ -37,8 +38,8 @@ fn main() {
                 window_bounds: Some(window_bounds),
                 ..Default::default()
             },
-            |cx| {
-                cx.new_view(|cx| MainView::new(store, cx))
+            |_, cx| {
+                cx.new(|_| MainView::new(store))
             },
         ).unwrap();
     });
@@ -51,7 +52,7 @@ pub struct MainView {
 }
 
 impl MainView {
-    pub fn new(store: Store, _cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(store: Store) -> Self {
         Self {
             store,
             current_panel: Panel::Tasks,
@@ -60,9 +61,9 @@ impl MainView {
 }
 
 impl Render for MainView {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_panel = self.current_panel;
-        let on_panel_change = cx.listener(|this: &mut MainView, panel: &Panel, _cx: &mut ViewContext<MainView>| {
+        let on_panel_change = cx.listener(|this: &mut MainView, panel: &Panel, _window: &mut Window, _cx: &mut Context<MainView>| {
             this.current_panel = *panel;
         });
 
@@ -71,13 +72,13 @@ impl Render for MainView {
             .flex()
             .bg(rgb(0x1a1a1a))
             .text_color(rgb(0xffffff))
-            .child(Sidebar::new(move |panel, _cx| on_panel_change(&panel, _cx)).with_panel(current_panel))
+            .child(Sidebar::new(move |panel, _window, _cx| on_panel_change(&panel, _window, _cx)).with_panel(current_panel))
             .child(
                 div()
                     .flex_1()
                     .p(px(24.0))
                     .child(match self.current_panel {
-                        Panel::Tasks => cx.new_view(|cx| TaskPanel::new(self.store.clone(), cx)).into_any_element(),
+                        Panel::Tasks => cx.new(|cx| TaskPanel::new(self.store.clone(), cx)).into_any_element(),
                         _ => div().child(format!("{:?} Panel", self.current_panel)).into_any_element(),
                     })
             )

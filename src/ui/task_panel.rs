@@ -10,7 +10,7 @@ pub struct TaskPanel {
 }
 
 impl TaskPanel {
-    pub fn new(store: Store, cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
         let mut panel = Self {
             store,
             tasks: Vec::new(),
@@ -20,12 +20,12 @@ impl TaskPanel {
         panel
     }
 
-    fn load_tasks(&mut self, cx: &mut ViewContext<Self>) {
+    fn load_tasks(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        cx.spawn(|view, mut cx| async move {
+        cx.spawn(async move |view, cx| {
             match store.get_tasks(false).await {
                 Ok(tasks) => {
-                    view.update(&mut cx, |panel, _cx| {
+                    view.update(cx, |panel, _cx| {
                         panel.tasks = tasks;
                     }).ok();
                 }
@@ -34,7 +34,7 @@ impl TaskPanel {
         }).detach();
     }
 
-    fn create_task(&mut self, cx: &mut ViewContext<Self>) {
+    fn create_task(&mut self, cx: &mut Context<Self>) {
         if self.input_value.trim().is_empty() {
             return;
         }
@@ -43,10 +43,10 @@ impl TaskPanel {
         let task = Record::new_task(content, priority);
 
         let store = self.store.clone();
-        cx.spawn(|view, mut cx| async move {
+        cx.spawn(async move |view, cx| {
             match store.create_record(task).await {
                 Ok(_) => {
-                    view.update(&mut cx, |panel, cx| {
+                    view.update(cx, |panel, cx| {
                         panel.input_value.clear();
                         panel.load_tasks(cx);
                     }).ok();
@@ -67,16 +67,16 @@ impl TaskPanel {
         }
     }
 
-    fn complete_task(&mut self, task_id: Uuid, cx: &mut ViewContext<Self>) {
+    fn complete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
             task.complete();
             let updated_task = task.clone();
             let store = self.store.clone();
 
-            cx.spawn(|view, mut cx| async move {
+            cx.spawn(async move |view, cx| {
                 match store.update_record(updated_task).await {
                     Ok(_) => {
-                        view.update(&mut cx, |panel, cx| {
+                        view.update(cx, |panel, cx| {
                             panel.load_tasks(cx);
                         }).ok();
                     }
@@ -88,7 +88,7 @@ impl TaskPanel {
 }
 
 impl Render for TaskPanel {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input_value = self.input_value.clone();
 
         div()
@@ -121,11 +121,11 @@ impl Render for TaskPanel {
                             .id("input-display")
                             .focusable()
                             .track_focus(&cx.focus_handle())
-                            .on_click(cx.listener(|_this, _event: &ClickEvent, cx| {
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, cx| {
                                 let handle = cx.focus_handle();
-                                cx.focus(&handle);
+                                handle.focus(window, cx);
                             }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, cx| {
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                                 // Check if it's a single character and no modifiers pressed
                                 let key = &event.keystroke.key;
                                 let has_modifiers = event.keystroke.modifiers.control
@@ -168,7 +168,7 @@ impl Render for TaskPanel {
                             .hover(|style| style.bg(rgb(0x4a4a4a)))
                             .child("添加")
                             .id("add-button")
-                            .on_click(cx.listener(|this, _event: &ClickEvent, cx| {
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                 this.create_task(cx);
                             }))
                     )
@@ -209,7 +209,7 @@ impl Render for TaskPanel {
                                     .cursor_pointer()
                                     .child(if is_completed { "☑" } else { "☐" })
                                     .id(("checkbox", idx))
-                                    .on_click(cx.listener(move |this, _event: &ClickEvent, cx| {
+                                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                                         if !is_completed {
                                             this.complete_task(task_id, cx);
                                         }
