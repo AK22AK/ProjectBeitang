@@ -134,12 +134,8 @@ impl Render for TaskPanel {
                     .flex()
                     .gap(px(8.0))
                     .child(
-                        div()
+                        Input::new(&self.input_state)
                             .flex_1()
-                            .bg(rgb(0xffffff))
-                            .rounded(px(6.0))
-                            .p(px(4.0))
-                            .child(Input::new(&self.input_state))
                     )
                     .child(
                         Button::new("add-btn")
@@ -181,7 +177,7 @@ impl Render for TaskPanel {
                             .px(px(12.0))
                             .py(px(8.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x252525))
+                            .bg(rgb(0xe8e8e8))
                             .child(
                                 div()
                                     .cursor_pointer()

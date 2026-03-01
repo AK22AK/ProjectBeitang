@@ -49,6 +49,7 @@ impl RenderOnce for Sidebar {
             .flex_col()
             .gap(px(4.0))
             .bg(rgb(0x333333))
+            .text_color(rgb(0xffffff))
             .p(px(12.0))
             .children(items.into_iter().enumerate().map(move |(idx, (panel, label))| {
                 let is_active = self.current_panel == panel;
@@ -59,8 +60,8 @@ impl RenderOnce for Sidebar {
                     .py(px(8.0))
                     .rounded(px(6.0))
                     .cursor_pointer()
-                    .when(is_active, |this| this.bg(rgb(0x3a3a3a)))
-                    .hover(|style| style.bg(rgb(0x333333)))
+                    .when(is_active, |this| this.bg(rgb(0x4a4a4a)))
+                    .hover(|style| style.bg(rgb(0x444444)))
                     .flex()
                     .gap(px(8.0))
                     .items_center()
