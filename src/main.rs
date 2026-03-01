@@ -5,16 +5,12 @@ mod ui;
 
 use gpui::*;
 use gpui_platform::application;
-use gpui_component::Root;
 use store::{create_store, Store};
 use ui::sidebar::{Panel, Sidebar};
 use ui::task_panel::TaskPanel;
 
 fn main() {
     application().run(|cx: &mut App| {
-        // Initialize gpui-component
-        gpui_component::init(cx);
-
         // Create async store
         let (store, runtime) = create_store();
 
@@ -29,7 +25,7 @@ fn main() {
             runtime.run(db_path).await.ok();
         }).detach();
 
-        // Open main window with Root wrapper
+        // Open main window WITHOUT Root wrapper
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -39,9 +35,8 @@ fn main() {
                 ))),
                 ..Default::default()
             },
-            |window, cx| {
-                let main_view = cx.new(|cx| MainView::new(store, cx));
-                cx.new(|cx| Root::new(main_view, window, cx))
+            |_window, cx| {
+                cx.new(|cx| MainView::new(store, cx))
             },
         ).unwrap();
     });
@@ -79,7 +74,7 @@ impl Render for MainView {
                     .flex_1()
                     .p(px(24.0))
                     .child(match self.current_panel {
-                        Panel::Tasks => cx.new(|cx| TaskPanel::new(self.store.clone(), _window, cx)).into_any_element(),
+                        Panel::Tasks => cx.new(|cx| TaskPanel::new(self.store.clone(), cx)).into_any_element(),
                         _ => div().child(format!("{:?} Panel", self.current_panel)).into_any_element(),
                     })
             )
