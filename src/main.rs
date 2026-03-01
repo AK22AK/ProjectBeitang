@@ -10,23 +10,9 @@ use ui::sidebar::{Panel, Sidebar};
 use ui::task_panel::TaskPanel;
 
 fn main() {
-    let app = application().with_assets(gpui_component_assets::Assets);
+    let app = application();
 
     app.run(|cx: &mut App| {
-        // Initialize gpui-component (REQUIRED before using any components)
-        gpui_component::init(cx);
-
-        // Force light theme to ensure text is visible
-        gpui_component::Theme::sync_system_appearance(None, cx);
-
-        // Debug: print theme colors
-        let theme = gpui_component::Theme::global(cx);
-        eprintln!("Theme mode: {:?}", theme.mode);
-        eprintln!("foreground: {:?}", theme.foreground);
-        eprintln!("muted_foreground: {:?}", theme.muted_foreground);
-        eprintln!("background: {:?}", theme.background);
-        eprintln!("input: {:?}", theme.input);
-
         // Create async store
         let (store, runtime) = create_store();
 
@@ -41,32 +27,19 @@ fn main() {
             runtime.run(db_path).await.ok();
         }).detach();
 
-        // Calculate window bounds in sync context
-        let window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1200.0), px(800.0)),
-            cx,
-        )));
-
-        // Open main window with Root wrapper (required by gpui-component)
-        cx.spawn(async move |cx| {
-            eprintln!("[DEBUG] Opening window...");
-            let window = cx.open_window(
-                WindowOptions {
-                    window_bounds,
-                    ..Default::default()
-                },
-                |window, cx| {
-                    eprintln!("[DEBUG] Creating MainView...");
-                    let view = cx.new(|cx| MainView::new(store, window, cx));
-                    eprintln!("[DEBUG] Creating Root...");
-                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
-                },
-            );
-            eprintln!("[DEBUG] Window opened: {:?}", window);
-            window?;
-            Ok::<_, anyhow::Error>(())
-        }).detach();
+        // Open main window - 同步方式
+        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+        let window = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |window, cx| {
+                eprintln!("[DEBUG] Creating MainView...");
+                cx.new(|cx| MainView::new(store, window, cx))
+            },
+        );
+        eprintln!("[DEBUG] Window opened: {:?}", window);
     });
 }
 
@@ -89,7 +62,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        eprintln!("[DEBUG] MainView render called, panel: {:?}", self.current_panel);
+        eprintln!("[DEBUG] MainView render called");
         let current_panel = self.current_panel;
         let on_panel_change = cx.listener(|this: &mut MainView, panel: &Panel, _window: &mut Window, _cx: &mut Context<MainView>| {
             this.current_panel = *panel;
