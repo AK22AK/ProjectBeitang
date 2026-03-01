@@ -1,9 +1,11 @@
 mod models;
 mod db;
 mod store;
+mod ui;
 
 use gpui::*;
 use store::{create_store, Store};
+use ui::sidebar::{Panel, Sidebar};
 
 fn main() {
     App::new().run(|cx: &mut AppContext| {
@@ -43,19 +45,36 @@ fn main() {
 
 pub struct MainView {
     store: Store,
+    current_panel: Panel,
 }
 
 impl MainView {
     pub fn new(store: Store, _cx: &mut ViewContext<Self>) -> Self {
-        Self { store }
+        Self {
+            store,
+            current_panel: Panel::Tasks,
+        }
     }
 }
 
 impl Render for MainView {
-    fn render(&mut self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        let current_panel = self.current_panel;
+        let on_panel_change = cx.listener(|this: &mut MainView, panel: &Panel, _cx: &mut ViewContext<MainView>| {
+            this.current_panel = *panel;
+        });
+
         div()
             .size_full()
+            .flex()
             .bg(rgb(0x1a1a1a))
-            .child("Hello, Beitang!")
+            .text_color(rgb(0xffffff))
+            .child(Sidebar::new(move |panel, _cx| on_panel_change(&panel, _cx)).with_panel(current_panel))
+            .child(
+                div()
+                    .flex_1()
+                    .p(px(24.0))
+                    .child(format!("{:?} Panel", current_panel))
+            )
     }
 }
