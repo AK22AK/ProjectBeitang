@@ -1,4 +1,6 @@
-use crate::models::{Priority, Record, RecordType};
+use crate::models::Record;
+#[cfg(test)]
+use crate::models::{Priority, RecordType};
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -17,6 +19,7 @@ impl Database {
         Ok(db)
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Self { conn };

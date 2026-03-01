@@ -44,6 +44,7 @@ fn main() {
 }
 
 pub struct MainView {
+    #[allow(dead_code)]
     store: Store,
     current_panel: Panel,
 }
