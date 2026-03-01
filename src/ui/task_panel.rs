@@ -1,22 +1,44 @@
 use crate::models::{Priority, Record};
 use crate::store::Store;
 use gpui::*;
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::button::Button;
 use uuid::Uuid;
 
 pub struct TaskPanel {
     store: Store,
     tasks: Vec<Record>,
-    input_value: String,
-    focus_handle: FocusHandle,
+    input_state: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 impl TaskPanel {
-    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 创建 InputState，设置 placeholder
+        let input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("!! 高优先级任务 | ! 普通任务 | 直接输入")
+        });
+
+        // 订阅输入事件
+        let _subscription = cx.subscribe_in(
+            &input_state,
+            window,
+            |this, _state, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.create_task(window, cx);
+                    }
+                    _ => {}
+                }
+            },
+        );
+
         let mut panel = Self {
             store,
             tasks: Vec::new(),
-            input_value: String::new(),
-            focus_handle: cx.focus_handle(),
+            input_state,
+            _subscription,
         };
         panel.load_tasks(cx);
         panel
@@ -36,16 +58,19 @@ impl TaskPanel {
         }).detach();
     }
 
-    fn create_task(&mut self, cx: &mut Context<Self>) {
-        if self.input_value.trim().is_empty() {
+    fn create_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input_state.read(cx).text().to_string();
+        if text.trim().is_empty() {
             return;
         }
 
-        let (content, priority) = self.parse_input(&self.input_value);
+        let (content, priority) = self.parse_input(&text);
         let task = Record::new_task(content, priority);
 
-        // Clear input
-        self.input_value.clear();
+        // 清空输入框
+        self.input_state.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
 
         let store = self.store.clone();
         cx.spawn(async move |view, cx| {
@@ -93,8 +118,6 @@ impl TaskPanel {
 
 impl Render for TaskPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let input_value = self.input_value.clone();
-
         div()
             .size_full()
             .flex()
@@ -111,61 +134,14 @@ impl Render for TaskPanel {
                     .flex()
                     .gap(px(8.0))
                     .child(
-                        div()
+                        Input::new(&self.input_state)
                             .flex_1()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0x252525))
-                            .child(input_value.clone())
-                            .id("input-display")
-                            .focusable()
-                            .track_focus(&self.focus_handle)
-                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                                this.focus_handle.focus(window, cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                let key = &event.keystroke.key;
-                                let has_modifiers = event.keystroke.modifiers.control
-                                    || event.keystroke.modifiers.alt
-                                    || event.keystroke.modifiers.platform
-                                    || event.keystroke.modifiers.function;
-
-                                let mut changed = false;
-                                if key.len() == 1 && !has_modifiers && !event.keystroke.modifiers.shift {
-                                    this.input_value.push_str(key);
-                                    changed = true;
-                                } else if key.len() == 1 && event.keystroke.modifiers.shift {
-                                    this.input_value.push_str(&key.to_uppercase());
-                                    changed = true;
-                                } else if key == "backspace" {
-                                    this.input_value.pop();
-                                    changed = true;
-                                } else if key == "enter" {
-                                    this.create_task(cx);
-                                    return;
-                                } else if key == "space" {
-                                    this.input_value.push(' ');
-                                    changed = true;
-                                }
-
-                                if changed {
-                                    cx.notify();
-                                }
-                            }))
                     )
                     .child(
-                        div()
-                            .px(px(16.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0x3a3a3a))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0x4a4a4a)))
+                        Button::new("add-btn")
                             .child("添加")
-                            .id("add-button")
-                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                this.create_task(cx);
+                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                                this.create_task(window, cx);
                             }))
                     )
             )
