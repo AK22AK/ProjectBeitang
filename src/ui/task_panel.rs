@@ -133,18 +133,28 @@ impl Render for TaskPanel {
                                     || event.keystroke.modifiers.platform
                                     || event.keystroke.modifiers.function;
 
+                                let mut changed = false;
                                 if key.len() == 1 && !has_modifiers && !event.keystroke.modifiers.shift {
                                     // Single character, add to input
                                     this.input_value.push_str(key);
+                                    changed = true;
                                 } else if key.len() == 1 && event.keystroke.modifiers.shift {
                                     // Shift + character (uppercase)
                                     this.input_value.push_str(&key.to_uppercase());
+                                    changed = true;
                                 } else if key == "backspace" {
                                     this.input_value.pop();
+                                    changed = true;
                                 } else if key == "enter" {
                                     this.create_task(cx);
+                                    return;
                                 } else if key == "space" {
                                     this.input_value.push(' ');
+                                    changed = true;
+                                }
+
+                                if changed {
+                                    cx.notify();
                                 }
                             }))
                     )
