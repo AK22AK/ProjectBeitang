@@ -118,6 +118,10 @@ impl TaskPanel {
 
 impl Render for TaskPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        eprintln!("[DEBUG] TaskPanel render called, tasks count: {}", self.tasks.len());
+        let input_text = self.input_state.read(cx).text().to_string();
+        eprintln!("[DEBUG] Input text: '{}'", input_text);
+        // 测试：添加一个原生 GPUI 文字元素
         div()
             .size_full()
             .flex()

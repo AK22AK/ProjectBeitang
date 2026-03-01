@@ -50,16 +50,21 @@ fn main() {
 
         // Open main window with Root wrapper (required by gpui-component)
         cx.spawn(async move |cx| {
-            cx.open_window(
+            eprintln!("[DEBUG] Opening window...");
+            let window = cx.open_window(
                 WindowOptions {
                     window_bounds,
                     ..Default::default()
                 },
                 |window, cx| {
+                    eprintln!("[DEBUG] Creating MainView...");
                     let view = cx.new(|cx| MainView::new(store, window, cx));
+                    eprintln!("[DEBUG] Creating Root...");
                     cx.new(|cx| gpui_component::Root::new(view, window, cx))
                 },
-            )?;
+            );
+            eprintln!("[DEBUG] Window opened: {:?}", window);
+            window?;
             Ok::<_, anyhow::Error>(())
         }).detach();
     });
@@ -84,6 +89,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        eprintln!("[DEBUG] MainView render called, panel: {:?}", self.current_panel);
         let current_panel = self.current_panel;
         let on_panel_change = cx.listener(|this: &mut MainView, panel: &Panel, _window: &mut Window, _cx: &mut Context<MainView>| {
             this.current_panel = *panel;
