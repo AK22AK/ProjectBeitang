@@ -11,6 +11,9 @@ use ui::task_panel::TaskPanel;
 
 fn main() {
     application().run(|cx: &mut App| {
+        // Initialize gpui-component (REQUIRED before using any components)
+        gpui_component::init(cx);
+
         // Create async store
         let (store, runtime) = create_store();
 
@@ -25,7 +28,7 @@ fn main() {
             runtime.run(db_path).await.ok();
         }).detach();
 
-        // Open main window WITHOUT Root wrapper
+        // Open main window with Root wrapper (required by gpui-component)
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -35,8 +38,9 @@ fn main() {
                 ))),
                 ..Default::default()
             },
-            |_window, cx| {
-                cx.new(|cx| MainView::new(store, cx))
+            |window, cx| {
+                let view = cx.new(|cx| MainView::new(store, cx));
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         ).unwrap();
     });
