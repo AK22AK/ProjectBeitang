@@ -118,7 +118,7 @@ impl TaskPanel {
 }
 
 impl Render for TaskPanel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _input_state = self.input_state.clone();
 
         div()
