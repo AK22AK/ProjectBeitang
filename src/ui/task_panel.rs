@@ -113,8 +113,40 @@ impl Render for TaskPanel {
                             .py(px(8.0))
                             .rounded(px(6.0))
                             .bg(rgb(0x252525))
-                            .child(input_value.clone())
+                            .child(if input_value.is_empty() {
+                                "点击输入...".to_string()
+                            } else {
+                                input_value.clone()
+                            })
                             .id("input-display")
+                            .focusable()
+                            .track_focus(&cx.focus_handle())
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, cx| {
+                                let handle = cx.focus_handle();
+                                cx.focus(&handle);
+                            }))
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, cx| {
+                                // Check if it's a single character and no modifiers pressed
+                                let key = &event.keystroke.key;
+                                let has_modifiers = event.keystroke.modifiers.control
+                                    || event.keystroke.modifiers.alt
+                                    || event.keystroke.modifiers.platform
+                                    || event.keystroke.modifiers.function;
+
+                                if key.len() == 1 && !has_modifiers && !event.keystroke.modifiers.shift {
+                                    // Single character, add to input
+                                    this.input_value.push_str(key);
+                                } else if key.len() == 1 && event.keystroke.modifiers.shift {
+                                    // Shift + character (uppercase)
+                                    this.input_value.push_str(&key.to_uppercase());
+                                } else if key == "backspace" {
+                                    this.input_value.pop();
+                                } else if key == "enter" {
+                                    this.create_task(cx);
+                                } else if key == "space" {
+                                    this.input_value.push(' ');
+                                }
+                            }))
                     )
                     .child(
                         div()
