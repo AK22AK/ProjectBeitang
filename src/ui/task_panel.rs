@@ -1,20 +1,30 @@
 use crate::models::{Priority, Record};
 use crate::store::Store;
 use gpui::*;
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::button::Button;
+use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
 pub struct TaskPanel {
     store: Store,
     tasks: Vec<Record>,
-    input_value: String,
+    input_state: Entity<InputState>,
 }
 
 impl TaskPanel {
-    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("!! 高优先级任务 | ! 普通任务 | 直接输入")
+        });
+
+        let _subscription = cx.subscribe_in(&input_state, window, Self::on_input_event);
+
         let mut panel = Self {
             store,
             tasks: Vec::new(),
-            input_value: String::new(),
+            input_state,
         };
         panel.load_tasks(cx);
         panel
@@ -34,21 +44,26 @@ impl TaskPanel {
         }).detach();
     }
 
-    fn create_task(&mut self, cx: &mut Context<Self>) {
-        if self.input_value.trim().is_empty() {
+    fn create_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input_state.read(cx).value();
+        if text.trim().is_empty() {
             return;
         }
 
-        let (content, priority) = self.parse_input(&self.input_value);
+        let (content, priority) = self.parse_input(&text);
         let task = Record::new_task(content, priority);
+
+        // Clear input immediately
+        self.input_state.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
 
         let store = self.store.clone();
         cx.spawn(async move |view, cx| {
             match store.create_record(task).await {
                 Ok(_) => {
-                    view.update(cx, |panel, cx| {
-                        panel.input_value.clear();
-                        panel.load_tasks(cx);
+                    view.update(cx, |panel, _cx| {
+                        panel.load_tasks(_cx);
                     }).ok();
                 }
                 Err(e) => eprintln!("Failed to create task: {}", e),
@@ -85,11 +100,26 @@ impl TaskPanel {
             }).detach();
         }
     }
+
+    fn on_input_event(
+        &mut self,
+        _state: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { .. } => {
+                self.create_task(window, cx);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Render for TaskPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let input_value = self.input_value.clone();
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let _input_state = self.input_state.clone();
 
         div()
             .size_full()
@@ -107,69 +137,15 @@ impl Render for TaskPanel {
                     .flex()
                     .gap(px(8.0))
                     .child(
-                        div()
+                        Input::new(&self.input_state)
                             .flex_1()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0x252525))
-                            .child(if input_value.is_empty() {
-                                "点击输入...".to_string()
-                            } else {
-                                input_value.clone()
-                            })
-                            .id("input-display")
-                            .focusable()
-                            .track_focus(&cx.focus_handle())
-                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, cx| {
-                                let handle = cx.focus_handle();
-                                handle.focus(window, cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                // Check if it's a single character and no modifiers pressed
-                                let key = &event.keystroke.key;
-                                let has_modifiers = event.keystroke.modifiers.control
-                                    || event.keystroke.modifiers.alt
-                                    || event.keystroke.modifiers.platform
-                                    || event.keystroke.modifiers.function;
-
-                                let mut changed = false;
-                                if key.len() == 1 && !has_modifiers && !event.keystroke.modifiers.shift {
-                                    // Single character, add to input
-                                    this.input_value.push_str(key);
-                                    changed = true;
-                                } else if key.len() == 1 && event.keystroke.modifiers.shift {
-                                    // Shift + character (uppercase)
-                                    this.input_value.push_str(&key.to_uppercase());
-                                    changed = true;
-                                } else if key == "backspace" {
-                                    this.input_value.pop();
-                                    changed = true;
-                                } else if key == "enter" {
-                                    this.create_task(cx);
-                                    return;
-                                } else if key == "space" {
-                                    this.input_value.push(' ');
-                                    changed = true;
-                                }
-
-                                if changed {
-                                    cx.notify();
-                                }
-                            }))
+                            .cleanable(true)
                     )
                     .child(
-                        div()
-                            .px(px(16.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0x3a3a3a))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0x4a4a4a)))
-                            .child("添加")
-                            .id("add-button")
-                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                this.create_task(cx);
+                        Button::new("add-btn")
+                            .label("添加")
+                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                                this.create_task(window, cx);
                             }))
                     )
             )
@@ -185,6 +161,7 @@ impl Render for TaskPanel {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
+                    .overflow_y_scrollbar()
                     .children(self.tasks.clone().into_iter().enumerate().map(|(idx, task)| {
                         let task_id = task.id;
                         let is_completed = task.is_completed();
