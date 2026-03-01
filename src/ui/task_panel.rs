@@ -127,6 +127,7 @@ impl Render for TaskPanel {
                 div()
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xff0000))
                     .child("任务")
             )
             .child(
@@ -178,6 +179,7 @@ impl Render for TaskPanel {
                             .py(px(8.0))
                             .rounded(px(6.0))
                             .bg(rgb(0xe8e8e8))
+                            .text_color(rgb(0xff0000))
                             .child(
                                 div()
                                     .cursor_pointer()

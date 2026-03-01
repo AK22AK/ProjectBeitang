@@ -17,11 +17,15 @@ fn main() {
         gpui_component::init(cx);
 
         // Force light theme to ensure text is visible
-        gpui_component::Theme::change(
-            gpui::WindowAppearance::VibrantLight,
-            None,
-            cx,
-        );
+        gpui_component::Theme::sync_system_appearance(None, cx);
+
+        // Debug: print theme colors
+        let theme = gpui_component::Theme::global(cx);
+        eprintln!("Theme mode: {:?}", theme.mode);
+        eprintln!("foreground: {:?}", theme.foreground);
+        eprintln!("muted_foreground: {:?}", theme.muted_foreground);
+        eprintln!("background: {:?}", theme.background);
+        eprintln!("input: {:?}", theme.input);
 
         // Create async store
         let (store, runtime) = create_store();
