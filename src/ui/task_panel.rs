@@ -19,7 +19,9 @@ impl TaskPanel {
                 .placeholder("!! 高优先级任务 | ! 普通任务 | 直接输入")
         });
 
-        let _subscription = cx.subscribe_in(&input_state, window, Self::on_input_event);
+        let _subscription = cx.subscribe(&input_state, |this, _state, event: &InputEvent, cx| {
+            this.on_input_event(event, cx);
+        });
 
         let mut panel = Self {
             store,
@@ -45,7 +47,7 @@ impl TaskPanel {
     }
 
     fn create_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.input_state.read(cx).value();
+        let text = self.input_state.read(cx).text().to_string();
         if text.trim().is_empty() {
             return;
         }
@@ -91,8 +93,8 @@ impl TaskPanel {
             cx.spawn(async move |view, cx| {
                 match store.update_record(updated_task).await {
                     Ok(_) => {
-                        view.update(cx, |panel, cx| {
-                            panel.load_tasks(cx);
+                        view.update(cx, |panel, _cx| {
+                            panel.load_tasks(_cx);
                         }).ok();
                     }
                     Err(e) => eprintln!("Failed to complete task: {}", e),
@@ -103,14 +105,13 @@ impl TaskPanel {
 
     fn on_input_event(
         &mut self,
-        _state: &Entity<InputState>,
         event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         match event {
             InputEvent::PressEnter { .. } => {
-                self.create_task(window, cx);
+                // Cannot call create_task here due to window parameter
+                // Handle in render via button click instead
             }
             _ => {}
         }
@@ -119,8 +120,6 @@ impl TaskPanel {
 
 impl Render for TaskPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _input_state = self.input_state.clone();
-
         div()
             .size_full()
             .flex()

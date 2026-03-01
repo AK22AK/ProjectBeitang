@@ -5,6 +5,7 @@ mod ui;
 
 use gpui::*;
 use gpui_platform::application;
+use gpui_component::Root;
 use store::{create_store, Store};
 use ui::sidebar::{Panel, Sidebar};
 use ui::task_panel::TaskPanel;
@@ -28,34 +29,31 @@ fn main() {
             runtime.run(db_path).await.ok();
         }).detach();
 
-        // Compute window bounds first to avoid borrow issues
-        let window_bounds = WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1200.0), px(800.0)),
-            cx,
-        ));
-
-        // Open main window
+        // Open main window with Root wrapper
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(window_bounds),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(1200.0), px(800.0)),
+                    cx,
+                ))),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| MainView::new(store))
+            |window, cx| {
+                let main_view = cx.new(|cx| MainView::new(store, cx));
+                cx.new(|cx| Root::new(main_view, window, cx))
             },
         ).unwrap();
     });
 }
 
 pub struct MainView {
-    #[allow(dead_code)]
     store: Store,
     current_panel: Panel,
 }
 
 impl MainView {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, _cx: &mut Context<Self>) -> Self {
         Self {
             store,
             current_panel: Panel::Tasks,
