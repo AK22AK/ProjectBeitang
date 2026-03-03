@@ -21,7 +21,7 @@ fn main() {
         gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
 
         // 创建异步 store
-        let (store, runtime) = create_store();
+        let (store, mut runtime) = create_store();
 
         // 后台运行 store
         cx.spawn(|_cx: &mut AsyncApp| async move {
@@ -31,7 +31,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir).ok();
 
             let db_path = data_dir.join("data.db");
-            let _ = runtime.run(db_path).await;
+            runtime.run(db_path).await;
         }).detach();
 
         // 异步打开窗口
