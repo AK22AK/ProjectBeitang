@@ -49,16 +49,14 @@ fn main() {
 }
 
 pub struct MainView {
-    store: Store,
     current_panel: Panel,
     task_panel: Entity<TaskPanel>,
 }
 
 impl MainView {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let task_panel = cx.new(|cx| TaskPanel::new(store.clone(), window, cx));
+        let task_panel = cx.new(|cx| TaskPanel::new(store, window, cx));
         Self {
-            store,
             current_panel: Panel::Tasks,
             task_panel,
         }
