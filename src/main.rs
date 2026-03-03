@@ -1,14 +1,9 @@
-mod models;
-mod db;
-mod store;
-mod ui;
-
+use beitang::store::{create_store, Store};
+use beitang::ui::sidebar::{Panel, Sidebar};
+use beitang::ui::task_panel::TaskPanel;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_platform::application;
-use store::{create_store, Store};
-use ui::sidebar::{Panel, Sidebar};
-use ui::task_panel::TaskPanel;
 
 fn main() {
     let app = application();

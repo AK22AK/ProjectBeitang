@@ -118,6 +118,11 @@ impl TaskPanel {
     }
 
     fn parse_input(&self, input: &str) -> (String, Priority) {
+        Self::parse_input_static(input)
+    }
+
+    // 提取为静态方法便于测试
+    fn parse_input_static(input: &str) -> (String, Priority) {
         let trimmed = input.trim();
         if trimmed.starts_with("!!") {
             // 高优先级：!! 或 !!空格
