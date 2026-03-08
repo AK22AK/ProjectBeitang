@@ -28,5 +28,8 @@ anyhow = "1.0"
 thiserror = "1.0"
 dirs = "5.0"
 
+# 全局快捷键
+global-hotkey = "0.4"
+
 [dev-dependencies]
 tempfile = "3.0"
