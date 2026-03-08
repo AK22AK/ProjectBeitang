@@ -3,6 +3,7 @@ use crate::store::Store;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
+use gpui_component::InteractiveElementExt;
 use uuid::Uuid;
 
 pub struct TaskPanel {
@@ -10,6 +11,10 @@ pub struct TaskPanel {
     tasks: Vec<Record>,
     input_state: Entity<InputState>,
     _subscription: Subscription,
+    // 编辑状态
+    editing_task_id: Option<uuid::Uuid>,
+    edit_input_state: Option<Entity<InputState>>,
+    _edit_subscription: Option<Subscription>,
 }
 
 impl TaskPanel {
@@ -37,9 +42,71 @@ impl TaskPanel {
             tasks: Vec::new(),
             input_state,
             _subscription,
+            editing_task_id: None,
+            edit_input_state: None,
+            _edit_subscription: None,
         };
         panel.load_tasks(cx);
         panel
+    }
+
+    fn start_edit(&mut self, task: Record, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_task_id = Some(task.id);
+        let edit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("编辑任务...")
+        });
+        // 设置编辑内容 - 使用 value 方式
+        let content = task.content.clone();
+        edit_input.update(cx, |state, cx| {
+            state.set_value(&content, window, cx);
+        });
+
+        let _edit_subscription = cx.subscribe_in(
+            &edit_input,
+            window,
+            |this, _state, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.save_edit(window, cx);
+                    }
+                    _ => {}
+                }
+            },
+        );
+
+        self.edit_input_state = Some(edit_input);
+        self._edit_subscription = Some(_edit_subscription);
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(task_id) = self.editing_task_id {
+            if let Some(edit_input) = &self.edit_input_state {
+                let new_content = edit_input.read(cx).text().to_string();
+                let (content, priority) = Self::parse_input_static(&new_content);
+
+                if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+                    task.content = content;
+                    task.priority = Some(priority);
+                    let updated_task = task.clone();
+                    let store = self.store.clone();
+                    cx.spawn(async move |_view, _cx| {
+                        if let Err(e) = store.update_record(updated_task).await {
+                            eprintln!("[TaskPanel] Failed to update task: {}", e);
+                        }
+                    }).detach();
+                }
+            }
+        }
+        self.cancel_edit(window, cx);
+    }
+
+    fn cancel_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_task_id = None;
+        self.edit_input_state = None;
+        self._edit_subscription = None;
+        cx.notify();
     }
 
     fn load_tasks(&mut self, cx: &mut Context<Self>) {
@@ -214,6 +281,7 @@ impl Render for TaskPanel {
                     .children(self.tasks.clone().into_iter().enumerate().map(|(idx, task)| {
                         let task_id = task.id;
                         let is_completed = task.is_completed();
+                        let is_editing = self.editing_task_id == Some(task_id);
                         let priority_emoji = match task.priority {
                             Some(Priority::High) => "🔴",
                             Some(Priority::Medium) => "🟡",
@@ -221,6 +289,31 @@ impl Render for TaskPanel {
                             None => "⚪",
                         };
 
+                        if is_editing {
+                            // 编辑模式：显示输入框
+                            if let Some(ref edit_input) = self.edit_input_state {
+                                let edit_input_clone = edit_input.clone();
+                                return div()
+                                    .id(idx)
+                                    .flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .px(px(12.0))
+                                    .py(px(8.0))
+                                    .rounded(px(6.0))
+                                    .bg(rgb(0xd0e8ff))
+                                    .child(Input::new(&edit_input_clone).flex_1())
+                                    .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
+                                        this.save_edit(window, cx);
+                                    })))
+                                    .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
+                                        this.cancel_edit(window, cx);
+                                    })))
+                                    .into_any_element();
+                            }
+                        }
+
+                        // 普通模式：显示任务
                         div()
                             .id(idx)
                             .flex()
@@ -230,7 +323,14 @@ impl Render for TaskPanel {
                             .py(px(8.0))
                             .rounded(px(6.0))
                             .bg(rgb(0xe8e8e8))
-                            .text_color(rgb(0x000000))  // 明确设置黑色文字
+                            .text_color(rgb(0x000000))
+                            .cursor_pointer()
+                            .on_double_click(cx.listener({
+                                let task_for_edit = task.clone();
+                                move |this, _event: &ClickEvent, window, cx| {
+                                    this.start_edit(task_for_edit.clone(), window, cx);
+                                }
+                            }))
                             .child(
                                 div()
                                     .cursor_pointer()
@@ -245,9 +345,11 @@ impl Render for TaskPanel {
                             .child(priority_emoji)
                             .child(
                                 div()
-                                    .text_color(rgb(0x000000))  // 确保内容文字是黑色
+                                    .flex_1()
+                                    .text_color(rgb(0x000000))
                                     .child(task.content.clone())
                             )
+                            .into_any_element()
                     }))
             )
     }
