@@ -112,4 +112,60 @@ impl Database {
         eprintln!("[DB] get_tasks returning {} records", result.len());
         Ok(result)
     }
+
+    pub fn get_notes(&self) -> Result<Vec<Record>> {
+        eprintln!("[DB] get_notes called");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, priority, created_at, completed_at, record_type
+             FROM records
+             WHERE record_type = 'note'
+             ORDER BY created_at DESC"
+        )?;
+
+        let records = stmt.query_map([], |row| {
+            let id_str: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let priority_int: Option<i64> = row.get(2)?;
+            let created_at_str: String = row.get(3)?;
+            let completed_at_str: Option<String> = row.get(4)?;
+            let record_type_str: String = row.get(5)?;
+
+            eprintln!("[DB] Row: id={}, content='{}', record_type='{}'", id_str, content, record_type_str);
+
+            Ok(Record {
+                id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+                content,
+                priority: priority_int.map(|p| match p {
+                    0 => Priority::High,
+                    1 => Priority::Medium,
+                    _ => Priority::Low,
+                }),
+                created_at: DateTime::parse_from_rfc3339(&created_at_str)
+                    .unwrap_or_else(|_| chrono::Local::now().into())
+                    .with_timezone(&Utc),
+                completed_at: completed_at_str.filter(|s| !s.is_empty()).and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                record_type: match record_type_str.as_str() {
+                    "note" => RecordType::Note,
+                    "event" => RecordType::Event,
+                    _ => RecordType::Task,
+                },
+            })
+        })?;
+
+        let result: Vec<Record> = records.collect::<Result<Vec<_>>>()?;
+        eprintln!("[DB] get_notes returning {} records", result.len());
+        Ok(result)
+    }
+
+    pub fn delete_record(&self, id: Uuid) -> Result<()> {
+        eprintln!("[DB] delete_record called for id: {}", id);
+        self.conn.execute(
+            "DELETE FROM records WHERE id = ?1",
+            [&id.to_string()],
+        )?;
+        eprintln!("[DB] delete_record succeeded");
+        Ok(())
+    }
 }

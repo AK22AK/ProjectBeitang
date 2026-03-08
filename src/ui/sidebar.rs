@@ -5,6 +5,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Panel {
     Tasks,
+    Notes,
     Records,
     Timeline,
     Ai,
@@ -37,6 +38,7 @@ impl RenderOnce for Sidebar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let items = vec![
             (Panel::Tasks, "任务"),
+            (Panel::Notes, "笔记"),
             (Panel::Records, "记录"),
             (Panel::Timeline, "时间线"),
             (Panel::Ai, "AI"),

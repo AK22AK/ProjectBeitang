@@ -1,6 +1,7 @@
 use beitang::store::{create_store, Store};
 use beitang::ui::sidebar::{Panel, Sidebar};
 use beitang::ui::task_panel::TaskPanel;
+use beitang::ui::note_panel::NotePanel;
 use beitang::shortcut_manager::{ShortcutManager, ShortcutEvent};
 use beitang::ui::floating_window::QuickAddWindow;
 use gpui::*;
@@ -104,8 +105,23 @@ fn main() {
                         });
                     }
                     ShortcutEvent::QuickAddNote => {
-                        // 快速添加笔记（占位符）
-                        eprintln!("[Shortcut] QuickAddNote not yet implemented");
+                        // 打开快速添加笔记窗口
+                        let store = store_for_shortcuts.clone();
+                        let _ = cx.update(|cx| {
+                            cx.open_window(
+                                WindowOptions {
+                                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                                        None,
+                                        size(px(400.0), px(200.0)),
+                                        cx,
+                                    ))),
+                                    ..Default::default()
+                                },
+                                |window, cx| {
+                                    cx.new(|cx| QuickAddWindow::new_for_note(store, window, cx))
+                                },
+                            )
+                        });
                     }
                     ShortcutEvent::ViewTasks => {
                         // 激活主窗口并切换到任务面板
@@ -129,8 +145,9 @@ fn main() {
                         });
                     }
                     ShortcutEvent::ViewNotes => {
-                        // 激活主窗口并切换到笔记面板（占位符）
+                        // 激活主窗口并切换到笔记面板
                         let window_handle = main_window_handle_for_listener.clone();
+                        let view_entity = main_view_for_listener.clone();
                         let _ = cx.update(|cx| {
                             // 首先激活窗口
                             if let Some(handle) = window_handle.lock().unwrap().as_ref() {
@@ -139,8 +156,13 @@ fn main() {
                                     eprintln!("[Shortcut] ViewNotes - window activated");
                                 }).ok();
                             }
-                            // 笔记面板尚未实现，先记录日志
-                            eprintln!("[Shortcut] ViewNotes - Notes panel not yet implemented");
+                            // 然后切换面板
+                            if let Some(entity) = view_entity.lock().unwrap().as_ref() {
+                                cx.update_entity(entity, |main_view, cx| {
+                                    main_view.switch_to_panel(Panel::Notes, cx);
+                                    eprintln!("[Shortcut] ViewNotes - switched to Notes panel");
+                                });
+                            }
                         });
                     }
                     ShortcutEvent::OpenMain => {
@@ -164,14 +186,17 @@ fn main() {
 pub struct MainView {
     current_panel: Panel,
     task_panel: Entity<TaskPanel>,
+    note_panel: Entity<NotePanel>,
 }
 
 impl MainView {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let task_panel = cx.new(|cx| TaskPanel::new(store, window, cx));
+        let task_panel = cx.new(|cx| TaskPanel::new(store.clone(), window, cx));
+        let note_panel = cx.new(|cx| NotePanel::new(store, window, cx));
         Self {
             current_panel: Panel::Tasks,
             task_panel,
+            note_panel,
         }
     }
 
@@ -205,6 +230,7 @@ impl Render for MainView {
                     .bg(rgb(0xffffff))  // 白色背景便于看清
                     .child(match self.current_panel {
                         Panel::Tasks => self.task_panel.clone().into_any_element(),
+                        Panel::Notes => self.note_panel.clone().into_any_element(),
                         _ => div().child(format!("{:?} Panel", self.current_panel)).into_any_element(),
                     })
             )

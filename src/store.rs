@@ -13,12 +13,19 @@ pub enum StoreCommand {
         completed: bool,
         respond_to: Sender<Result<Vec<Record>, String>>,
     },
+    GetNotes {
+        respond_to: Sender<Result<Vec<Record>, String>>,
+    },
     CreateRecord {
         record: Record,
         respond_to: Sender<Result<(), String>>,
     },
     UpdateRecord {
         record: Record,
+        respond_to: Sender<Result<(), String>>,
+    },
+    DeleteRecord {
+        id: uuid::Uuid,
         respond_to: Sender<Result<(), String>>,
     },
 }
@@ -59,12 +66,20 @@ impl StoreRuntime {
                     let result = self.handle_get_tasks(completed).await;
                     let _ = respond_to.send(result).await;
                 }
+                StoreCommand::GetNotes { respond_to } => {
+                    let result = self.handle_get_notes().await;
+                    let _ = respond_to.send(result).await;
+                }
                 StoreCommand::CreateRecord { record, respond_to } => {
                     let result = self.handle_create_record(record).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::UpdateRecord { record, respond_to } => {
                     let result = self.handle_update_record(record).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::DeleteRecord { id, respond_to } => {
+                    let result = self.handle_delete_record(id).await;
                     let _ = respond_to.send(result).await;
                 }
             }
@@ -107,6 +122,39 @@ impl StoreRuntime {
         match &self.db {
             Some(db) => db
                 .create_record(&record)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_notes(&self) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] handle_get_notes called");
+        match &self.db {
+            Some(db) => {
+                eprintln!("[Store] Database exists, querying notes...");
+                match db.get_notes() {
+                    Ok(notes) => {
+                        eprintln!("[Store] Found {} notes", notes.len());
+                        Ok(notes)
+                    }
+                    Err(e) => {
+                        eprintln!("[Store] Query failed: {}", e);
+                        Err(format!("Database error: {}", e))
+                    }
+                }
+            }
+            None => {
+                eprintln!("[Store] Database not initialized!");
+                Err("Database not initialized".to_string())
+            }
+        }
+    }
+
+    async fn handle_delete_record(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] handle_delete_record called for id: {}", id);
+        match &self.db {
+            Some(db) => db
+                .delete_record(id)
                 .map_err(|e| format!("Database error: {}", e)),
             None => Err("Database not initialized".to_string()),
         }
@@ -156,6 +204,28 @@ impl Store {
                 record,
                 respond_to: tx,
             })
+            .await;
+        rx.recv().await.unwrap_or_else(|_| Ok(()))
+    }
+
+    pub async fn get_notes(&self) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] get_notes called");
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetNotes { respond_to: tx })
+            .await;
+        let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
+        eprintln!("[Store] get_notes returning: {:?} records", result.as_ref().map(|v| v.len()));
+        result
+    }
+
+    pub async fn delete_record(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] delete_record called for id: {}", id);
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::DeleteRecord { id, respond_to: tx })
             .await;
         rx.recv().await.unwrap_or_else(|_| Ok(()))
     }
