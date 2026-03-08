@@ -5,10 +5,8 @@ use crate::store::Store;
 
 pub struct QuickAddWindow {
     store: Store,
-    title_input: Entity<InputState>,
-    content_input: Option<Entity<InputState>>,
-    _title_subscription: Subscription,
-    _content_subscription: Option<Subscription>,
+    input_state: Entity<InputState>,
+    _subscription: Subscription,
     is_note_mode: bool,
     focus_handle: FocusHandle,
 }
@@ -16,18 +14,18 @@ pub struct QuickAddWindow {
 impl QuickAddWindow {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let title_input = cx.new(|cx| {
+        let input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入任务内容 (Enter 保存, Esc 取消)")
         });
 
-        let _title_subscription = cx.subscribe_in(
-            &title_input,
+        let _subscription = cx.subscribe_in(
+            &input_state,
             window,
-            |this, _state, event: &InputEvent, window, cx| {
+            |this, _state, event: &InputEvent, _window, cx| {
                 match event {
                     InputEvent::PressEnter { .. } => {
-                        this.submit(window, cx);
+                        this.submit(cx);
                     }
                     _ => {}
                 }
@@ -36,10 +34,8 @@ impl QuickAddWindow {
 
         Self {
             store,
-            title_input,
-            content_input: None,
-            _title_subscription,
-            _content_subscription: None,
+            input_state,
+            _subscription,
             is_note_mode: false,
             focus_handle,
         }
@@ -47,39 +43,18 @@ impl QuickAddWindow {
 
     pub fn new_for_note(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let title_input = cx.new(|cx| {
+        let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("笔记标题")
+                .placeholder("输入笔记内容，第一行自动作为标题 (Enter 保存, Esc 取消)")
         });
 
-        let content_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("笔记内容 (Enter 保存, Esc 取消)")
-        });
-
-        let _title_subscription = cx.subscribe_in(
-            &title_input,
+        let _subscription = cx.subscribe_in(
+            &input_state,
             window,
-            |this, _state, event: &InputEvent, window, cx| {
+            |this, _state, event: &InputEvent, _window, cx| {
                 match event {
                     InputEvent::PressEnter { .. } => {
-                        // Move focus to content input
-                        if let Some(ref content) = this.content_input {
-                            content.focus_handle(cx).focus(window, cx);
-                        }
-                    }
-                    _ => {}
-                }
-            },
-        );
-
-        let _content_subscription = cx.subscribe_in(
-            &content_input,
-            window,
-            |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.submit(window, cx);
+                        this.submit(cx);
                     }
                     _ => {}
                 }
@@ -88,16 +63,14 @@ impl QuickAddWindow {
 
         Self {
             store,
-            title_input,
-            content_input: Some(content_input),
-            _title_subscription,
-            _content_subscription: Some(_content_subscription),
+            input_state,
+            _subscription,
             is_note_mode: true,
             focus_handle,
         }
     }
 
-    fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, cx: &mut Context<Self>) {
         if self.is_note_mode {
             self.submit_note(cx);
         } else {
@@ -106,7 +79,7 @@ impl QuickAddWindow {
     }
 
     fn submit_task(&mut self, cx: &mut Context<Self>) {
-        let text = self.title_input.read(cx).text().to_string();
+        let text = self.input_state.read(cx).text().to_string();
         if text.trim().is_empty() {
             return;
         }
@@ -121,29 +94,17 @@ impl QuickAddWindow {
             }
         }).detach();
 
-        // 关闭窗口
         cx.emit(DismissEvent);
     }
 
     fn submit_note(&mut self, cx: &mut Context<Self>) {
-        let title = self.title_input.read(cx).text().to_string();
-        let content = self.content_input.as_ref()
-            .map(|input| input.read(cx).text().to_string())
-            .unwrap_or_default();
-
-        if title.trim().is_empty() && content.trim().is_empty() {
+        let text = self.input_state.read(cx).text().to_string();
+        if text.trim().is_empty() {
             return;
         }
 
-        let note_title = if title.trim().is_empty() {
-            "无标题笔记".to_string()
-        } else {
-            title.trim().to_string()
-        };
-
-        // Combine title and content for storage
-        let full_content = format!("{}\n\n{}", note_title, content);
-        let note = Record::new_note(full_content);
+        // 直接使用输入内容，第一行作为标题是显示时的逻辑
+        let note = Record::new_note(text);
 
         let store = self.store.clone();
         cx.spawn(async move |_view, _cx| {
@@ -152,7 +113,6 @@ impl QuickAddWindow {
             }
         }).detach();
 
-        // 关闭窗口
         cx.emit(DismissEvent);
     }
 }
@@ -166,39 +126,20 @@ impl Focusable for QuickAddWindow {
 }
 
 impl Render for QuickAddWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Request focus when window is rendered
-        self.focus_handle(cx).focus(_window, cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 请求焦点
+        self.focus_handle(cx).focus(window, cx);
 
-        if self.is_note_mode {
-            div()
-                .size_full()
-                .p(px(16.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .track_focus(&self.focus_handle(cx))
-                .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.emit(DismissEvent);
-                    }
-                }))
-                .child(Input::new(&self.title_input))
-                .children(self.content_input.as_ref().map(|input| {
-                    Input::new(input).into_any_element()
-                }))
-        } else {
-            div()
-                .size_full()
-                .p(px(16.0))
-                .track_focus(&self.focus_handle(cx))
-                .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.emit(DismissEvent);
-                    }
-                }))
-                .child(Input::new(&self.title_input))
-        }
+        div()
+            .size_full()
+            .p(px(16.0))
+            .track_focus(&self.focus_handle(cx))
+            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.emit(DismissEvent);
+                }
+            }))
+            .child(Input::new(&self.input_state))
     }
 }
 
