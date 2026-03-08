@@ -24,22 +24,27 @@ impl ShortcutManager {
         // Cmd+N for quick add task
         let hotkey_n = HotKey::new(Some(Modifiers::SUPER), Code::KeyN);
         manager.register(hotkey_n)?;
+        eprintln!("[ShortcutManager] Registered Cmd+N with id: {}", hotkey_n.id());
 
         // Cmd+M for quick add note
         let hotkey_m = HotKey::new(Some(Modifiers::SUPER), Code::KeyM);
         manager.register(hotkey_m)?;
+        eprintln!("[ShortcutManager] Registered Cmd+M with id: {}", hotkey_m.id());
 
         // Cmd+1 for view tasks
         let hotkey_1 = HotKey::new(Some(Modifiers::SUPER), Code::Digit1);
         manager.register(hotkey_1)?;
+        eprintln!("[ShortcutManager] Registered Cmd+1 with id: {}", hotkey_1.id());
 
         // Cmd+2 for view notes
         let hotkey_2 = HotKey::new(Some(Modifiers::SUPER), Code::Digit2);
         manager.register(hotkey_2)?;
+        eprintln!("[ShortcutManager] Registered Cmd+2 with id: {}", hotkey_2.id());
 
         // Cmd+0 for open main
         let hotkey_0 = HotKey::new(Some(Modifiers::SUPER), Code::Digit0);
         manager.register(hotkey_0)?;
+        eprintln!("[ShortcutManager] Registered Cmd+0 with id: {}", hotkey_0.id());
 
         // 启动监听线程
         let tx_clone = tx.clone();

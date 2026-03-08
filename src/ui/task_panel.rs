@@ -180,8 +180,14 @@ impl Render for TaskPanel {
                     .flex()
                     .gap(px(8.0))
                     .child(
-                        Input::new(&self.input_state)
+                        div()
                             .flex_1()
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                                if event.keystroke.key == "enter" {
+                                    this.create_task(window, cx);
+                                }
+                            }))
+                            .child(Input::new(&self.input_state))
                     )
                     .child(
                         Button::new("add-btn")
