@@ -45,10 +45,17 @@ fn main() {
         let main_window_handle: Arc<Mutex<Option<WindowHandle<Root>>>> = Arc::new(Mutex::new(None));
         let main_window_handle_for_shortcuts = main_window_handle.clone();
 
+        // 存储 MainView 实体，用于从快捷键处理器访问
+        let main_view_entity: Arc<Mutex<Option<Entity<MainView>>>> = Arc::new(Mutex::new(None));
+        let main_view_for_window = main_view_entity.clone();
+        let main_view_for_listener = main_view_entity.clone();
+
         // 异步打开窗口
         cx.spawn(async move |cx| {
             let window_handle = cx.open_window(WindowOptions::default(), |window, cx| {
                 let view = cx.new(|cx| MainView::new(store, window, cx));
+                // 保存 MainView 实体引用（克隆一份用于后续访问）
+                *main_view_for_window.lock().unwrap() = Some(view.clone());
                 cx.new(|cx| {
                     gpui_component::Root::new(view, window, cx)
                         .bg(cx.theme().background)
@@ -102,29 +109,47 @@ fn main() {
                     }
                     ShortcutEvent::ViewTasks => {
                         // 激活主窗口并切换到任务面板
-                        let handle = main_window_handle_for_listener.clone();
+                        let window_handle = main_window_handle_for_listener.clone();
+                        let view_entity = main_view_for_listener.clone();
                         let _ = cx.update(|cx| {
-                            if let Some(window_handle) = handle.lock().unwrap().as_ref() {
-                                window_handle.update(cx, |_root, _window, _cx| {
-                                    // Root 包含 MainView，我们需要访问它
-                                    // 由于 Root 是 gpui_component 的类型，我们需要通过其他方式访问
-                                    // 暂时只激活窗口
+                            // 首先激活窗口
+                            if let Some(handle) = window_handle.lock().unwrap().as_ref() {
+                                handle.update(cx, |_root, window, _cx| {
+                                    window.activate_window();
                                     eprintln!("[Shortcut] ViewTasks - window activated");
                                 }).ok();
+                            }
+                            // 然后切换面板
+                            if let Some(entity) = view_entity.lock().unwrap().as_ref() {
+                                cx.update_entity(entity, |main_view, cx| {
+                                    main_view.switch_to_panel(Panel::Tasks, cx);
+                                    eprintln!("[Shortcut] ViewTasks - switched to Tasks panel");
+                                });
                             }
                         });
                     }
                     ShortcutEvent::ViewNotes => {
                         // 激活主窗口并切换到笔记面板（占位符）
-                        eprintln!("[Shortcut] ViewNotes not yet implemented");
+                        let window_handle = main_window_handle_for_listener.clone();
+                        let _ = cx.update(|cx| {
+                            // 首先激活窗口
+                            if let Some(handle) = window_handle.lock().unwrap().as_ref() {
+                                handle.update(cx, |_root, window, _cx| {
+                                    window.activate_window();
+                                    eprintln!("[Shortcut] ViewNotes - window activated");
+                                }).ok();
+                            }
+                            // 笔记面板尚未实现，先记录日志
+                            eprintln!("[Shortcut] ViewNotes - Notes panel not yet implemented");
+                        });
                     }
                     ShortcutEvent::OpenMain => {
                         // 激活主窗口
                         let handle = main_window_handle_for_listener.clone();
                         let _ = cx.update(|cx| {
                             if let Some(window_handle) = handle.lock().unwrap().as_ref() {
-                                window_handle.update(cx, |_root, _window, _cx| {
-                                    // 窗口已激活，无需额外操作
+                                window_handle.update(cx, |_root, window, _cx| {
+                                    window.activate_window();
                                     eprintln!("[Shortcut] OpenMain - window activated");
                                 }).ok();
                             }
@@ -150,7 +175,7 @@ impl MainView {
         }
     }
 
-    pub fn switch_to_panel(&mut self, panel: Panel, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn switch_to_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         eprintln!("[MainView] Switching panel from {:?} to {:?}", self.current_panel, panel);
         self.current_panel = panel;
         cx.notify();
