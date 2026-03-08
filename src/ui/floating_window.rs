@@ -10,10 +10,12 @@ pub struct QuickAddWindow {
     _title_subscription: Subscription,
     _content_subscription: Option<Subscription>,
     is_note_mode: bool,
+    focus_handle: FocusHandle,
 }
 
 impl QuickAddWindow {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
         let title_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入任务内容 (Enter 保存, Esc 取消)")
@@ -39,10 +41,12 @@ impl QuickAddWindow {
             _title_subscription,
             _content_subscription: None,
             is_note_mode: false,
+            focus_handle,
         }
     }
 
     pub fn new_for_note(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
         let title_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("笔记标题")
@@ -89,6 +93,7 @@ impl QuickAddWindow {
             _title_subscription,
             _content_subscription: Some(_content_subscription),
             is_note_mode: true,
+            focus_handle,
         }
     }
 
@@ -154,8 +159,17 @@ impl QuickAddWindow {
 
 impl EventEmitter<DismissEvent> for QuickAddWindow {}
 
+impl Focusable for QuickAddWindow {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for QuickAddWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Request focus when window is rendered
+        self.focus_handle(cx).focus(_window, cx);
+
         if self.is_note_mode {
             div()
                 .size_full()
@@ -163,6 +177,12 @@ impl Render for QuickAddWindow {
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
+                .track_focus(&self.focus_handle(cx))
+                .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.emit(DismissEvent);
+                    }
+                }))
                 .child(Input::new(&self.title_input))
                 .children(self.content_input.as_ref().map(|input| {
                     Input::new(input).into_any_element()
@@ -171,6 +191,12 @@ impl Render for QuickAddWindow {
             div()
                 .size_full()
                 .p(px(16.0))
+                .track_focus(&self.focus_handle(cx))
+                .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.emit(DismissEvent);
+                    }
+                }))
                 .child(Input::new(&self.title_input))
         }
     }
