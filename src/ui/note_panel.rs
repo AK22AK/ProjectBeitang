@@ -1,8 +1,11 @@
 use crate::models::Record;
 use crate::store::Store;
 use gpui::*;
+use gpui::prelude::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
+use gpui_component::InteractiveElementExt;
+use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
 pub struct NotePanel {
@@ -10,6 +13,10 @@ pub struct NotePanel {
     notes: Vec<Record>,
     input_state: Entity<InputState>,
     _subscription: Subscription,
+    // 编辑状态
+    editing_note_id: Option<uuid::Uuid>,
+    edit_input_state: Option<Entity<InputState>>,
+    _edit_subscription: Option<Subscription>,
 }
 
 impl NotePanel {
@@ -37,9 +44,67 @@ impl NotePanel {
             notes: Vec::new(),
             input_state,
             _subscription,
+            editing_note_id: None,
+            edit_input_state: None,
+            _edit_subscription: None,
         };
         panel.load_notes(cx);
         panel
+    }
+
+    fn start_edit(&mut self, note: Record, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_note_id = Some(note.id);
+        let edit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("编辑笔记...")
+        });
+        let content = note.content.clone();
+        edit_input.update(cx, |state, cx| {
+            state.set_value(&content, window, cx);
+        });
+
+        let _edit_subscription = cx.subscribe_in(
+            &edit_input,
+            window,
+            |this, _state, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.save_edit(window, cx);
+                    }
+                    _ => {}
+                }
+            },
+        );
+
+        self.edit_input_state = Some(edit_input);
+        self._edit_subscription = Some(_edit_subscription);
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(note_id) = self.editing_note_id {
+            if let Some(edit_input) = &self.edit_input_state {
+                let new_content = edit_input.read(cx).text().to_string();
+                if let Some(note) = self.notes.iter_mut().find(|n| n.id == note_id) {
+                    note.content = new_content;
+                    let updated_note = note.clone();
+                    let store = self.store.clone();
+                    cx.spawn(async move |_view, _cx| {
+                        if let Err(e) = store.update_record(updated_note).await {
+                            eprintln!("[NotePanel] Failed to update note: {}", e);
+                        }
+                    }).detach();
+                }
+            }
+        }
+        self.cancel_edit(window, cx);
+    }
+
+    fn cancel_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_note_id = None;
+        self.edit_input_state = None;
+        self._edit_subscription = None;
+        cx.notify();
     }
 
     fn load_notes(&mut self, cx: &mut Context<Self>) {
@@ -205,10 +270,34 @@ impl Render for NotePanel {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
                         let note_id = note.id;
+                        let is_editing = self.editing_note_id == Some(note_id);
                         let (title, preview) = Self::parse_note_content(&note.content);
+
+                        if is_editing {
+                            if let Some(ref edit_input) = self.edit_input_state {
+                                let edit_input_clone = edit_input.clone();
+                                return div()
+                                    .id(("edit", idx))
+                                    .flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .px(px(12.0))
+                                    .py(px(8.0))
+                                    .rounded(px(6.0))
+                                    .bg(rgb(0xd0e8ff))
+                                    .child(Input::new(&edit_input_clone).flex_1())
+                                    .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
+                                        this.save_edit(window, cx);
+                                    })))
+                                    .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
+                                        this.cancel_edit(window, cx);
+                                    })))
+                                    .into_any_element();
+                            }
+                        }
 
                         div()
                             .id(idx)
@@ -220,6 +309,13 @@ impl Render for NotePanel {
                             .rounded(px(6.0))
                             .bg(rgb(0xe8e8e8))
                             .text_color(rgb(0x000000))
+                            .cursor_pointer()
+                            .on_double_click(cx.listener({
+                                let note = note.clone();
+                                move |this, _event: &ClickEvent, window, cx| {
+                                    this.start_edit(note.clone(), window, cx);
+                                }
+                            }))
                             .child(
                                 div()
                                     .flex()
@@ -252,6 +348,7 @@ impl Render for NotePanel {
                                     .text_color(rgb(0x444444))
                                     .child(if preview.is_empty() { "...".to_string() } else { preview })
                             )
+                            .into_any_element()
                     }))
             )
     }

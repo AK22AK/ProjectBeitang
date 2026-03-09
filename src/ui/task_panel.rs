@@ -1,9 +1,11 @@
 use crate::models::{Priority, Record};
 use crate::store::Store;
 use gpui::*;
+use gpui::prelude::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
 use gpui_component::InteractiveElementExt;
+use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
 pub struct TaskPanel {
@@ -204,9 +206,14 @@ impl TaskPanel {
         }
     }
 
-    fn complete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+    fn toggle_task_complete(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-            task.complete();
+            // 切换完成状态
+            if task.completed_at.is_some() {
+                task.completed_at = None;
+            } else {
+                task.completed_at = Some(chrono::Utc::now());
+            }
             let updated_task = task.clone();
             let store = self.store.clone();
 
@@ -217,7 +224,7 @@ impl TaskPanel {
                             panel.load_tasks(cx);
                         }).ok();
                     }
-                    Err(e) => eprintln!("Failed to complete task: {}", e),
+                    Err(e) => eprintln!("Failed to toggle task: {}", e),
                 }
             }).detach();
         }
@@ -226,10 +233,90 @@ impl TaskPanel {
 
 impl Render for TaskPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        eprintln!("[TaskPanel] Rendering {} tasks", self.tasks.len());
-        for (i, task) in self.tasks.iter().enumerate() {
-            eprintln!("[TaskPanel] Task {}: content='{}', priority={:?}", i, task.content, task.priority);
-        }
+        // 分离已完成和未完成任务
+        let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = self.tasks.iter()
+            .cloned()
+            .partition(|task| task.completed_at.is_none());
+
+        let pending_count = pending_tasks.len();
+        let completed_count = completed_tasks.len();
+
+        eprintln!("[TaskPanel] Rendering {} pending, {} completed", pending_count, completed_count);
+
+        // 渲染单个任务项的辅助函数
+        let render_task = |task: Record, idx: usize, cx: &mut Context<Self>| {
+            let task_id = task.id;
+            let is_completed = task.completed_at.is_some();
+            let is_editing = self.editing_task_id == Some(task_id);
+            let priority_emoji = match task.priority {
+                Some(Priority::High) => "🔴",
+                Some(Priority::Medium) => "🟡",
+                Some(Priority::Low) => "🟢",
+                None => "⚪",
+            };
+
+            if is_editing {
+                if let Some(ref edit_input) = self.edit_input_state {
+                    let edit_input_clone = edit_input.clone();
+                    return div()
+                        .id(("edit", idx))
+                        .flex()
+                        .gap(px(8.0))
+                        .items_center()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .rounded(px(6.0))
+                        .bg(rgb(0xd0e8ff))
+                        .child(Input::new(&edit_input_clone).flex_1())
+                        .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
+                            this.save_edit(window, cx);
+                        })))
+                        .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
+                            this.cancel_edit(window, cx);
+                        })))
+                        .into_any_element();
+                }
+            }
+
+            div()
+                .id(("task", idx))
+                .flex()
+                .gap(px(8.0))
+                .items_center()
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(6.0))
+                .bg(if is_completed { rgb(0xc8c8c8) } else { rgb(0xe8e8e8) })
+                .text_color(rgb(0x000000))
+                .cursor_pointer()
+                .on_double_click(cx.listener({
+                    let task = task.clone();
+                    move |this, _event: &ClickEvent, window, cx| {
+                        this.start_edit(task.clone(), window, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .child(if is_completed { "☑" } else { "☐" })
+                        .id(("checkbox", idx))
+                        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                            this.toggle_task_complete(task_id, cx);
+                        }))
+                )
+                .child(priority_emoji)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(if is_completed { rgb(0x888888) } else { rgb(0x000000) })
+                        .child(if is_completed {
+                            format!("[已完成] {}", task.content)
+                        } else {
+                            task.content.clone()
+                        })
+                )
+                .into_any_element()
+        };
 
         div()
             .size_full()
@@ -240,7 +327,7 @@ impl Render for TaskPanel {
                 div()
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("任务 ({})", self.tasks.len()))
+                    .child(format!("任务 ({} 待办 / {} 已完成)", pending_count, completed_count))
             )
             .child(
                 div()
@@ -270,87 +357,51 @@ impl Render for TaskPanel {
                     .text_color(rgb(0x888888))
                     .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入为低优先级")
             )
+            // 待办任务区域
             .child(
                 div()
-                    .id("task-list")
                     .flex_1()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .overflow_y_scroll()
-                    .children(self.tasks.clone().into_iter().enumerate().map(|(idx, task)| {
-                        let task_id = task.id;
-                        let is_completed = task.is_completed();
-                        let is_editing = self.editing_task_id == Some(task_id);
-                        let priority_emoji = match task.priority {
-                            Some(Priority::High) => "🔴",
-                            Some(Priority::Medium) => "🟡",
-                            Some(Priority::Low) => "🟢",
-                            None => "⚪",
-                        };
+                    .overflow_y_scrollbar()
+                    .children({
+                        let mut elements: Vec<AnyElement> = Vec::new();
 
-                        if is_editing {
-                            // 编辑模式：显示输入框
-                            if let Some(ref edit_input) = self.edit_input_state {
-                                let edit_input_clone = edit_input.clone();
-                                return div()
-                                    .id(idx)
-                                    .flex()
-                                    .gap(px(8.0))
-                                    .items_center()
-                                    .px(px(12.0))
-                                    .py(px(8.0))
-                                    .rounded(px(6.0))
-                                    .bg(rgb(0xd0e8ff))
-                                    .child(Input::new(&edit_input_clone).flex_1())
-                                    .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
-                                        this.save_edit(window, cx);
-                                    })))
-                                    .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
-                                        this.cancel_edit(window, cx);
-                                    })))
-                                    .into_any_element();
+                        // 待办任务标题
+                        if pending_count > 0 {
+                            elements.push(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x666666))
+                                    .child(format!("待办任务 ({})", pending_count))
+                                    .into_any_element()
+                            );
+                            // 待办任务列表
+                            for (idx, task) in pending_tasks.iter().cloned().enumerate() {
+                                elements.push(render_task(task, idx, cx));
                             }
                         }
 
-                        // 普通模式：显示任务
-                        div()
-                            .id(idx)
-                            .flex()
-                            .gap(px(8.0))
-                            .items_center()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0xe8e8e8))
-                            .text_color(rgb(0x000000))
-                            .cursor_pointer()
-                            .on_double_click(cx.listener({
-                                let task_for_edit = task.clone();
-                                move |this, _event: &ClickEvent, window, cx| {
-                                    this.start_edit(task_for_edit.clone(), window, cx);
-                                }
-                            }))
-                            .child(
+                        // 已完成任务标题和列表
+                        if completed_count > 0 {
+                            elements.push(
                                 div()
-                                    .cursor_pointer()
-                                    .child(if is_completed { "☑" } else { "☐" })
-                                    .id(("checkbox", idx))
-                                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                        if !is_completed {
-                                            this.complete_task(task_id, cx);
-                                        }
-                                    }))
-                            )
-                            .child(priority_emoji)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_color(rgb(0x000000))
-                                    .child(task.content.clone())
-                            )
-                            .into_any_element()
-                    }))
+                                    .mt(px(16.0))
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x999999))
+                                    .child(format!("已完成 ({})", completed_count))
+                                    .into_any_element()
+                            );
+                            for (idx, task) in completed_tasks.iter().cloned().enumerate() {
+                                elements.push(render_task(task, idx, cx));
+                            }
+                        }
+
+                        elements
+                    })
             )
     }
 }
