@@ -95,9 +95,6 @@ impl Render for MainView {
         // 获取 store 用于快捷键打开浮动窗口
         let store_for_shortcut = self.store.clone();
 
-        // 每次渲染时确保主视图有焦点，以便捕获键盘事件
-        self.focus_handle(cx).focus(_window, cx);
-
         div()
             .size_full()
             .flex()
