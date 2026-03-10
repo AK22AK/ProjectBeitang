@@ -366,7 +366,7 @@ impl Render for TaskPanel {
         };
 
         div()
-            .size_full()
+            .flex_1()
             .flex()
             .flex_col()
             .gap(px(16.0))
@@ -407,6 +407,7 @@ impl Render for TaskPanel {
             // 待办任务区域
             .child(
                 div()
+                    .id("task-list")
                     .flex_1()
                     .flex()
                     .flex_col()

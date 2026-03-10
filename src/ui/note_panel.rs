@@ -229,7 +229,7 @@ impl Render for NotePanel {
         eprintln!("[NotePanel] Rendering {} notes", self.notes.len());
 
         div()
-            .size_full()
+            .flex_1()
             .flex()
             .flex_col()
             .gap(px(16.0))

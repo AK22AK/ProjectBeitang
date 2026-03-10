@@ -255,6 +255,9 @@ impl Render for MainView {
             .child(
                 div()
                     .flex_1()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
                     .p(px(24.0))
                     .bg(rgb(0xffffff))  // 白色背景便于看清
                     .child(match self.current_panel {
