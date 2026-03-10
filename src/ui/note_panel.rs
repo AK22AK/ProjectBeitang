@@ -278,6 +278,7 @@ impl Render for NotePanel {
                             .flex()
                             .flex_col()
                             .gap(px(8.0))
+                            .pr(px(16.0))
                             .overflow_y_scrollbar()
                             .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
                         let note_id = note.id;

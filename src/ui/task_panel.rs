@@ -416,6 +416,7 @@ impl Render for TaskPanel {
                             .flex()
                             .flex_col()
                             .gap(px(8.0))
+                            .pr(px(16.0))
                             .overflow_y_scrollbar()
                             .children({
                                 let mut elements: Vec<AnyElement> = Vec::new();
