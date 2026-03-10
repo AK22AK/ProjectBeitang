@@ -8,6 +8,9 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_platform::application;
 
+use std::rc::Rc;
+use std::cell::RefCell;
+
 fn main() {
     let app = application();
 
@@ -15,14 +18,16 @@ fn main() {
     let (store, mut runtime) = create_store();
     
     let store_for_main = store.clone();
-    let store_for_reopen = store.clone();
     let store_for_hotkey = store.clone();
 
-    let mut main_window_for_reopen: Option<AnyWindowHandle> = None;
+    let main_window_handle: Rc<RefCell<Option<AnyWindowHandle>>> = Rc::new(RefCell::new(None));
+    
+    let main_window_for_reopen = main_window_handle.clone();
+    let store_for_reopen = store.clone();
     
     app.on_reopen(move |cx| {
         let mut needs_open = true;
-        if let Some(handle) = main_window_for_reopen.as_ref() {
+        if let Some(handle) = main_window_for_reopen.borrow().as_ref() {
             if handle.update(cx, |_, window, _| {
                 window.activate_window();
             }).is_ok() {
@@ -31,10 +36,12 @@ fn main() {
         }
         
         if needs_open {
-            main_window_for_reopen = open_main_window(cx, store_for_reopen.clone()).ok();
+            let new_handle = open_main_window(cx, store_for_reopen.clone()).ok();
+            *main_window_for_reopen.borrow_mut() = new_handle;
         }
     });
 
+    let main_window_for_run = main_window_handle.clone();
     app.run(move |cx| {
         // 初始化 gpui-component
         gpui_component::init(cx);
@@ -55,7 +62,8 @@ fn main() {
 
         // 异步打开原始的主窗口
         let store_local = store_for_main.clone();
-        let _main_handle = open_main_window(cx, store_local).ok();
+        let handle = open_main_window(cx, store_local).ok();
+        *main_window_for_run.borrow_mut() = handle;
         // 这里只是为了初始显示，真正的持久句柄由 on_reopen 闭包持有（如果能共用更好，但由于 cx 借用限制，先让 initial 打开）
         // 如果想让 initial 窗口也能被 Dock 激活，需要更复杂的同步。先解决 Dock 点击能开窗的问题。
 
