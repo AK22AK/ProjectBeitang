@@ -1,10 +1,8 @@
 use crate::models::Record;
 use crate::store::Store;
 use gpui::*;
-use gpui::prelude::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
-use gpui_component::InteractiveElementExt;
 use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
@@ -309,13 +307,6 @@ impl Render for NotePanel {
                             .rounded(px(6.0))
                             .bg(rgb(0xe8e8e8))
                             .text_color(rgb(0x000000))
-                            .cursor_pointer()
-                            .on_double_click(cx.listener({
-                                let note = note.clone();
-                                move |this, _event: &ClickEvent, window, cx| {
-                                    this.start_edit(note.clone(), window, cx);
-                                }
-                            }))
                             .child(
                                 div()
                                     .flex()
@@ -333,13 +324,36 @@ impl Render for NotePanel {
                                     )
                                     .child(
                                         div()
-                                            .cursor_pointer()
-                                            .text_color(rgb(0x888888))
-                                            .child("×")
-                                            .id(("delete", idx))
-                                            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                                this.delete_note(note_id, cx);
-                                            }))
+                                            .flex()
+                                            .gap(px(4.0))
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .px(px(4.0))
+                                                    .text_color(rgb(0x888888))
+                                                    .hover(|style| style.text_color(rgb(0x1890ff)))
+                                                    .child("✎")
+                                                    .id(("edit", idx))
+                                                    .on_click(cx.listener({
+                                                        let note = note.clone();
+                                                        move |this, _event: &ClickEvent, window, cx| {
+                                                            this.start_edit(note.clone(), window, cx);
+                                                        }
+                                                    }))
+                                            )
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .px(px(4.0))
+                                                    .text_color(rgb(0x888888))
+                                                    .hover(|style| style.text_color(rgb(0xff4d4f)))
+                                                    .child("×")
+                                                    .id(("delete", idx))
+                                                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                                        this.delete_note(note_id, cx);
+                                                    }))
+                                            )
                                     )
                             )
                             .child(

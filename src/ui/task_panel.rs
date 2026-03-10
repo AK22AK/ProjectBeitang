@@ -1,10 +1,8 @@
 use crate::models::{Priority, Record};
 use crate::store::Store;
 use gpui::*;
-use gpui::prelude::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
-use gpui_component::InteractiveElementExt;
 use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
@@ -299,13 +297,6 @@ impl Render for TaskPanel {
                 .rounded(px(6.0))
                 .bg(if is_completed { rgb(0xc8c8c8) } else { rgb(0xe8e8e8) })
                 .text_color(rgb(0x000000))
-                .cursor_pointer()
-                .on_double_click(cx.listener({
-                    let task = task.clone();
-                    move |this, _event: &ClickEvent, window, cx| {
-                        this.start_edit(task.clone(), window, cx);
-                    }
-                }))
                 .child(
                     div()
                         .cursor_pointer()
@@ -328,18 +319,39 @@ impl Render for TaskPanel {
                 )
                 .child(
                     div()
-                        .cursor_pointer()
-                        .px(px(4.0))
-                        .text_color(rgb(0xff4d4f))
-                        .hover(|style| style.text_color(rgb(0xff7875)))
-                        .child("✗")
-                        .id(("delete_btn", idx))
-                        .on_click(cx.listener({
-                            let task_id = task_id;
-                            move |this, _event: &ClickEvent, _window, cx| {
-                                this.delete_task(task_id, cx);
-                            }
-                        }))
+                        .flex()
+                        .gap(px(4.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .px(px(4.0))
+                                .text_color(rgb(0x888888))
+                                .hover(|style| style.text_color(rgb(0x1890ff)))
+                                .child("✎")
+                                .id(("edit_btn", idx))
+                                .on_click(cx.listener({
+                                    let task = task.clone();
+                                    move |this, _event: &ClickEvent, window, cx| {
+                                        this.start_edit(task.clone(), window, cx);
+                                    }
+                                }))
+                        )
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .px(px(4.0))
+                                .text_color(rgb(0xff4d4f))
+                                .hover(|style| style.text_color(rgb(0xff7875)))
+                                .child("✗")
+                                .id(("delete_btn", idx))
+                                .on_click(cx.listener({
+                                    let task_id = task_id;
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        this.delete_task(task_id, cx);
+                                    }
+                                }))
+                        )
                 )
                 .into_any_element()
         };
@@ -422,7 +434,7 @@ impl Render for TaskPanel {
                                     .into_any_element()
                             );
                             for (idx, task) in completed_tasks.iter().cloned().enumerate() {
-                                elements.push(render_task(task, idx, cx));
+                                elements.push(render_task(task, pending_count + idx, cx));
                             }
                         }
 
