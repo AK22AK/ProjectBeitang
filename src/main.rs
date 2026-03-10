@@ -151,13 +151,22 @@ fn main() {
 }
 
 fn open_main_window(cx: &mut App, store: Store) -> Result<AnyWindowHandle> {
-    cx.open_window(WindowOptions::default(), |window, cx| {
-        let view = cx.new(|cx| MainView::new(store, window, cx));
-        cx.new(|cx| {
-            gpui_component::Root::new(view, window, cx)
-                .bg(cx.theme().background)
-        })
-    }).map(|h| h.into())
+    let window_size = size(px(900.0), px(600.0));
+    let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
+    
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(window_bounds),
+            ..Default::default()
+        },
+        |window, cx| {
+            let view = cx.new(|cx| MainView::new(store, window, cx));
+            cx.new(|cx| {
+                gpui_component::Root::new(view, window, cx)
+                    .bg(cx.theme().background)
+            })
+        },
+    ).map(|h| h.into())
 }
 
 pub struct MainView {
