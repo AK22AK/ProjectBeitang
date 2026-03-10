@@ -146,10 +146,10 @@ impl Render for QuickAddWindow {
 // 简化的优先级解析
 fn parse_quick_input(input: &str) -> (String, Priority) {
     let trimmed = input.trim();
-    if trimmed.starts_with("!!") {
-        (trimmed[2..].trim_start().to_string(), Priority::High)
-    } else if trimmed.starts_with("!") {
-        (trimmed[1..].trim_start().to_string(), Priority::Medium)
+    if let Some(rest) = trimmed.strip_prefix("!!").or_else(|| trimmed.strip_prefix("！！")) {
+        (rest.trim_start().to_string(), Priority::High)
+    } else if let Some(rest) = trimmed.strip_prefix("!").or_else(|| trimmed.strip_prefix("！")) {
+        (rest.trim_start().to_string(), Priority::Medium)
     } else {
         (trimmed.to_string(), Priority::Low)
     }

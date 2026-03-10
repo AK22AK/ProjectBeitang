@@ -122,7 +122,11 @@ impl Render for MainView {
                                     ..Default::default()
                                 },
                                 |window, cx| {
-                                    cx.new(|cx| QuickAddWindow::new(store, window, cx))
+                                    let view = cx.new(|cx| QuickAddWindow::new(store, window, cx));
+                                    cx.new(|cx| {
+                                        gpui_component::Root::new(view, window, cx)
+                                            .bg(cx.theme().background)
+                                    })
                                 },
                             ).ok();
                         }
@@ -136,7 +140,11 @@ impl Render for MainView {
                                     ..Default::default()
                                 },
                                 |window, cx| {
-                                    cx.new(|cx| QuickAddWindow::new_for_note(store, window, cx))
+                                    let view = cx.new(|cx| QuickAddWindow::new_for_note(store, window, cx));
+                                    cx.new(|cx| {
+                                        gpui_component::Root::new(view, window, cx)
+                                            .bg(cx.theme().background)
+                                    })
                                 },
                             ).ok();
                         }

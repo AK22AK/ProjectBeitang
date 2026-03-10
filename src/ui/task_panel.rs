@@ -193,14 +193,10 @@ impl TaskPanel {
     // 提取为静态方法便于测试
     fn parse_input_static(input: &str) -> (String, Priority) {
         let trimmed = input.trim();
-        if trimmed.starts_with("!!") {
-            // 高优先级：!! 或 !!空格
-            let content = trimmed[2..].trim_start();
-            (content.to_string(), Priority::High)
-        } else if trimmed.starts_with("!") {
-            // 普通优先级：! 或 !空格
-            let content = trimmed[1..].trim_start();
-            (content.to_string(), Priority::Medium)
+        if let Some(rest) = trimmed.strip_prefix("!!").or_else(|| trimmed.strip_prefix("！！")) {
+            (rest.trim_start().to_string(), Priority::High)
+        } else if let Some(rest) = trimmed.strip_prefix("!").or_else(|| trimmed.strip_prefix("！")) {
+            (rest.trim_start().to_string(), Priority::Medium)
         } else {
             (trimmed.to_string(), Priority::Low)
         }
