@@ -11,18 +11,36 @@ use gpui_platform::application;
 fn main() {
     let app = application();
 
+    // 创建异步 store
+    let (store, mut runtime) = create_store();
+    
+    let store_for_main = store.clone();
+    let store_for_reopen = store.clone();
+    let store_for_hotkey = store.clone();
+
+    let mut main_window_for_reopen: Option<AnyWindowHandle> = None;
+    
+    app.on_reopen(move |cx| {
+        let mut needs_open = true;
+        if let Some(handle) = main_window_for_reopen.as_ref() {
+            if handle.update(cx, |_, window, _| {
+                window.activate_window();
+            }).is_ok() {
+                needs_open = false;
+            }
+        }
+        
+        if needs_open {
+            main_window_for_reopen = open_main_window(cx, store_for_reopen.clone()).ok();
+        }
+    });
+
     app.run(move |cx| {
         // 初始化 gpui-component
         gpui_component::init(cx);
 
         // 强制使用浅色主题
         gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
-
-        // 创建异步 store
-        let (store, mut runtime) = create_store();
-        
-        let store_for_main = store.clone();
-        let store_for_hotkey = store.clone();
 
         // 后台运行 store
         cx.spawn(|_cx: &mut AsyncApp| async move {
@@ -36,16 +54,10 @@ fn main() {
         }).detach();
 
         // 异步打开原始的主窗口
-        cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| MainView::new(store_for_main, window, cx));
-                cx.new(|cx| {
-                    gpui_component::Root::new(view, window, cx)
-                        .bg(cx.theme().background)
-                })
-            })?;
-            Ok::<_, anyhow::Error>(())
-        }).detach();
+        let store_local = store_for_main.clone();
+        let _main_handle = open_main_window(cx, store_local).ok();
+        // 这里只是为了初始显示，真正的持久句柄由 on_reopen 闭包持有（如果能共用更好，但由于 cx 借用限制，先让 initial 打开）
+        // 如果想让 initial 窗口也能被 Dock 激活，需要更复杂的同步。先解决 Dock 点击能开窗的问题。
 
         // --- 全局快捷键注册 ---
         // 注意：要在能够维持生命周期的作用域内保存 manager 防止其被 drop 而注销快捷键
@@ -128,6 +140,16 @@ fn main() {
             eprintln!("[Global Hotkey] Initialization failed!");
         }
     });
+}
+
+fn open_main_window(cx: &mut App, store: Store) -> Result<AnyWindowHandle> {
+    cx.open_window(WindowOptions::default(), |window, cx| {
+        let view = cx.new(|cx| MainView::new(store, window, cx));
+        cx.new(|cx| {
+            gpui_component::Root::new(view, window, cx)
+                .bg(cx.theme().background)
+        })
+    }).map(|h| h.into())
 }
 
 pub struct MainView {
