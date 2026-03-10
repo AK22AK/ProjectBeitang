@@ -225,6 +225,21 @@ impl TaskPanel {
             }).detach();
         }
     }
+
+    fn delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        
+        cx.spawn(async move |view, cx| {
+            match store.delete_record(task_id).await {
+                Ok(_) => {
+                    view.update(cx, |panel, cx| {
+                        panel.load_tasks(cx);
+                    }).ok();
+                }
+                Err(e) => eprintln!("Failed to delete task: {}", e),
+            }
+        }).detach();
+    }
 }
 
 impl Render for TaskPanel {
@@ -310,6 +325,21 @@ impl Render for TaskPanel {
                         } else {
                             task.content.clone()
                         })
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px(px(4.0))
+                        .text_color(rgb(0xff4d4f))
+                        .hover(|style| style.text_color(rgb(0xff7875)))
+                        .child("✗")
+                        .id(("delete_btn", idx))
+                        .on_click(cx.listener({
+                            let task_id = task_id;
+                            move |this, _event: &ClickEvent, _window, cx| {
+                                this.delete_task(task_id, cx);
+                            }
+                        }))
                 )
                 .into_any_element()
         };
