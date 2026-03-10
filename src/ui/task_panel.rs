@@ -366,7 +366,7 @@ impl Render for TaskPanel {
         };
 
         div()
-            .flex_1()
+            .size_full()
             .flex()
             .flex_col()
             .gap(px(16.0))
@@ -407,14 +407,18 @@ impl Render for TaskPanel {
             // 待办任务区域
             .child(
                 div()
-                    .id("task-list")
                     .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .overflow_y_scrollbar()
-                    .children({
-                        let mut elements: Vec<AnyElement> = Vec::new();
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("task-list")
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .overflow_y_scrollbar()
+                            .children({
+                                let mut elements: Vec<AnyElement> = Vec::new();
 
                         // 待办任务标题
                         if pending_count > 0 {
@@ -469,5 +473,6 @@ impl Render for TaskPanel {
                         elements
                     })
             )
+        )
     }
 }

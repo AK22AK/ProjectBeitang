@@ -229,7 +229,7 @@ impl Render for NotePanel {
         eprintln!("[NotePanel] Rendering {} notes", self.notes.len());
 
         div()
-            .flex_1()
+            .size_full()
             .flex()
             .flex_col()
             .gap(px(16.0))
@@ -269,13 +269,17 @@ impl Render for NotePanel {
             )
             .child(
                 div()
-                    .id("note-list")
                     .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .overflow_y_scrollbar()
-                    .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("note-list")
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .overflow_y_scrollbar()
+                            .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
                         let note_id = note.id;
                         let is_editing = self.editing_note_id == Some(note_id);
                         let (title, preview) = Self::parse_note_content(&note.content);
@@ -370,6 +374,7 @@ impl Render for NotePanel {
                             )
                             .into_any_element()
                     }))
+                )
             )
     }
 }
