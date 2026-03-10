@@ -15,6 +15,7 @@ pub struct TaskPanel {
     editing_task_id: Option<uuid::Uuid>,
     edit_input_state: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
+    _window_activation_subscription: Subscription,
     // 显示状态
     show_completed: bool,
 }
@@ -47,6 +48,11 @@ impl TaskPanel {
             editing_task_id: None,
             edit_input_state: None,
             _edit_subscription: None,
+            _window_activation_subscription: cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.load_tasks(cx);
+                }
+            }),
             show_completed: false,
         };
         panel.load_tasks(cx);

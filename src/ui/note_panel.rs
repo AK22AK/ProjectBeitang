@@ -15,6 +15,7 @@ pub struct NotePanel {
     editing_note_id: Option<uuid::Uuid>,
     edit_input_state: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
+    _window_activation_subscription: Subscription,
 }
 
 impl NotePanel {
@@ -45,6 +46,11 @@ impl NotePanel {
             editing_note_id: None,
             edit_input_state: None,
             _edit_subscription: None,
+            _window_activation_subscription: cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.load_notes(cx);
+                }
+            }),
         };
         panel.load_notes(cx);
         panel
