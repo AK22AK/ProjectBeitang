@@ -15,6 +15,8 @@ pub struct TaskPanel {
     editing_task_id: Option<uuid::Uuid>,
     edit_input_state: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
+    // 显示状态
+    show_completed: bool,
 }
 
 impl TaskPanel {
@@ -45,6 +47,7 @@ impl TaskPanel {
             editing_task_id: None,
             edit_input_state: None,
             _edit_subscription: None,
+            show_completed: false,
         };
         panel.load_tasks(cx);
         panel
@@ -426,15 +429,33 @@ impl Render for TaskPanel {
                         if completed_count > 0 {
                             elements.push(
                                 div()
+                                    .id("completed-header")
                                     .mt(px(16.0))
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x999999))
-                                    .child(format!("已完成 ({})", completed_count))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                        this.show_completed = !this.show_completed;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0x999999))
+                                                    .child(format!("{} 已完成 ({})", if self.show_completed { "▼" } else { "▶" }, completed_count))
+                                            )
+                                    )
                                     .into_any_element()
                             );
-                            for (idx, task) in completed_tasks.iter().cloned().enumerate() {
-                                elements.push(render_task(task, pending_count + idx, cx));
+                            
+                            if self.show_completed {
+                                for (idx, task) in completed_tasks.iter().cloned().enumerate() {
+                                    elements.push(render_task(task, pending_count + idx, cx));
+                                }
                             }
                         }
 
