@@ -3,6 +3,7 @@ use beitang::ui::sidebar::{Panel, Sidebar};
 use beitang::ui::task_panel::TaskPanel;
 use beitang::ui::note_panel::NotePanel;
 use beitang::ui::floating_window::QuickAddWindow;
+use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_platform::application;
@@ -19,6 +20,9 @@ fn main() {
 
         // 创建异步 store
         let (store, mut runtime) = create_store();
+        
+        let store_for_main = store.clone();
+        let store_for_hotkey = store.clone();
 
         // 后台运行 store
         cx.spawn(|_cx: &mut AsyncApp| async move {
@@ -31,10 +35,10 @@ fn main() {
             runtime.run(db_path).await;
         }).detach();
 
-        // 异步打开窗口
+        // 异步打开原始的主窗口
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| MainView::new(store, window, cx));
+                let view = cx.new(|cx| MainView::new(store_for_main, window, cx));
                 cx.new(|cx| {
                     gpui_component::Root::new(view, window, cx)
                         .bg(cx.theme().background)
@@ -42,6 +46,87 @@ fn main() {
             })?;
             Ok::<_, anyhow::Error>(())
         }).detach();
+
+        // --- 全局快捷键注册 ---
+        // 注意：要在能够维持生命周期的作用域内保存 manager 防止其被 drop 而注销快捷键
+        if let Ok(manager) = GlobalHotKeyManager::new() {
+            let hotkey = HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyT); // Cmd+Shift+T
+            if let Err(e) = manager.register(hotkey) {
+                eprintln!("[Global Hotkey] Failed to register: {}", e);
+            } else {
+                eprintln!("[Global Hotkey] Registered Cmd+Shift+T");
+                
+                let store_for_hotkey = store_for_hotkey.clone();
+                cx.spawn(async move |cx| {
+                    // 持有 manager，保证热键生效
+                    let _manager = manager;
+                    let receiver = GlobalHotKeyEvent::receiver();
+                    let mut quick_add_window: Option<gpui::AnyWindowHandle> = None;
+                    
+                    loop {
+                        if let Ok(event) = receiver.try_recv() {
+                            if event.id == hotkey.id() && event.state == HotKeyState::Released {
+                                // 使用 update 跳到了由 App context 支持的主线程环境
+                                cx.update(|cx| {
+                                    let was_active = cx.active_window().is_some();
+                                    
+                                    // 唤醒当前应用使其成为屏幕前置焦点
+                                    cx.activate(true);
+                                    
+                                    let mut closed_existing = false;
+                                    if let Some(handle) = quick_add_window.take() {
+                                        if handle.update(cx, |_, window, _| {
+                                            window.remove_window();
+                                        }).is_ok() {
+                                            closed_existing = true;
+                                            // 如果是重新 toggle 关掉，并且应用原本不在前台，一并隐藏整个应用
+                                            if !was_active {
+                                                cx.hide();
+                                            }
+                                        }
+                                    }
+                                    
+                                    if !closed_existing {
+                                        let store = store_for_hotkey.clone();
+                                        
+                                        // 预置一个小窗大小
+                                        let window_size = size(px(400.0), px(80.0));
+                                        let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
+                                        
+                                        if let Ok(handle) = cx.open_window(
+                                            WindowOptions {
+                                                window_bounds: Some(window_bounds),
+                                                ..Default::default()
+                                            },
+                                            |window, cx| {
+                                                let view = cx.new(|cx| {
+                                                    let mut view = QuickAddWindow::new(store, window, cx);
+                                                    view.hide_app_on_close = !was_active;
+                                                    view
+                                                });
+                                                cx.new(|cx| {
+                                                    gpui_component::Root::new(view, window, cx)
+                                                        .bg(cx.theme().background)
+                                                })
+                                            },
+                                        ) {
+                                            quick_add_window = Some(handle.into());
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        
+                        // 定期检查（这里 GPUI 的 async timer 最好基于 background_executor）
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                    }
+                }).detach();
+            }
+        } else {
+            eprintln!("[Global Hotkey] Initialization failed!");
+        }
     });
 }
 

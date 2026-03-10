@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Escape};
 use crate::models::{Priority, Record};
 use crate::store::Store;
 
@@ -9,6 +9,7 @@ pub struct QuickAddWindow {
     _subscription: Subscription,
     is_note_mode: bool,
     focus_handle: FocusHandle,
+    pub hide_app_on_close: bool,
 }
 
 impl QuickAddWindow {
@@ -22,10 +23,15 @@ impl QuickAddWindow {
         let _subscription = cx.subscribe_in(
             &input_state,
             window,
-            |this, _state, event: &InputEvent, _window, cx| {
+            |this, _state, event: &InputEvent, window, cx| {
                 match event {
                     InputEvent::PressEnter { .. } => {
                         this.submit(cx);
+                        let hide = this.hide_app_on_close;
+                        window.remove_window();
+                        if hide {
+                            cx.hide();
+                        }
                     }
                     _ => {}
                 }
@@ -38,6 +44,7 @@ impl QuickAddWindow {
             _subscription,
             is_note_mode: false,
             focus_handle,
+            hide_app_on_close: false,
         }
     }
 
@@ -51,10 +58,15 @@ impl QuickAddWindow {
         let _subscription = cx.subscribe_in(
             &input_state,
             window,
-            |this, _state, event: &InputEvent, _window, cx| {
+            |this, _state, event: &InputEvent, window, cx| {
                 match event {
                     InputEvent::PressEnter { .. } => {
                         this.submit(cx);
+                        let hide = this.hide_app_on_close;
+                        window.remove_window();
+                        if hide {
+                            cx.hide();
+                        }
                     }
                     _ => {}
                 }
@@ -67,6 +79,7 @@ impl QuickAddWindow {
             _subscription,
             is_note_mode: true,
             focus_handle,
+            hide_app_on_close: false,
         }
     }
 
@@ -127,16 +140,18 @@ impl Focusable for QuickAddWindow {
 
 impl Render for QuickAddWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 请求焦点
-        self.focus_handle(cx).focus(window, cx);
+        // 将焦点直接赋予给文本输入框
+        self.input_state.update(cx, |input, cx| input.focus(window, cx));
 
         div()
             .size_full()
             .p(px(16.0))
             .track_focus(&self.focus_handle(cx))
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.emit(DismissEvent);
+            .on_action(cx.listener(|this, _action: &Escape, window, cx| {
+                let hide = this.hide_app_on_close;
+                window.remove_window();
+                if hide {
+                    cx.hide();
                 }
             }))
             .child(Input::new(&self.input_state))
