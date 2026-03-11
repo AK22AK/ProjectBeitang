@@ -29,11 +29,8 @@ impl NotePanel {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.create_note(window, cx);
-                    }
-                    _ => {}
+                if let InputEvent::PressEnter { .. } = event {
+                    this.create_note(window, cx);
                 }
             },
         );
@@ -62,7 +59,8 @@ impl NotePanel {
             InputState::new(window, cx)
                 .placeholder("编辑笔记...")
         });
-        let content = note.content.clone();
+        // 将内容中的换行符替换为空格，避免 gpui_component::input::Input 遇到换行符时 crash
+        let content = note.content.replace('\n', " ");
         edit_input.update(cx, |state, cx| {
             state.set_value(&content, window, cx);
         });
@@ -71,11 +69,8 @@ impl NotePanel {
             &edit_input,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.save_edit(window, cx);
-                    }
-                    _ => {}
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_edit(window, cx);
                 }
             },
         );
@@ -369,9 +364,21 @@ impl Render for NotePanel {
                             )
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(rgb(0x444444))
-                                    .child(if preview.is_empty() { "...".to_string() } else { preview })
+                                    .flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0x444444))
+                                            .child(if preview.is_empty() { "...".to_string() } else { preview })
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x999999))
+                                            .child(format!("创建于: {}", note.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
+                                    )
                             )
                             .into_any_element()
                     }))

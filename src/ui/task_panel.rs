@@ -31,11 +31,8 @@ impl TaskPanel {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.create_task(window, cx);
-                    }
-                    _ => {}
+                if let InputEvent::PressEnter { .. } = event {
+                    this.create_task(window, cx);
                 }
             },
         );
@@ -75,11 +72,8 @@ impl TaskPanel {
             &edit_input,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.save_edit(window, cx);
-                    }
-                    _ => {}
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_edit(window, cx);
                 }
             },
         );
@@ -319,12 +313,39 @@ impl Render for TaskPanel {
                 .child(
                     div()
                         .flex_1()
-                        .text_color(if is_completed { rgb(0x888888) } else { rgb(0x000000) })
-                        .child(if is_completed {
-                            format!("[已完成] {}", task.content)
-                        } else {
-                            task.content.clone()
-                        })
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_color(if is_completed { rgb(0x888888) } else { rgb(0x000000) })
+                                .child(if is_completed {
+                                    format!("[已完成] {}", task.content)
+                                } else {
+                                    task.content.clone()
+                                })
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .text_color(rgb(0x999999))
+                                .text_xs()
+                                .child(format!("创建于: {}", task.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
+                                .children(task.scheduled_for.map(|t| {
+                                    div()
+                                        .text_color(rgb(0x1890ff))
+                                        .child(format!("📅 计划: {}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
+                                }))
+                                .children(task.due_date.map(|t| {
+                                    div()
+                                        .text_color(rgb(0xff4d4f))
+                                        .child(format!("⏰ 截止: {}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
+                                }))
+                                .children(task.completed_at.map(|t| {
+                                    div()
+                                        .text_color(rgb(0x52c41a))
+                                        .child(format!("✓ 完成于: {}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
+                                }))
+                        )
                 )
                 .child(
                     div()
@@ -355,7 +376,6 @@ impl Render for TaskPanel {
                                 .child("✗")
                                 .id(("delete_btn", idx))
                                 .on_click(cx.listener({
-                                    let task_id = task_id;
                                     move |this, _event: &ClickEvent, _window, cx| {
                                         this.delete_task(task_id, cx);
                                     }

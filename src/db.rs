@@ -23,10 +23,15 @@ impl Database {
                 priority INTEGER,
                 created_at TEXT NOT NULL,
                 completed_at TEXT,
+                scheduled_for TEXT,
+                due_date TEXT,
                 record_type TEXT NOT NULL
             )",
             [],
         )?;
+        // Graceful migrations for existing DBs
+        let _ = self.conn.execute("ALTER TABLE records ADD COLUMN scheduled_for TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE records ADD COLUMN due_date TEXT", []);
         Ok(())
     }
 
@@ -47,18 +52,22 @@ impl Database {
                   record.id, record.content, priority_val);
 
         self.conn.execute(
-            "INSERT INTO records (id, content, priority, created_at, completed_at, record_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO records (id, content, priority, created_at, completed_at, scheduled_for, due_date, record_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 priority = excluded.priority,
-                completed_at = excluded.completed_at",
+                completed_at = excluded.completed_at,
+                scheduled_for = excluded.scheduled_for,
+                due_date = excluded.due_date",
             [
                 &record.id.to_string() as &dyn rusqlite::ToSql,
                 &record.content as &dyn rusqlite::ToSql,
                 &priority_val as &dyn rusqlite::ToSql,  // 直接传递 Option<i64>，None 会成为 NULL
                 &record.created_at.to_rfc3339() as &dyn rusqlite::ToSql,
                 &record.completed_at.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
+                &record.scheduled_for.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
+                &record.due_date.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
                 &record_type_str as &dyn rusqlite::ToSql,
             ],
         )?;
@@ -69,7 +78,7 @@ impl Database {
     pub fn get_tasks(&self, _completed: bool) -> Result<Vec<Record>> {
         eprintln!("[DB] get_tasks called");
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, created_at, completed_at, record_type
+            "SELECT id, content, priority, created_at, completed_at, scheduled_for, due_date, record_type
              FROM records
              WHERE record_type = 'task'
              ORDER BY created_at DESC"
@@ -82,7 +91,9 @@ impl Database {
             let priority_int: Option<i64> = row.get(2)?;
             let created_at_str: String = row.get(3)?;
             let completed_at_str: Option<String> = row.get(4)?;
-            let record_type_str: String = row.get(5)?;
+            let scheduled_for_str: Option<String> = row.get(5)?;
+            let due_date_str: Option<String> = row.get(6)?;
+            let record_type_str: String = row.get(7)?;
 
             eprintln!("[DB] Row: id={}, content='{}', priority_int={:?}", id_str, content, priority_int);
 
@@ -98,6 +109,12 @@ impl Database {
                     .unwrap_or_else(|_| chrono::Local::now().into())
                     .with_timezone(&Utc),
                 completed_at: completed_at_str.filter(|s| !s.is_empty()).and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                scheduled_for: scheduled_for_str.filter(|s| !s.is_empty()).and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                due_date: due_date_str.filter(|s| !s.is_empty()).and_then(|s| {
                     DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
                 }),
                 record_type: match record_type_str.as_str() {
@@ -116,7 +133,7 @@ impl Database {
     pub fn get_notes(&self) -> Result<Vec<Record>> {
         eprintln!("[DB] get_notes called");
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, created_at, completed_at, record_type
+            "SELECT id, content, priority, created_at, completed_at, scheduled_for, due_date, record_type
              FROM records
              WHERE record_type = 'note'
              ORDER BY created_at DESC"
@@ -128,7 +145,9 @@ impl Database {
             let priority_int: Option<i64> = row.get(2)?;
             let created_at_str: String = row.get(3)?;
             let completed_at_str: Option<String> = row.get(4)?;
-            let record_type_str: String = row.get(5)?;
+            let scheduled_for_str: Option<String> = row.get(5)?;
+            let due_date_str: Option<String> = row.get(6)?;
+            let record_type_str: String = row.get(7)?;
 
             eprintln!("[DB] Row: id={}, content='{}', record_type='{}'", id_str, content, record_type_str);
 
@@ -144,6 +163,12 @@ impl Database {
                     .unwrap_or_else(|_| chrono::Local::now().into())
                     .with_timezone(&Utc),
                 completed_at: completed_at_str.filter(|s| !s.is_empty()).and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                scheduled_for: scheduled_for_str.filter(|s| !s.is_empty()).and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                due_date: due_date_str.filter(|s| !s.is_empty()).and_then(|s| {
                     DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
                 }),
                 record_type: match record_type_str.as_str() {

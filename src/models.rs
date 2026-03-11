@@ -16,6 +16,8 @@ pub struct Record {
     pub priority: Option<Priority>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub due_date: Option<DateTime<Utc>>,
     pub record_type: RecordType,
 }
 
@@ -34,6 +36,8 @@ impl Record {
             priority: Some(priority),
             created_at: Utc::now(),
             completed_at: None,
+            scheduled_for: None,
+            due_date: None,
             record_type: RecordType::Task,
         }
     }
@@ -45,6 +49,8 @@ impl Record {
             priority: None,
             created_at: Utc::now(),
             completed_at: None,
+            scheduled_for: None,
+            due_date: None,
             record_type: RecordType::Note,
         }
     }
@@ -70,6 +76,8 @@ mod tests {
         assert_eq!(task.priority, Some(Priority::High));
         assert_eq!(task.record_type, RecordType::Task);
         assert!(!task.is_completed());
+        assert!(task.scheduled_for.is_none());
+        assert!(task.due_date.is_none());
     }
 
     #[test]
@@ -97,6 +105,8 @@ mod tests {
         assert_eq!(note.priority, None);
         assert_eq!(note.record_type, RecordType::Note);
         assert!(!note.is_completed());
+        assert!(note.scheduled_for.is_none());
+        assert!(note.due_date.is_none());
     }
 
     #[test]

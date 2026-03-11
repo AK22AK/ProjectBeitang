@@ -24,16 +24,13 @@ impl QuickAddWindow {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.submit(cx);
-                        let hide = this.hide_app_on_close;
-                        window.remove_window();
-                        if hide {
-                            cx.hide();
-                        }
+                if let InputEvent::PressEnter { .. } = event {
+                    this.submit(cx);
+                    let hide = this.hide_app_on_close;
+                    window.remove_window();
+                    if hide {
+                        cx.hide();
                     }
-                    _ => {}
                 }
             },
         );
@@ -59,16 +56,13 @@ impl QuickAddWindow {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.submit(cx);
-                        let hide = this.hide_app_on_close;
-                        window.remove_window();
-                        if hide {
-                            cx.hide();
-                        }
+                if let InputEvent::PressEnter { .. } = event {
+                    this.submit(cx);
+                    let hide = this.hide_app_on_close;
+                    window.remove_window();
+                    if hide {
+                        cx.hide();
                     }
-                    _ => {}
                 }
             },
         );

@@ -193,7 +193,7 @@ impl Store {
                 respond_to: tx,
             })
             .await;
-        rx.recv().await.unwrap_or_else(|_| Ok(()))
+        rx.recv().await.unwrap_or(Ok(()))
     }
 
     pub async fn update_record(&self, record: Record) -> Result<(), String> {
@@ -205,7 +205,7 @@ impl Store {
                 respond_to: tx,
             })
             .await;
-        rx.recv().await.unwrap_or_else(|_| Ok(()))
+        rx.recv().await.unwrap_or(Ok(()))
     }
 
     pub async fn get_notes(&self) -> Result<Vec<Record>, String> {
@@ -227,6 +227,6 @@ impl Store {
             .sender
             .send(StoreCommand::DeleteRecord { id, respond_to: tx })
             .await;
-        rx.recv().await.unwrap_or_else(|_| Ok(()))
+        rx.recv().await.unwrap_or(Ok(()))
     }
 }
