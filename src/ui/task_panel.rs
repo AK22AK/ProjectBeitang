@@ -94,6 +94,7 @@ impl TaskPanel {
         let content = task.content.clone();
         edit_input.update(cx, |state, cx| {
             state.set_value(&content, window, cx);
+            state.focus(window, cx);
         });
         eprintln!("[TaskPanel] edit_input created, editing_task_id set to: {:?}", self.editing_task_id);
 
