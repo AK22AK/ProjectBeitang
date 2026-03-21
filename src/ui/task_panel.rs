@@ -8,6 +8,7 @@ use gpui_component::button::Button;
 use gpui_component::date_picker::{DatePicker, DatePickerState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, IconName};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 actions!(task_panel, [
@@ -24,9 +25,8 @@ pub struct TaskPanel {
     tasks: Vec<Record>,
     input_state: Entity<InputState>,
     _subscription: Subscription,
-    // 编辑状态
     editing_task_id: Option<uuid::Uuid>,
-    edit_input_state: Option<Entity<InputState>>,
+    task_input_states: HashMap<uuid::Uuid, Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
     context_menu_task_id: Option<uuid::Uuid>,
     context_menu_position: Option<Point<Pixels>>,
@@ -64,7 +64,7 @@ impl TaskPanel {
             input_state,
             _subscription,
             editing_task_id: None,
-            edit_input_state: None,
+            task_input_states: HashMap::new(),
             _edit_subscription: None,
             context_menu_task_id: None,
             context_menu_position: None,
@@ -85,21 +85,35 @@ impl TaskPanel {
     }
 
     fn start_edit(&mut self, task: Record, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_task_id == Some(task.id) {
+            return;
+        }
+        
         self.editing_task_id = Some(task.id);
-        let edit_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("编辑任务...")
-        });
-        // 设置编辑内容 - 使用 value 方式
+        let task_id = task.id;
         let content = task.content.clone();
-        edit_input.update(cx, |state, cx| {
-            state.set_value(&content, window, cx);
+        
+        let input_state = self.task_input_states
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                cx.new(|cx| {
+                    let mut state = InputState::new(window, cx);
+                    state.set_value(&content, window, cx);
+                    state
+                })
+            });
+        
+        input_state.update(cx, |state, cx| {
             state.focus(window, cx);
         });
-        eprintln!("[TaskPanel] edit_input created, editing_task_id set to: {:?}", self.editing_task_id);
+        
+        if !self.task_input_states.contains_key(&task_id) {
+            self.task_input_states.insert(task_id, input_state.clone());
+        }
 
         let _edit_subscription = cx.subscribe_in(
-            &edit_input,
+            &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| {
                 match event {
@@ -107,7 +121,6 @@ impl TaskPanel {
                         this.save_edit(window, cx);
                     }
                     InputEvent::Blur => {
-                        // 失去焦点自动保存 (滴答清单风格)
                         this.save_edit(window, cx);
                     }
                     _ => {}
@@ -115,15 +128,14 @@ impl TaskPanel {
             },
         );
 
-        self.edit_input_state = Some(edit_input);
         self._edit_subscription = Some(_edit_subscription);
         cx.notify();
     }
 
-    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(task_id) = self.editing_task_id {
-            if let Some(edit_input) = &self.edit_input_state {
-                let new_content = edit_input.read(cx).text().to_string();
+            if let Some(input_state) = self.task_input_states.get(&task_id) {
+                let new_content = input_state.read(cx).text().to_string();
                 let (content, priority) = Self::parse_input_static(&new_content);
 
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
@@ -139,12 +151,7 @@ impl TaskPanel {
                 }
             }
         }
-        self.cancel_edit(window, cx);
-    }
-
-    fn cancel_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.editing_task_id = None;
-        self.edit_input_state = None;
         self._edit_subscription = None;
         cx.notify();
     }
@@ -291,7 +298,10 @@ impl TaskPanel {
             eprintln!("[TaskPanel] Loaded {} tasks", tasks.len());
             let update_result = view.update(cx, |panel, cx| {
                 panel.tasks = tasks;
-                cx.notify();  // 触发界面刷新
+                panel.task_input_states.retain(|id, _| {
+                    panel.tasks.iter().any(|t| t.id == *id)
+                });
+                cx.notify();
                 eprintln!("[TaskPanel] Tasks updated and notified, panel now has {} tasks", panel.tasks.len());
             });
             if let Err(e) = update_result {
@@ -567,17 +577,23 @@ impl Render for TaskPanel {
                         .flex_col()
                         .child({
                             let is_editing = self.editing_task_id == Some(task.id);
+                            let task_id = task.id;
                             let content = task.content.clone();
                             
-                            let input_state = if is_editing {
-                                self.edit_input_state.as_ref().unwrap().clone()
-                            } else {
-                                cx.new(|cx| {
-                                    let mut state = InputState::new(window, cx);
-                                    state.set_value(&content, window, cx);
-                                    state
-                                })
-                            };
+                            let input_state = self.task_input_states
+                                .get(&task_id)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    cx.new(|cx| {
+                                        let mut state = InputState::new(window, cx);
+                                        state.set_value(&content, window, cx);
+                                        state
+                                    })
+                                });
+                            
+                            if !self.task_input_states.contains_key(&task_id) {
+                                self.task_input_states.insert(task_id, input_state.clone());
+                            }
                             
                             div()
                                 .id(("task-title", idx))
@@ -590,9 +606,7 @@ impl Render for TaskPanel {
                                 .on_click(cx.listener({
                                     let task = task.clone();
                                     move |this, _event: &ClickEvent, window, cx| {
-                                        if this.editing_task_id != Some(task.id) {
-                                            this.start_edit(task.clone(), window, cx);
-                                        }
+                                        this.start_edit(task.clone(), window, cx);
                                     }
                                 }))
                                 .child(
@@ -600,7 +614,6 @@ impl Render for TaskPanel {
                                         .appearance(false)
                                         .focus_bordered(false)
                                         .p(px(0.0))
-                                        .when(!is_editing, |input| input.disabled(true))
                                 )
                                 .into_any_element()
                         })
