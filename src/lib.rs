@@ -4,3 +4,4 @@ pub mod db;
 pub mod store;
 pub mod ui;
 pub mod shortcut_manager;
+pub mod notifier;
