@@ -9,16 +9,32 @@ pub enum Priority {
     Low,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TaskStatus {
+    Todo,
+    InProgress,
+    Done,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub id: Uuid,
     pub content: String,
     pub priority: Option<Priority>,
+    pub status: Option<TaskStatus>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub scheduled_for: Option<DateTime<Utc>>,
     pub due_date: Option<DateTime<Utc>>,
+    pub notified_at: Option<DateTime<Utc>>,
+    pub cancelled_reason: Option<String>,
     pub record_type: RecordType,
+    #[serde(skip)]
+    pub tags: Vec<String>,
+    #[serde(skip)]
+    pub persons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,37 +42,101 @@ pub enum RecordType {
     Task,
     Note,
     Event,
+    Idea,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+    pub color: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Person {
+    pub id: i64,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: String, // UUID
+    pub record_id: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub file_size: usize,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
 }
 
 impl Record {
     pub fn new_task(content: String, priority: Priority) -> Self {
+        let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             content,
             priority: Some(priority),
-            created_at: Utc::now(),
+            status: Some(TaskStatus::Todo),
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             scheduled_for: None,
             due_date: None,
+            notified_at: None,
+            cancelled_reason: None,
             record_type: RecordType::Task,
+            tags: Vec::new(),
+            persons: Vec::new(),
         }
     }
 
     pub fn new_note(content: String) -> Self {
+        let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             content,
             priority: None,
-            created_at: Utc::now(),
+            status: None,
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             scheduled_for: None,
             due_date: None,
+            notified_at: None,
+            cancelled_reason: None,
             record_type: RecordType::Note,
+            tags: Vec::new(),
+            persons: Vec::new(),
+        }
+    }
+
+    pub fn new_idea(content: String) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            content,
+            priority: None,
+            status: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            scheduled_for: None,
+            due_date: None,
+            notified_at: None,
+            cancelled_reason: None,
+            record_type: RecordType::Idea,
+            tags: Vec::new(),
+            persons: Vec::new(),
         }
     }
 
     pub fn complete(&mut self) {
         self.completed_at = Some(Utc::now());
+        self.updated_at = Utc::now();
     }
 
     pub fn is_completed(&self) -> bool {
@@ -78,6 +158,7 @@ mod tests {
         assert!(!task.is_completed());
         assert!(task.scheduled_for.is_none());
         assert!(task.due_date.is_none());
+        assert!(task.notified_at.is_none());
     }
 
     #[test]
@@ -107,6 +188,7 @@ mod tests {
         assert!(!note.is_completed());
         assert!(note.scheduled_for.is_none());
         assert!(note.due_date.is_none());
+        assert!(note.notified_at.is_none());
     }
 
     #[test]
