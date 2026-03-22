@@ -1,8 +1,10 @@
 use beitang::store::{create_store, Store};
 use beitang::ui::sidebar::{Panel, Sidebar};
 use beitang::ui::task_panel::TaskPanel;
-use beitang::ui::note_panel::NotePanel;
+use beitang::ui::dashboard::Dashboard;
 use beitang::ui::floating_window::QuickAddWindow;
+use beitang::ui::timeline::Timeline;
+use beitang::ui::search::SearchPanel;
 use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -171,8 +173,10 @@ fn open_main_window(cx: &mut App, store: Store) -> Result<AnyWindowHandle> {
 
 pub struct MainView {
     current_panel: Panel,
+    dashboard_panel: Entity<Dashboard>,
+    search_panel: Entity<SearchPanel>,
     task_panel: Entity<TaskPanel>,
-    note_panel: Entity<NotePanel>,
+    timeline_panel: Entity<Timeline>,
     store: Store,
     focus_handle: FocusHandle,
 }
@@ -180,15 +184,19 @@ pub struct MainView {
 impl MainView {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store_for_panels = store.clone();
+        let dashboard_panel = cx.new(|cx| Dashboard::new(store_for_panels.clone(), window, cx));
+        let search_panel = cx.new(|cx| SearchPanel::new(store_for_panels.clone(), window, cx));
         let task_panel = cx.new(|cx| TaskPanel::new(store_for_panels.clone(), window, cx));
-        let note_panel = cx.new(|cx| NotePanel::new(store_for_panels, window, cx));
+        let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels, window, cx));
         let focus_handle = cx.focus_handle();
         // 初始时请求焦点，使键盘事件可以被捕获
         focus_handle.focus(window, cx);
         Self {
-            current_panel: Panel::Tasks,
+            current_panel: Panel::Dashboard,
+            dashboard_panel,
+            search_panel,
             task_panel,
-            note_panel,
+            timeline_panel,
             store,
             focus_handle,
         }
@@ -237,7 +245,7 @@ impl Render for MainView {
                     let window_size = size(px(400.0), px(80.0));
                     match key {
                         "n" => {
-                            eprintln!("[MainView] Cmd+N pressed - opening quick add task");
+                            eprintln!("[MainView] Cmd+N pressed - opening quick add window");
                             let store = store_for_shortcut.clone();
                             let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
                             cx.open_window(
@@ -254,31 +262,21 @@ impl Render for MainView {
                                 },
                             ).ok();
                         }
-                        "m" => {
-                            eprintln!("[MainView] Cmd+M pressed - opening quick add note");
-                            let store = store_for_shortcut.clone();
-                            let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
-                            cx.open_window(
-                                WindowOptions {
-                                    window_bounds: Some(window_bounds),
-                                    ..Default::default()
-                                },
-                                |window, cx| {
-                                    let view = cx.new(|cx| QuickAddWindow::new_for_note(store, window, cx));
-                                    cx.new(|cx| {
-                                        gpui_component::Root::new(view, window, cx)
-                                            .bg(cx.theme().background)
-                                    })
-                                },
-                            ).ok();
-                        }
                         "1" => {
-                            eprintln!("[MainView] Cmd+1 pressed - switching to Tasks");
-                            this.switch_to_panel(Panel::Tasks, cx);
+                            eprintln!("[MainView] Cmd+1 pressed - switching to Dashboard");
+                            this.switch_to_panel(Panel::Dashboard, cx);
                         }
                         "2" => {
-                            eprintln!("[MainView] Cmd+2 pressed - switching to Notes");
-                            this.switch_to_panel(Panel::Notes, cx);
+                            eprintln!("[MainView] Cmd+2 pressed - switching to Search");
+                            this.switch_to_panel(Panel::Search, cx);
+                        }
+                        "3" => {
+                            eprintln!("[MainView] Cmd+3 pressed - switching to Timeline");
+                            this.switch_to_panel(Panel::Timeline, cx);
+                        }
+                        "4" => {
+                            eprintln!("[MainView] Cmd+4 pressed - switching to Tasks");
+                            this.switch_to_panel(Panel::Tasks, cx);
                         }
                         "0" => {
                             eprintln!("[MainView] Cmd+0 pressed - activating window");
@@ -300,9 +298,10 @@ impl Render for MainView {
                     .p(px(24.0))
                     .bg(rgb(0xffffff))  // 白色背景便于看清
                     .child(match self.current_panel {
+                        Panel::Dashboard => self.dashboard_panel.clone().into_any_element(),
+                        Panel::Search => self.search_panel.clone().into_any_element(),
                         Panel::Tasks => self.task_panel.clone().into_any_element(),
-                        Panel::Notes => self.note_panel.clone().into_any_element(),
-                        _ => div().child(format!("{:?} Panel", self.current_panel)).into_any_element(),
+                        Panel::Timeline => self.timeline_panel.clone().into_any_element(),
                     })
             )
     }

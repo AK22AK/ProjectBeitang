@@ -1,14 +1,13 @@
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Panel {
+    Dashboard,
+    Search,
     Tasks,
-    Notes,
-    Records,
     Timeline,
-    Ai,
 }
 
 #[derive(IntoElement)]
@@ -37,11 +36,10 @@ impl Sidebar {
 impl RenderOnce for Sidebar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let items = vec![
+            (Panel::Dashboard, "看板"),
+            (Panel::Search, "搜索"),
             (Panel::Tasks, "任务"),
-            (Panel::Notes, "笔记"),
-            (Panel::Records, "记录"),
             (Panel::Timeline, "时间线"),
-            (Panel::Ai, "AI"),
         ];
 
         div()
@@ -53,23 +51,28 @@ impl RenderOnce for Sidebar {
             .bg(rgb(0x333333))
             .text_color(rgb(0xffffff))
             .p(px(12.0))
-            .children(items.into_iter().enumerate().map(move |(idx, (panel, label))| {
-                let is_active = self.current_panel == panel;
-                let on_click = self.on_panel_select.clone();
+            .children(
+                items
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(idx, (panel, label))| {
+                        let is_active = self.current_panel == panel;
+                        let on_click = self.on_panel_select.clone();
 
-                div()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .when(is_active, |this| this.bg(rgb(0x4a4a4a)))
-                    .hover(|style| style.bg(rgb(0x444444)))
-                    .flex()
-                    .gap(px(8.0))
-                    .items_center()
-                    .child(label)
-                    .id(idx)
-                    .on_click(move |_event, window, cx| on_click(panel, window, cx))
-            }))
+                        div()
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .when(is_active, |this| this.bg(rgb(0x4a4a4a)))
+                            .hover(|style| style.bg(rgb(0x444444)))
+                            .flex()
+                            .gap(px(8.0))
+                            .items_center()
+                            .child(label)
+                            .id(idx)
+                            .on_click(move |_event, window, cx| on_click(panel, window, cx))
+                    }),
+            )
     }
 }
