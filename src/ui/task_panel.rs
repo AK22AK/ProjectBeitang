@@ -824,7 +824,7 @@ impl TaskPanel {
             .child(self.render_priority_filter(cx))
     }
 
-    fn render_task_card(&self, task: &Record, idx: usize, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_task_card(&mut self, task: &Record, idx: usize, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let task_id = task.id;
         let is_completed = task.completed_at.is_some();
         let is_selected = self.selected_task_id == Some(task_id);
@@ -896,7 +896,52 @@ impl TaskPanel {
                         v_flex()
                             .flex_1()
                             .gap(px(if compact { 2.0 } else { 4.0 }))
-                            .child(
+                            .child({
+                                let task_id_for_edit = task_id;
+                                let task_content = task.content.clone();
+                                let input_state = self.task_input_states
+                                    .get(&task_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        let state = cx.new(|cx| {
+                                            let mut s = InputState::new(window, cx);
+                                            s.set_value(&task_content, window, cx);
+                                            s
+                                        });
+                                        
+                                        cx.subscribe_in(&state, window, move |this, _state, event: &InputEvent, _window, cx| {
+                                            match event {
+                                                InputEvent::Blur | InputEvent::PressEnter { .. } => {
+                                                    let new_content = this.task_input_states
+                                                        .get(&task_id_for_edit)
+                                                        .map(|s| s.read(cx).text().to_string())
+                                                        .unwrap_or_default();
+                                                    
+                                                    if let Some(task) = this.tasks.iter_mut().find(|t| t.id == task_id_for_edit) {
+                                                        if task.content != new_content && !new_content.trim().is_empty() {
+                                                            task.content = new_content;
+                                                            task.updated_at = chrono::Utc::now();
+                                                            let updated_task = task.clone();
+                                                            let store = this.store.clone();
+                                                            cx.spawn(async move |_view, _cx| {
+                                                                if let Err(e) = store.update_record(updated_task).await {
+                                                                    eprintln!("[TaskPanel] Failed to update task: {}", e);
+                                                                }
+                                                            }).detach();
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }).detach();
+                                        
+                                        state
+                                    });
+                                
+                                if !self.task_input_states.contains_key(&task_id) {
+                                    self.task_input_states.insert(task_id, input_state.clone());
+                                }
+                                
                                 h_flex()
                                     .gap(px(4.0))
                                     .items_center()
@@ -911,12 +956,16 @@ impl TaskPanel {
                                     })
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .text_color(if is_completed { rgb(0x999999) } else { rgb(0x333333) })
-                                            .when(is_completed, |el| el.line_through())
-                                            .child(task.content.clone())
+                                            .flex_1()
+                                            .child({
+                                                Input::new(&input_state)
+                                                    .appearance(false)
+                                                    .focus_bordered(false)
+                                                    .text_size(px(14.0))
+                                                    .text_color(if is_completed { rgb(0x999999) } else { rgb(0x333333) })
+                                            })
                                     )
-                            )
+                            })
                             .when(!compact, |el| {
                                 el.child(
                                     h_flex()
@@ -939,7 +988,7 @@ impl TaskPanel {
             )
     }
 
-    fn render_matrix_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_matrix_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.group_tasks_by_quadrant();
         
         let urgent_important = groups.get(&Quadrant::UrgentImportant).cloned().unwrap_or_default();
@@ -954,19 +1003,19 @@ impl TaskPanel {
                 h_flex()
                     .h_1_2()
                     .gap(px(8.0))
-                    .child(self.render_quadrant(Quadrant::UrgentImportant, &urgent_important, cx))
-                    .child(self.render_quadrant(Quadrant::NotUrgentImportant, &not_urgent_important, cx))
+                    .child(self.render_quadrant(Quadrant::UrgentImportant, &urgent_important, window, cx))
+                    .child(self.render_quadrant(Quadrant::NotUrgentImportant, &not_urgent_important, window, cx))
             )
             .child(
                 h_flex()
                     .h_1_2()
                     .gap(px(8.0))
-                    .child(self.render_quadrant(Quadrant::UrgentNotImportant, &urgent_not_important, cx))
-                    .child(self.render_quadrant(Quadrant::NotUrgentNotImportant, &not_urgent_not_important, cx))
+                    .child(self.render_quadrant(Quadrant::UrgentNotImportant, &urgent_not_important, window, cx))
+                    .child(self.render_quadrant(Quadrant::NotUrgentNotImportant, &not_urgent_not_important, window, cx))
             )
     }
 
-    fn render_quadrant(&self, quadrant: Quadrant, tasks: &[Record], cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_quadrant(&mut self, quadrant: Quadrant, tasks: &[Record], window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let quadrant_color = quadrant.color();
         let task_count = tasks.len();
         
@@ -1016,13 +1065,13 @@ impl TaskPanel {
                         v_flex()
                             .gap(px(6.0))
                             .children(tasks.iter().enumerate().map(|(idx, task)| {
-                                self.render_task_card(task, idx, true, cx).into_any_element()
+                                self.render_task_card(task, idx, true, window, cx).into_any_element()
                             }))
                     )
             )
     }
 
-    fn render_list_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_list_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = self.get_filtered_tasks()
             .iter()
             .cloned()
@@ -1052,7 +1101,7 @@ impl TaskPanel {
                             .into_any_element()
                     );
                     for (idx, task) in pending_tasks.iter().enumerate() {
-                        elements.push(self.render_task_card(task, idx, false, cx).into_any_element());
+                        elements.push(self.render_task_card(task, idx, false, window, cx).into_any_element());
                     }
                 }
 
@@ -1084,7 +1133,7 @@ impl TaskPanel {
                     
                     if self.show_completed {
                         for (idx, task) in completed_tasks.iter().enumerate() {
-                            elements.push(self.render_task_card(task, idx, false, cx).into_any_element());
+                            elements.push(self.render_task_card(task, idx, false, window, cx).into_any_element());
                         }
                     }
                 }
@@ -1520,8 +1569,8 @@ impl Render for TaskPanel {
                             .overflow_hidden()
                             .child(
                                 match self.current_view {
-                                    TaskView::List => self.render_list_view(cx).into_any_element(),
-                                    TaskView::Matrix => self.render_matrix_view(cx).into_any_element(),
+                                    TaskView::List => self.render_list_view(window, cx).into_any_element(),
+                                    TaskView::Matrix => self.render_matrix_view(window, cx).into_any_element(),
                                 }
                             )
                     )
