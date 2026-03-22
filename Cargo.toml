@@ -11,11 +11,11 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 # 异步运行时
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "rt", "time"] }
 async-channel = "2.0"
 
 # 数据库
-rusqlite = { version = "0.30", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "bundled-full"] }
 
 # 序列化和配置
 serde = { version = "1.0", features = ["derive"] }
@@ -30,6 +30,8 @@ dirs = "5.0"
 
 # 全局快捷键
 global-hotkey = "0.4"
+notify-rust = "4.12.0"
+chrono-english = "0.1.8"
 
 [dev-dependencies]
 tempfile = "3.0"
