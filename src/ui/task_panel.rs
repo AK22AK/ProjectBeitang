@@ -1160,6 +1160,9 @@ impl TaskPanel {
             .border_l_1()
             .border_color(rgb(0xe8e8e8))
             .bg(rgb(0xffffff))
+            .on_mouse_down_out(cx.listener(|this, _event, window, cx| {
+                this.close_task_detail(window, cx);
+            }))
             .child(
                 div()
                     .p(px(16.0))
