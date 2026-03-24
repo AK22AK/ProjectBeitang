@@ -761,8 +761,9 @@ impl TaskPanel {
             .cursor_pointer()
             .on_click(cx.listener({
                 let task = task.clone();
-                move |this, _event, window, cx| {
+                move |this, _event: &ClickEvent, window, cx| {
                     this.select_task(&task, window, cx);
+                    cx.stop_propagation();
                 }
             }))
             .child(
@@ -777,6 +778,7 @@ impl TaskPanel {
                             .child(if is_completed { "☑" } else { "☐" })
                             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                                 this.toggle_task_complete(task_id, cx);
+                                cx.stop_propagation();
                             }))
                     )
                     .child(
@@ -850,6 +852,7 @@ impl TaskPanel {
                                                     .focus_bordered(false)
                                                     .text_size(px(14.0))
                                                     .text_color(if is_completed { rgb(0x999999) } else { rgb(0x333333) })
+                                                    .disabled(true)
                                             })
                                     )
                             })
@@ -905,6 +908,12 @@ impl TaskPanel {
     fn render_quadrant(&mut self, quadrant: Quadrant, tasks: &[Record], window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let quadrant_color = quadrant.color();
         let task_count = tasks.len();
+        let quadrant_idx = match quadrant {
+            Quadrant::UrgentImportant => 0,
+            Quadrant::NotUrgentImportant => 1,
+            Quadrant::UrgentNotImportant => 2,
+            Quadrant::NotUrgentNotImportant => 3,
+        };
         
         v_flex()
             .flex_1()
@@ -952,7 +961,7 @@ impl TaskPanel {
                         v_flex()
                             .gap(px(6.0))
                             .children(tasks.iter().enumerate().map(|(idx, task)| {
-                                self.render_task_card(task, idx, true, window, cx).into_any_element()
+                                self.render_task_card(task, quadrant_idx * 1000 + idx, true, window, cx).into_any_element()
                             }))
                     )
             )
@@ -1094,11 +1103,17 @@ impl Render for TaskPanel {
             }))
             .child(
                 div()
+                    .id("task-panel-main")
                     .flex_1()
                     .flex()
                     .flex_col()
                     .gap(px(16.0))
                     .p(px(16.0))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        if this.task_detail_sidebar.read(cx).current_task_id().is_some() {
+                            this.close_task_detail(window, cx);
+                        }
+                    }))
                     .child(
                         div()
                             .text_xl()
@@ -1134,7 +1149,7 @@ impl Render for TaskPanel {
                             .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入为低优先级")
                     )
                     .child(self.render_toolbar(cx))
-                    .when(self.reminder_task_id.is_some(), |el: Div| {
+                    .when(self.reminder_task_id.is_some(), |el| {
                         if let (Some(ref dp), Some(ref ti)) = (
                             &self.reminder_date_picker, 
                             &self.reminder_time_input
@@ -1238,6 +1253,7 @@ impl Render for TaskPanel {
                     })
                     .child(
                         div()
+                            .id("task-view-container")
                             .flex_1()
                             .overflow_hidden()
                             .child(
