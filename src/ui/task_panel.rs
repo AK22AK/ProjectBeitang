@@ -1,5 +1,6 @@
 use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
+use crate::ui::task_detail_sidebar::TaskDetailSidebar;
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
@@ -111,14 +112,7 @@ pub struct TaskPanel {
     show_completed: bool,
     current_view: TaskView,
     priority_filter: PriorityFilter,
-    selected_task_id: Option<uuid::Uuid>,
-    detail_priority: Option<Priority>,
-    detail_status: Option<TaskStatus>,
-    detail_due_date: Option<chrono::DateTime<chrono::Utc>>,
-    detail_cancel_reason: Option<String>,
-    detail_due_date_picker: Option<Entity<DatePickerState>>,
-    detail_time_input: Option<Entity<InputState>>,
-    _detail_subscriptions: Vec<Subscription>,
+    task_detail_sidebar: Entity<TaskDetailSidebar>,
 }
 
 impl TaskPanel {
@@ -161,15 +155,9 @@ impl TaskPanel {
             show_completed: false,
             current_view: TaskView::List,
             priority_filter: PriorityFilter::All,
-            selected_task_id: None,
-            detail_priority: None,
-            detail_status: None,
-            detail_due_date: None,
-            detail_cancel_reason: None,
-            detail_due_date_picker: None,
-            detail_time_input: None,
-            _detail_subscriptions: Vec::new(),
+            task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
         };
+
         panel.load_tasks(cx);
         panel
     }
@@ -224,118 +212,16 @@ impl TaskPanel {
     }
 
     fn select_task(&mut self, task: &Record, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_task_id = Some(task.id);
-        self.detail_priority = task.priority.clone();
-        self.detail_status = task.status.clone();
-        self.detail_due_date = task.due_date;
-        self.detail_cancel_reason = task.cancelled_reason.clone();
-        
-        self.init_detail_date_picker(window, cx);
-        
+        self.task_detail_sidebar.update(cx, |sidebar, cx| {
+            sidebar.show_task(task, window, cx);
+        });
         cx.notify();
     }
 
-    fn close_task_detail(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_task_id = None;
-        self.detail_priority = None;
-        self.detail_status = None;
-        self.detail_due_date = None;
-        self.detail_cancel_reason = None;
-        self.detail_due_date_picker = None;
-        self.detail_time_input = None;
-        self._detail_subscriptions.clear();
-        cx.notify();
-    }
-
-    fn init_detail_date_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (init_date, init_time_str) = if let Some(due) = self.detail_due_date {
-            let local = due.with_timezone(&chrono::Local);
-            (local.naive_local().date(), local.format("%H:%M").to_string())
-        } else {
-            let now = chrono::Local::now();
-            (now.naive_local().date(), now.format("%H:%M").to_string())
-        };
-
-        let date_picker = cx.new(|cx| {
-            let mut picker = DatePickerState::new(window, cx)
-                .date_format("%Y-%m-%d");
-            picker.set_date(init_date, window, cx);
-            picker
+    fn close_task_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.task_detail_sidebar.update(cx, |sidebar, cx| {
+            sidebar.close(window, cx);
         });
-
-        let time_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("HH:MM")
-        });
-        time_input.update(cx, |state, cx| {
-            state.set_value(&init_time_str, window, cx);
-        });
-
-        self._detail_subscriptions.clear();
-        self.detail_due_date_picker = Some(date_picker);
-        self.detail_time_input = Some(time_input);
-    }
-
-    fn save_task_detail(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(task_id) = self.selected_task_id {
-            if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-                if let Some(priority) = self.detail_priority.clone() {
-                    task.priority = Some(priority);
-                }
-                if let Some(status) = self.detail_status.clone() {
-                    task.status = Some(status.clone());
-                    match status {
-                        TaskStatus::Done => {
-                            if task.completed_at.is_none() {
-                                task.completed_at = Some(Utc::now());
-                            }
-                        }
-                        TaskStatus::Cancelled => {
-                            if task.completed_at.is_none() {
-                                task.completed_at = Some(Utc::now());
-                            }
-                            task.cancelled_reason = self.detail_cancel_reason.clone();
-                        }
-                        _ => {
-                            task.completed_at = None;
-                        }
-                    }
-                }
-                if let (Some(ref dp), Some(ref ti)) = (
-                    &self.detail_due_date_picker, 
-                    &self.detail_time_input
-                ) {
-                    let date = dp.read(cx).date();
-                    let time_str = ti.read(cx).text().to_string();
-                    
-                    if let Some(naive_date) = date.start() {
-                        let parts: Vec<&str> = time_str.split(':').collect();
-                        if parts.len() == 2 {
-                            if let (Ok(h), Ok(m)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                                if h <= 23 && m <= 59 {
-                                    if let Some(naive_dt) = naive_date.and_hms_opt(h, m, 0) {
-                                        if let Some(local_dt) = chrono::Local.from_local_datetime(&naive_dt).single() {
-                                            task.due_date = Some(local_dt.with_timezone(&chrono::Utc));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                task.updated_at = Utc::now();
-                let updated_task = task.clone();
-                let store = self.store.clone();
-                cx.spawn(async move |_view, _cx| {
-                    if let Err(e) = store.update_record(updated_task).await {
-                        eprintln!("[TaskPanel] Failed to update task: {}", e);
-                    }
-                }).detach();
-                
-                cx.notify();
-            }
-        }
     }
 
     fn start_edit(&mut self, task: Record, window: &mut Window, cx: &mut Context<Self>) {
@@ -827,7 +713,8 @@ impl TaskPanel {
     fn render_task_card(&mut self, task: &Record, idx: usize, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let task_id = task.id;
         let is_completed = task.completed_at.is_some();
-        let is_selected = self.selected_task_id == Some(task_id);
+        let sidebar_task_id = self.task_detail_sidebar.read(cx).current_task_id().map(|s| s.to_string());
+        let is_selected = sidebar_task_id == Some(task_id.to_string());
         
         let priority_marker = match task.priority {
             Some(Priority::High) => "!!",
@@ -1142,227 +1029,6 @@ impl TaskPanel {
             })
     }
 
-    fn render_task_detail_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let task = match self.selected_task_id.and_then(|id| self.tasks.iter().find(|t| t.id == id)) {
-            Some(t) => t.clone(),
-            None => return div().into_any_element(),
-        };
-
-        let dp_clone = self.detail_due_date_picker.clone();
-        let ti_clone = self.detail_time_input.clone();
-
-        v_flex()
-            .absolute()
-            .top(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0))
-            .w(px(320.0))
-            .border_l_1()
-            .border_color(rgb(0xe8e8e8))
-            .bg(rgb(0xffffff))
-            .on_mouse_down_out(cx.listener(|this, _event, window, cx| {
-                this.close_task_detail(window, cx);
-            }))
-            .child(
-                div()
-                    .p(px(16.0))
-                    .border_b_1()
-                    .border_color(rgb(0xe8e8e8))
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("任务详情")
-                            )
-                            .child(
-                                Button::new("close-detail")
-                                    .child("✕")
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.close_task_detail(window, cx);
-                                    }))
-                            )
-                    )
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .p(px(16.0))
-                    .overflow_y_scrollbar()
-                    .child(
-                        v_flex()
-                            .gap(px(16.0))
-                            .child(
-                                v_flex()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x666666))
-                                            .child("内容")
-                                    )
-                                    .child(
-                                        div()
-                                            .text_base()
-                                            .child(task.content.clone())
-                                    )
-                            )
-                            .child(
-                                v_flex()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x666666))
-                                            .child("状态")
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap(px(8.0))
-                                            .child(self.render_status_button(TaskStatus::Todo, cx))
-                                            .child(self.render_status_button(TaskStatus::InProgress, cx))
-                                            .child(self.render_status_button(TaskStatus::Done, cx))
-                                            .child(self.render_status_button(TaskStatus::Cancelled, cx))
-                                    )
-                            )
-                            .child(
-                                v_flex()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x666666))
-                                            .child("优先级")
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap(px(8.0))
-                                            .child(self.render_priority_button(Priority::High, cx))
-                                            .child(self.render_priority_button(Priority::Medium, cx))
-                                            .child(self.render_priority_button(Priority::Low, cx))
-                                    )
-                            )
-                            .child(
-                                v_flex()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x666666))
-                                            .child("截止日期")
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap(px(8.0))
-                                            .items_end()
-                                            .when_some(dp_clone.clone(), |el, dp| {
-                                                el.child(
-                                                    div()
-                                                        .flex_1()
-                                                        .child(
-                                                            DatePicker::new(&dp)
-                                                                .cleanable(true)
-                                                                .number_of_months(1)
-                                                        )
-                                                )
-                                            })
-                                            .when_some(ti_clone.clone(), |el, ti| {
-                                                el.child(
-                                                    div()
-                                                        .w(px(100.0))
-                                                        .child(
-                                                            Input::new(&ti)
-                                                        )
-                                                )
-                                            })
-                                    )
-                            )
-                            .when(self.detail_status == Some(TaskStatus::Cancelled), |el| {
-                                el.child(
-                                    v_flex()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0x666666))
-                                                .child("取消原因")
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0x999999))
-                                                .child("（此处可添加原因输入框）")
-                                        )
-                                )
-                            })
-                    )
-            )
-            .child(
-                div()
-                    .p(px(16.0))
-                    .border_t_1()
-                    .border_color(rgb(0xe8e8e8))
-                    .child(
-                        Button::new("save-detail")
-                            .w_full()
-                            .child("保存修改")
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.save_task_detail(window, cx);
-                            }))
-                    )
-            )
-            .into_any_element()
-    }
-
-    fn render_status_button(&self, status: TaskStatus, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, color) = match status {
-            TaskStatus::Todo => ("待办", rgb(0x999999)),
-            TaskStatus::InProgress => ("进行中", rgb(0x1890ff)),
-            TaskStatus::Done => ("已完成", rgb(0x52c41a)),
-            TaskStatus::Cancelled => ("已取消", rgb(0xff4d4f)),
-        };
-        
-        let is_selected = self.detail_status == Some(status.clone());
-        
-        Button::new(format!("status-{:?}", status))
-            .child(label)
-            .when(is_selected, |b| {
-                b.with_variant(gpui_component::button::ButtonVariant::Primary)
-            })
-            .when(!is_selected, |b| {
-                b.text_color(color)
-            })
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.detail_status = Some(status.clone());
-                cx.notify();
-            }))
-    }
-
-    fn render_priority_button(&self, priority: Priority, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, color) = match priority {
-            Priority::High => ("高", rgb(0xff4d4f)),
-            Priority::Medium => ("中", rgb(0xfaad14)),
-            Priority::Low => ("低", rgb(0x52c41a)),
-        };
-        
-        let is_selected = self.detail_priority == Some(priority.clone());
-        
-        Button::new(format!("priority-{:?}", priority))
-            .child(label)
-            .when(is_selected, |b| {
-                b.with_variant(gpui_component::button::ButtonVariant::Primary)
-            })
-            .when(!is_selected, |b| {
-                b.text_color(color)
-            })
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.detail_priority = Some(priority.clone());
-                cx.notify();
-            }))
-    }
 }
 
 impl Render for TaskPanel {
@@ -1583,8 +1249,6 @@ impl Render for TaskPanel {
                     )
                     .children(self.render_custom_context_menu(cx))
             )
-            .when(self.selected_task_id.is_some(), |el| {
-                el.child(self.render_task_detail_sidebar(cx))
-            })
+            .child(self.task_detail_sidebar.clone())
     }
 }
