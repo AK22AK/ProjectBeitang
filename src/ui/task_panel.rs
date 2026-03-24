@@ -1152,8 +1152,11 @@ impl TaskPanel {
         let ti_clone = self.detail_time_input.clone();
 
         v_flex()
+            .absolute()
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
             .w(px(320.0))
-            .h_full()
             .border_l_1()
             .border_color(rgb(0xe8e8e8))
             .bg(rgb(0xffffff))
@@ -1375,6 +1378,7 @@ impl Render for TaskPanel {
             .size_full()
             .flex()
             .flex_row()
+            .relative()
             .on_action(cx.listener(|this, _action: &SetReminderAction, window, cx| {
                 if let Some(task_id) = this.context_menu_task_id {
                     if let Some(task) = this.tasks.iter().find(|t| t.id == task_id).cloned() {

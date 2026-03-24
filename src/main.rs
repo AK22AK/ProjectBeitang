@@ -295,8 +295,8 @@ impl Render for MainView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .p(px(24.0))
-                    .bg(rgb(0xffffff))  // 白色背景便于看清
+                    .relative()
+                    .bg(rgb(0xffffff))
                     .child(match self.current_panel {
                         Panel::Dashboard => self.dashboard_panel.clone().into_any_element(),
                         Panel::Search => self.search_panel.clone().into_any_element(),
