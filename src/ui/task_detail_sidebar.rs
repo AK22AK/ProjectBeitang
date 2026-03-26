@@ -21,7 +21,6 @@ pub struct TaskDetailSidebar {
     date_picker: Option<Entity<DatePickerState>>,
     time_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
-    editing_content: bool,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
 }
@@ -56,7 +55,6 @@ impl TaskDetailSidebar {
             date_picker: None,
             time_input: None,
             content_input: None,
-            editing_content: false,
             on_save: None,
             on_close: None,
         }
@@ -132,20 +130,6 @@ impl TaskDetailSidebar {
             self.content_input = Some(content_input);
         }
 
-        // 重置编辑状态
-        self.editing_content = false;
-
-        cx.notify();
-    }
-
-    fn start_edit_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_content = true;
-        // 聚焦输入框
-        if let Some(ref input) = self.content_input {
-            input.update(cx, |state, cx| {
-                state.focus(window, cx);
-            });
-        }
         cx.notify();
     }
 
@@ -316,8 +300,6 @@ impl Render for TaskDetailSidebar {
         let dp_clone = self.date_picker.clone();
         let ti_clone = self.time_input.clone();
         let content_input_clone = self.content_input.clone();
-        let editing_content = self.editing_content;
-        let task_content = self.task_content.clone();
 
         gpui::div()
             .absolute()
@@ -393,32 +375,12 @@ impl Render for TaskDetailSidebar {
                                                     .text_color(gpui::rgb(0x666666))
                                                     .child("内容"),
                                             )
-                                            .map(|el| {
-                                                if editing_content {
-                                                    el.when_some(
-                                                        content_input_clone.clone(),
-                                                        |el, input| el.child(Input::new(&input)),
-                                                    )
-                                                } else {
-                                                    el.child(
-                                                        gpui::div()
-                                                            .p(gpui::px(8.0))
-                                                            .rounded(gpui::px(4.0))
-                                                            .hover(|s| s.bg(gpui::rgb(0xf5f5f5)))
-                                                            .cursor_pointer()
-                                                            .on_mouse_down(
-                                                                gpui::MouseButton::Left,
-                                                                cx.listener(move |this, _event, window, cx| {
-                                                                    this.start_edit_content(window, cx);
-                                                                }),
-                                                            )
-                                                            .child(
-                                                                gpui::div()
-                                                                    .text_sm()
-                                                                    .child(task_content.clone()),
-                                                            ),
-                                                    )
-                                                }
+                                            .when_some(content_input_clone.clone(), |el, input| {
+                                                el.child(
+                                                    Input::new(&input)
+                                                        .appearance(false)
+                                                        .text_size(gpui::px(14.0)),
+                                                )
                                             }),
                                     )
                                     .child(
