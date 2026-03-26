@@ -20,6 +20,8 @@ pub struct TaskDetailSidebar {
     cancel_reason: Option<String>,
     date_picker: Option<Entity<DatePickerState>>,
     time_input: Option<Entity<InputState>>,
+    content_input: Option<Entity<InputState>>,
+    editing_content: bool,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
 }
@@ -28,6 +30,7 @@ pub struct TaskDetailSidebar {
 #[derive(Debug, Clone)]
 pub struct SavePayload {
     pub task_id: String,
+    pub content: String,
     pub priority: Priority,
     pub status: TaskStatus,
     pub due_date: Option<DateTime<Utc>>,
@@ -52,6 +55,8 @@ impl TaskDetailSidebar {
             cancel_reason: None,
             date_picker: None,
             time_input: None,
+            content_input: None,
+            editing_content: false,
             on_save: None,
             on_close: None,
         }
@@ -113,6 +118,34 @@ impl TaskDetailSidebar {
             self.init_picker_states(init_date, &init_time_str, window, cx);
         }
 
+        // 初始化或更新内容输入框
+        if let Some(ref input) = self.content_input {
+            input.update(cx, |state, cx| {
+                state.set_value(&task.content, window, cx);
+            });
+        } else {
+            let content_input = cx.new(|cx| {
+                let mut input = InputState::new(window, cx);
+                input.set_value(&task.content, window, cx);
+                input
+            });
+            self.content_input = Some(content_input);
+        }
+
+        // 重置编辑状态
+        self.editing_content = false;
+
+        cx.notify();
+    }
+
+    fn start_edit_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_content = true;
+        // 聚焦输入框
+        if let Some(ref input) = self.content_input {
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -164,7 +197,12 @@ impl TaskDetailSidebar {
         if let (Some(ref task_id), Some(ref priority), Some(ref status)) =
             (&self.current_task_id, &self.priority, &self.status)
         {
-            // 从选择器读取当前值
+            let content = self
+                .content_input
+                .as_ref()
+                .map(|input| input.read(cx).value().to_string())
+                .unwrap_or_else(|| self.task_content.clone());
+
             let due_date = self.date_picker.as_ref().and_then(|dp| {
                 let date_range = dp.read(cx).date();
                 let start_date = date_range.start();
@@ -181,6 +219,7 @@ impl TaskDetailSidebar {
 
             let payload = SavePayload {
                 task_id: task_id.clone(),
+                content,
                 priority: priority.clone(),
                 status: status.clone(),
                 due_date,
@@ -274,9 +313,11 @@ impl TaskDetailSidebar {
 impl Render for TaskDetailSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_visible = self.current_task_id.is_some();
-        let task_content = self.task_content.clone();
         let dp_clone = self.date_picker.clone();
         let ti_clone = self.time_input.clone();
+        let content_input_clone = self.content_input.clone();
+        let editing_content = self.editing_content;
+        let task_content = self.task_content.clone();
 
         gpui::div()
             .absolute()
@@ -352,7 +393,33 @@ impl Render for TaskDetailSidebar {
                                                     .text_color(gpui::rgb(0x666666))
                                                     .child("内容"),
                                             )
-                                            .child(gpui::div().text_sm().child(task_content)),
+                                            .map(|el| {
+                                                if editing_content {
+                                                    el.when_some(
+                                                        content_input_clone.clone(),
+                                                        |el, input| el.child(Input::new(&input)),
+                                                    )
+                                                } else {
+                                                    el.child(
+                                                        gpui::div()
+                                                            .p(gpui::px(8.0))
+                                                            .rounded(gpui::px(4.0))
+                                                            .hover(|s| s.bg(gpui::rgb(0xf5f5f5)))
+                                                            .cursor_pointer()
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                cx.listener(move |this, _event, window, cx| {
+                                                                    this.start_edit_content(window, cx);
+                                                                }),
+                                                            )
+                                                            .child(
+                                                                gpui::div()
+                                                                    .text_sm()
+                                                                    .child(task_content.clone()),
+                                                            ),
+                                                    )
+                                                }
+                                            }),
                                     )
                                     .child(
                                         v_flex()

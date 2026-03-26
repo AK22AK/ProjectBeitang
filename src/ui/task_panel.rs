@@ -173,6 +173,7 @@ impl TaskPanel {
 
     fn handle_sidebar_save(&mut self, payload: &crate::ui::task_detail_sidebar::SavePayload, cx: &mut Context<Self>) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id.to_string() == payload.task_id) {
+            task.content = payload.content.clone();
             task.priority = Some(payload.priority.clone());
             task.status = Some(payload.status.clone());
             task.due_date = payload.due_date;
