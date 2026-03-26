@@ -20,8 +20,8 @@ pub struct TaskDetailSidebar {
     cancel_reason: Option<String>,
     date_picker: Option<Entity<DatePickerState>>,
     time_input: Option<Entity<InputState>>,
-    on_save: Option<Box<dyn Fn(SavePayload, &mut Window, &mut Context<Self>) + Send + Sync>>,
-    on_close: Option<Box<dyn Fn(&mut Window, &mut Context<Self>) + Send + Sync>>,
+    on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
+    on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
 }
 
 /// 保存时的数据载荷
@@ -57,18 +57,16 @@ impl TaskDetailSidebar {
         }
     }
 
-    /// 设置保存回调
     pub fn on_save<F>(&mut self, callback: F)
     where
-        F: Fn(SavePayload, &mut Window, &mut Context<Self>) + Send + Sync + 'static,
+        F: Fn(SavePayload, &mut Context<Self>) + Send + Sync + 'static,
     {
         self.on_save = Some(Box::new(callback));
     }
 
-    /// 设置关闭回调
     pub fn on_close<F>(&mut self, callback: F)
     where
-        F: Fn(&mut Window, &mut Context<Self>) + Send + Sync + 'static,
+        F: Fn(&mut Context<Self>) + Send + Sync + 'static,
     {
         self.on_close = Some(Box::new(callback));
     }
@@ -162,7 +160,7 @@ impl TaskDetailSidebar {
         self.time_input = Some(time_input);
     }
 
-    fn save_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let (Some(ref task_id), Some(ref priority), Some(ref status)) =
             (&self.current_task_id, &self.priority, &self.status)
         {
@@ -190,7 +188,7 @@ impl TaskDetailSidebar {
             };
 
             if let Some(ref callback) = self.on_save {
-                callback(payload, window, cx);
+                callback(payload, cx);
             }
         }
     }
@@ -237,9 +235,12 @@ impl TaskDetailSidebar {
                 b.with_variant(gpui_component::button::ButtonVariant::Primary)
             })
             .when(!is_selected, |b| b.text_color(color))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                this.set_status(status.clone(), window, cx);
-            }))
+            .on_click(
+                cx.listener(move |this, _event: &gpui::ClickEvent, window, cx| {
+                    this.set_status(status.clone(), window, cx);
+                    cx.stop_propagation();
+                }),
+            )
     }
 
     fn render_priority_button(
@@ -261,9 +262,12 @@ impl TaskDetailSidebar {
                 b.with_variant(gpui_component::button::ButtonVariant::Primary)
             })
             .when(!is_selected, |b| b.text_color(color))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                this.set_priority(priority.clone(), window, cx);
-            }))
+            .on_click(
+                cx.listener(move |this, _event: &gpui::ClickEvent, window, cx| {
+                    this.set_priority(priority.clone(), window, cx);
+                    cx.stop_propagation();
+                }),
+            )
     }
 }
 
@@ -279,7 +283,7 @@ impl Render for TaskDetailSidebar {
             .top(gpui::px(0.0))
             .right(gpui::px(0.0))
             .bottom(gpui::px(0.0))
-            .w(gpui::px(320.0))
+            .w(gpui::px(360.0))
             .when(!is_visible, |el| el.invisible())
             .overflow_hidden()
             .border_l_1()
@@ -287,7 +291,7 @@ impl Render for TaskDetailSidebar {
             .bg(gpui::rgb(0xffffff))
             .child(
                 gpui::div()
-                    .w(gpui::px(320.0))
+                    .w(gpui::px(360.0))
                     .h_full()
                     .flex()
                     .flex_col()
@@ -296,7 +300,7 @@ impl Render for TaskDetailSidebar {
                     .bg(gpui::rgb(0xffffff))
                     .child(
                         gpui::div()
-                            .p(gpui::px(16.0))
+                            .p(gpui::px(12.0))
                             .border_b_1()
                             .border_color(gpui::rgb(0xe8e8e8))
                             .child(
@@ -305,7 +309,7 @@ impl Render for TaskDetailSidebar {
                                     .items_center()
                                     .child(
                                         gpui::div()
-                                            .text_base()
+                                            .text_sm()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .child("任务详情"),
                                     )
@@ -314,7 +318,7 @@ impl Render for TaskDetailSidebar {
                                             cx.listener(|this, _event, window, cx| {
                                                 this.close(window, cx);
                                                 if let Some(ref callback) = this.on_close {
-                                                    callback(window, cx);
+                                                    callback(cx);
                                                 }
                                             }),
                                         ),
@@ -324,34 +328,34 @@ impl Render for TaskDetailSidebar {
                     .child(
                         gpui::div()
                             .flex_1()
-                            .p(gpui::px(16.0))
+                            .p(gpui::px(12.0))
                             .overflow_y_scrollbar()
                             .child(
                                 v_flex()
-                                    .gap(gpui::px(16.0))
+                                    .gap(gpui::px(12.0))
                                     .child(
                                         v_flex()
-                                            .gap(gpui::px(8.0))
+                                            .gap(gpui::px(6.0))
                                             .child(
                                                 gpui::div()
-                                                    .text_sm()
+                                                    .text_xs()
                                                     .text_color(gpui::rgb(0x666666))
                                                     .child("内容"),
                                             )
-                                            .child(gpui::div().text_base().child(task_content)),
+                                            .child(gpui::div().text_sm().child(task_content)),
                                     )
                                     .child(
                                         v_flex()
-                                            .gap(gpui::px(8.0))
+                                            .gap(gpui::px(6.0))
                                             .child(
                                                 gpui::div()
-                                                    .text_sm()
+                                                    .text_xs()
                                                     .text_color(gpui::rgb(0x666666))
                                                     .child("状态"),
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(gpui::px(8.0))
+                                                    .gap(gpui::px(6.0))
                                                     .child(
                                                         self.render_status_button(
                                                             TaskStatus::Todo,
@@ -376,16 +380,16 @@ impl Render for TaskDetailSidebar {
                                     )
                                     .child(
                                         v_flex()
-                                            .gap(gpui::px(8.0))
+                                            .gap(gpui::px(6.0))
                                             .child(
                                                 gpui::div()
-                                                    .text_sm()
+                                                    .text_xs()
                                                     .text_color(gpui::rgb(0x666666))
                                                     .child("优先级"),
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(gpui::px(8.0))
+                                                    .gap(gpui::px(6.0))
                                                     .child(
                                                         self.render_priority_button(
                                                             Priority::High,
@@ -406,16 +410,16 @@ impl Render for TaskDetailSidebar {
                                     )
                                     .child(
                                         v_flex()
-                                            .gap(gpui::px(8.0))
+                                            .gap(gpui::px(6.0))
                                             .child(
                                                 gpui::div()
-                                                    .text_sm()
+                                                    .text_xs()
                                                     .text_color(gpui::rgb(0x666666))
                                                     .child("截止日期"),
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(gpui::px(8.0))
+                                                    .gap(gpui::px(6.0))
                                                     .items_end()
                                                     .when_some(dp_clone.clone(), |el, dp| {
                                                         el.child(
@@ -429,7 +433,7 @@ impl Render for TaskDetailSidebar {
                                                     .when_some(ti_clone.clone(), |el, ti| {
                                                         el.child(
                                                             gpui::div()
-                                                                .w(gpui::px(100.0))
+                                                                .w(gpui::px(80.0))
                                                                 .child(Input::new(&ti)),
                                                         )
                                                     }),
@@ -438,16 +442,16 @@ impl Render for TaskDetailSidebar {
                                     .when(self.status == Some(TaskStatus::Cancelled), |el| {
                                         el.child(
                                             v_flex()
-                                                .gap(gpui::px(8.0))
+                                                .gap(gpui::px(6.0))
                                                 .child(
                                                     gpui::div()
-                                                        .text_sm()
+                                                        .text_xs()
                                                         .text_color(gpui::rgb(0x666666))
                                                         .child("取消原因"),
                                                 )
                                                 .child(
                                                     gpui::div()
-                                                        .text_sm()
+                                                        .text_xs()
                                                         .text_color(gpui::rgb(0x999999))
                                                         .child("（此处可添加原因输入框）"),
                                                 ),
@@ -457,7 +461,7 @@ impl Render for TaskDetailSidebar {
                     )
                     .child(
                         gpui::div()
-                            .p(gpui::px(16.0))
+                            .p(gpui::px(12.0))
                             .border_t_1()
                             .border_color(gpui::rgb(0xe8e8e8))
                             .child(

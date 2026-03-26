@@ -158,8 +158,53 @@ impl TaskPanel {
             task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
         };
 
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_save(move |payload, cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_sidebar_save(&payload, cx);
+                });
+            });
+        });
+
         panel.load_tasks(cx);
         panel
+    }
+
+    fn handle_sidebar_save(&mut self, payload: &crate::ui::task_detail_sidebar::SavePayload, cx: &mut Context<Self>) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id.to_string() == payload.task_id) {
+            task.priority = Some(payload.priority.clone());
+            task.status = Some(payload.status.clone());
+            task.due_date = payload.due_date;
+            task.cancelled_reason = payload.cancel_reason.clone();
+            task.updated_at = chrono::Utc::now();
+
+            match payload.status {
+                TaskStatus::Done => {
+                    if task.completed_at.is_none() {
+                        task.completed_at = Some(chrono::Utc::now());
+                    }
+                }
+                TaskStatus::Cancelled => {
+                    if task.completed_at.is_none() {
+                        task.completed_at = Some(chrono::Utc::now());
+                    }
+                }
+                _ => {
+                    task.completed_at = None;
+                }
+            }
+
+            let updated_task = task.clone();
+            let store = self.store.clone();
+            cx.spawn(async move |_view, _cx| {
+                if let Err(e) = store.update_record(updated_task).await {
+                    eprintln!("[TaskPanel] Failed to update task: {}", e);
+                }
+            }).detach();
+
+            cx.notify();
+        }
     }
 
     fn categorize_quadrant(task: &Record) -> Quadrant {
@@ -968,7 +1013,12 @@ impl TaskPanel {
     }
 
     fn render_list_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = self.get_filtered_tasks()
+        let filtered_tasks: Vec<_> = self.tasks
+            .iter()
+            .filter(|t| self.priority_filter.matches(t.priority.clone()))
+            .cloned()
+            .collect();
+        let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = filtered_tasks
             .iter()
             .cloned()
             .partition(|task| task.completed_at.is_none());
