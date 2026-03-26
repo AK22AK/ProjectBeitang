@@ -289,6 +289,7 @@ impl Render for TaskDetailSidebar {
             .border_l_1()
             .border_color(gpui::rgb(0xe8e8e8))
             .bg(gpui::rgb(0xffffff))
+            .cursor_default()
             .child(
                 gpui::div()
                     .w(gpui::px(360.0))
@@ -298,11 +299,19 @@ impl Render for TaskDetailSidebar {
                     .border_l_1()
                     .border_color(gpui::rgb(0xe8e8e8))
                     .bg(gpui::rgb(0xffffff))
+                    .cursor_default()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_this, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
                     .child(
                         gpui::div()
                             .p(gpui::px(12.0))
                             .border_b_1()
                             .border_color(gpui::rgb(0xe8e8e8))
+                            .cursor_default()
                             .child(
                                 h_flex()
                                     .justify_between()
@@ -330,6 +339,7 @@ impl Render for TaskDetailSidebar {
                             .flex_1()
                             .p(gpui::px(12.0))
                             .overflow_y_scrollbar()
+                            .cursor_default()
                             .child(
                                 v_flex()
                                     .gap(gpui::px(12.0))
@@ -464,6 +474,7 @@ impl Render for TaskDetailSidebar {
                             .p(gpui::px(12.0))
                             .border_t_1()
                             .border_color(gpui::rgb(0xe8e8e8))
+                            .cursor_default()
                             .child(
                                 Button::new("sidebar-save-detail")
                                     .w_full()
