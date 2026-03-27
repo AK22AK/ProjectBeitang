@@ -173,6 +173,7 @@ impl TaskPanel {
 
     fn handle_sidebar_save(&mut self, payload: &crate::ui::task_detail_sidebar::SavePayload, cx: &mut Context<Self>) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id.to_string() == payload.task_id) {
+            task.title = payload.title.clone();
             task.content = payload.content.clone();
             task.priority = Some(payload.priority.clone());
             task.status = Some(payload.status.clone());
@@ -322,11 +323,11 @@ impl TaskPanel {
     fn save_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(task_id) = self.editing_task_id {
             if let Some(input_state) = self.task_input_states.get(&task_id) {
-                let new_content = input_state.read(cx).text().to_string();
-                let (content, priority) = Self::parse_input_static(&new_content);
+                let new_title = input_state.read(cx).text().to_string();
+                let (title, priority) = Self::parse_input_static(&new_title);
 
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-                    task.content = content;
+                    task.title = Some(title);
                     task.priority = Some(priority);
                     let updated_task = task.clone();
                     let store = self.store.clone();
@@ -499,9 +500,10 @@ impl TaskPanel {
             return;
         }
 
-        let (content, priority) = self.parse_input(&text);
-        eprintln!("[TaskPanel] Parsed content: '{}', priority: {:?}", content, priority);
-        let task = Record::new_task(content, priority);
+        let (title, priority) = self.parse_input(&text);
+        eprintln!("[TaskPanel] Parsed title: '{}', priority: {:?}", title, priority);
+        // 任务创建时，输入内容作为 title，content 初始为空
+        let task = Record::new_task(title, String::new(), priority);
         eprintln!("[TaskPanel] Created task with id: {}", task.id);
 
         self.input_state.update(cx, |state, cx| {
@@ -762,7 +764,7 @@ impl TaskPanel {
         let is_completed = task.completed_at.is_some();
         let sidebar_task_id = self.task_detail_sidebar.read(cx).current_task_id().map(|s| s.to_string());
         let is_selected = sidebar_task_id == Some(task_id.to_string());
-        
+
         let priority_marker = match task.priority {
             Some(Priority::High) => "!!",
             Some(Priority::Medium) => "!",
@@ -784,6 +786,20 @@ impl TaskPanel {
             } else {
                 local.format("%Y-%m-%d %H:%M").to_string()
             }
+        };
+
+        // 任务显示标题，如有详细内容则显示预览
+        let display_title = task.title.clone().unwrap_or_else(|| "无标题任务".to_string());
+        let has_content_preview = !task.content.trim().is_empty();
+        let content_preview = if has_content_preview {
+            let preview: String = task.content.chars().take(60).collect();
+            if task.content.chars().count() > 60 {
+                format!("{}...", preview)
+            } else {
+                preview
+            }
+        } else {
+            String::new()
         };
 
         div()
@@ -834,28 +850,29 @@ impl TaskPanel {
                             .gap(px(if compact { 2.0 } else { 4.0 }))
                             .child({
                                 let task_id_for_edit = task_id;
-                                let task_content = task.content.clone();
+                                let task_title = display_title.clone();
                                 let input_state = self.task_input_states
                                     .get(&task_id)
                                     .cloned()
                                     .unwrap_or_else(|| {
                                         let state = cx.new(|cx| {
                                             let mut s = InputState::new(window, cx);
-                                            s.set_value(&task_content, window, cx);
+                                            s.set_value(&task_title, window, cx);
                                             s
                                         });
-                                        
+
                                         cx.subscribe_in(&state, window, move |this, _state, event: &InputEvent, _window, cx| {
                                             match event {
                                                 InputEvent::Blur | InputEvent::PressEnter { .. } => {
-                                                    let new_content = this.task_input_states
+                                                    let new_title = this.task_input_states
                                                         .get(&task_id_for_edit)
                                                         .map(|s| s.read(cx).text().to_string())
                                                         .unwrap_or_default();
-                                                    
+
                                                     if let Some(task) = this.tasks.iter_mut().find(|t| t.id == task_id_for_edit) {
-                                                        if task.content != new_content && !new_content.trim().is_empty() {
-                                                            task.content = new_content;
+                                                        let current_title = task.title.clone().unwrap_or_default();
+                                                        if current_title != new_title && !new_title.trim().is_empty() {
+                                                            task.title = Some(new_title);
                                                             task.updated_at = chrono::Utc::now();
                                                             let updated_task = task.clone();
                                                             let store = this.store.clone();
@@ -870,38 +887,51 @@ impl TaskPanel {
                                                 _ => {}
                                             }
                                         }).detach();
-                                        
+
                                         state
                                     });
-                                
+
                                 if !self.task_input_states.contains_key(&task_id) {
                                     self.task_input_states.insert(task_id, input_state.clone());
                                 }
-                                
-                                h_flex()
-                                    .gap(px(4.0))
-                                    .items_center()
-                                    .when(!priority_marker.is_empty(), |el| {
+
+                                v_flex()
+                                    .flex_1()
+                                    .gap(px(2.0))
+                                    .child(
+                                        h_flex()
+                                            .gap(px(4.0))
+                                            .items_center()
+                                            .when(!priority_marker.is_empty(), |el| {
+                                                el.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(priority_color)
+                                                        .child(priority_marker)
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .child({
+                                                        Input::new(&input_state)
+                                                            .appearance(false)
+                                                            .focus_bordered(false)
+                                                            .text_size(px(14.0))
+                                                            .text_color(if is_completed { rgb(0x999999) } else { rgb(0x333333) })
+                                                            .disabled(true)
+                                                    })
+                                            )
+                                    )
+                                    .when(has_content_preview && !compact, |el| {
                                         el.child(
                                             div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(priority_color)
-                                                .child(priority_marker)
+                                                .text_sm()
+                                                .text_color(rgb(0x888888))
+                                                .child(content_preview)
                                         )
                                     })
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .child({
-                                                Input::new(&input_state)
-                                                    .appearance(false)
-                                                    .focus_bordered(false)
-                                                    .text_size(px(14.0))
-                                                    .text_color(if is_completed { rgb(0x999999) } else { rgb(0x333333) })
-                                                    .disabled(true)
-                                            })
-                                    )
                             })
                             .when(!compact, |el| {
                                 el.child(

@@ -102,8 +102,9 @@ impl QuickAddWindow {
             return;
         }
 
-        let (content, priority, tags, people) = parse_task_input(&text);
-        let mut task = Record::new_task(content, priority);
+        let (title, priority, tags, people) = parse_task_input(&text);
+        // 快速添加时，输入内容作为 title，content 初始为空
+        let mut task = Record::new_task(title, String::new(), priority);
         
         // 添加标签和人物
         for tag in tags {

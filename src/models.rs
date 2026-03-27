@@ -20,6 +20,9 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub id: Uuid,
+    /// 标题 - 任务必填，记录可选
+    pub title: Option<String>,
+    /// 内容/详情 - 任务的详细描述或记录的内容
     pub content: String,
     pub priority: Option<Priority>,
     pub status: Option<TaskStatus>,
@@ -74,10 +77,12 @@ pub struct Attachment {
 }
 
 impl Record {
-    pub fn new_task(content: String, priority: Priority) -> Self {
+    /// 创建新任务 - title 作为任务标题，content 作为详细描述（可选）
+    pub fn new_task(title: String, content: String, priority: Priority) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            title: Some(title),
             content,
             priority: Some(priority),
             status: Some(TaskStatus::Todo),
@@ -94,11 +99,15 @@ impl Record {
         }
     }
 
+    /// 创建新记录/笔记 - content 作为主要内容，title 可选（可从第一行提取）
     pub fn new_note(content: String) -> Self {
         let now = Utc::now();
+        // 从内容中提取第一行作为标题（如果有）
+        let title = Self::extract_title_from_content(&content);
         Self {
             id: Uuid::new_v4(),
-            content,
+            title,
+            content: content.clone(),
             priority: None,
             status: None,
             created_at: now,
@@ -114,11 +123,14 @@ impl Record {
         }
     }
 
+    /// 创建新想法 - 类似笔记，content 为主
     pub fn new_idea(content: String) -> Self {
         let now = Utc::now();
+        let title = Self::extract_title_from_content(&content);
         Self {
             id: Uuid::new_v4(),
-            content,
+            title,
+            content: content.clone(),
             priority: None,
             status: None,
             created_at: now,
@@ -132,6 +144,43 @@ impl Record {
             tags: Vec::new(),
             persons: Vec::new(),
         }
+    }
+
+    /// 从内容中提取第一行非空文本作为标题
+    fn extract_title_from_content(content: &str) -> Option<String> {
+        content
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string())
+    }
+
+    /// 获取用于列表显示的标题
+    /// - 任务：返回 title（必填）
+    /// - 记录/笔记：优先返回 title，否则返回 content 前50字符
+    pub fn display_title(&self) -> String {
+        match self.record_type {
+            RecordType::Task => self
+                .title
+                .clone()
+                .unwrap_or_else(|| "无标题任务".to_string()),
+            _ => self
+                .title
+                .clone()
+                .or_else(|| {
+                    let preview: String = self.content.chars().take(50).collect();
+                    if preview.is_empty() {
+                        None
+                    } else {
+                        Some(preview)
+                    }
+                })
+                .unwrap_or_else(|| "无标题".to_string()),
+        }
+    }
+
+    /// 获取内容预览（用于列表显示）
+    pub fn content_preview(&self, max_len: usize) -> String {
+        self.content.chars().take(max_len).collect()
     }
 
     pub fn complete(&mut self) {
@@ -150,9 +199,14 @@ mod tests {
 
     #[test]
     fn test_new_task_creates_task_with_correct_properties() {
-        let task = Record::new_task("Test content".to_string(), Priority::High);
+        let task = Record::new_task(
+            "Test Title".to_string(),
+            "Test content details".to_string(),
+            Priority::High,
+        );
 
-        assert_eq!(task.content, "Test content");
+        assert_eq!(task.title, Some("Test Title".to_string()));
+        assert_eq!(task.content, "Test content details");
         assert_eq!(task.priority, Some(Priority::High));
         assert_eq!(task.record_type, RecordType::Task);
         assert!(!task.is_completed());
@@ -163,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_complete_marks_task_as_completed() {
-        let mut task = Record::new_task("Test".to_string(), Priority::Medium);
+        let mut task = Record::new_task("Test".to_string(), "".to_string(), Priority::Medium);
         assert!(!task.is_completed());
 
         task.complete();

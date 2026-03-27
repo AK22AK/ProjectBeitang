@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Result};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Database {
     conn: Connection,
@@ -30,6 +30,7 @@ impl Database {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS records (
                 id TEXT PRIMARY KEY,
+                title TEXT,
                 content TEXT NOT NULL,
                 priority INTEGER,
                 status TEXT,
@@ -157,7 +158,7 @@ impl Database {
             "CREATE TRIGGER IF NOT EXISTS records_fts_insert
              AFTER INSERT ON records
              BEGIN
-                 INSERT INTO records_fts (record_id, content) VALUES (new.id, new.content);
+                 INSERT INTO records_fts (record_id, content) VALUES (new.id, COALESCE(new.title, '') || ' ' || new.content);
              END",
             [],
         )?;
@@ -166,7 +167,7 @@ impl Database {
             "CREATE TRIGGER IF NOT EXISTS records_fts_update
              AFTER UPDATE ON records
              BEGIN
-                 UPDATE records_fts SET content = new.content WHERE record_id = old.id;
+                 UPDATE records_fts SET content = COALESCE(new.title, '') || ' ' || new.content WHERE record_id = old.id;
              END",
             [],
         )?;
@@ -201,6 +202,10 @@ impl Database {
 
         if version < 2 {
             self.migrate_v1_to_v2()?;
+        }
+
+        if version < 3 {
+            self.migrate_v2_to_v3()?;
         }
 
         let now = Utc::now().to_rfc3339();
@@ -245,6 +250,65 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v2_to_v3(&self) -> Result<()> {
+        // 添加 title 列
+        let _ = self
+            .conn
+            .execute("ALTER TABLE records ADD COLUMN title TEXT", []);
+
+        // 迁移现有数据：将 content 第一行提取为 title，剩余内容保留在 content 中
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, content FROM records WHERE title IS NULL")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+
+        for (id, content) in rows {
+            let lines: Vec<&str> = content.lines().collect();
+
+            if lines.is_empty() {
+                continue;
+            }
+
+            // 第一行作为 title
+            let title = lines[0].trim().to_string();
+
+            // 剩余行作为新的 content（保留换行）
+            let new_content = if lines.len() > 1 {
+                lines[1..].join("\n").trim().to_string()
+            } else {
+                String::new()
+            };
+
+            self.conn.execute(
+                "UPDATE records SET title = ?1, content = ?2 WHERE id = ?3",
+                [&title, &new_content, &id],
+            )?;
+        }
+
+        // 重建 FTS 索引以包含 title
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS records_fts_insert
+             AFTER INSERT ON records
+             BEGIN
+                 INSERT INTO records_fts (record_id, content) VALUES (new.id, COALESCE(new.title, '') || ' ' || new.content);
+             END",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS records_fts_update
+             AFTER UPDATE ON records
+             BEGIN
+                 UPDATE records_fts SET content = COALESCE(new.title, '') || ' ' || new.content WHERE record_id = old.id;
+             END",
+            [],
+        )?;
+
+        Ok(())
+    }
+
     pub fn create_record(&self, record: &Record) -> Result<()> {
         let priority_val = record.priority.as_ref().map(|p| match p {
             Priority::High => 0i64,
@@ -274,9 +338,10 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO records (id, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO records (id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
                 content = excluded.content,
                 priority = excluded.priority,
                 status = excluded.status,
@@ -288,6 +353,7 @@ impl Database {
                 updated_at = excluded.updated_at",
             [
                 &record.id.to_string() as &dyn rusqlite::ToSql,
+                &record.title as &dyn rusqlite::ToSql,
                 &record.content as &dyn rusqlite::ToSql,
                 &priority_val as &dyn rusqlite::ToSql,
                 &status_str as &dyn rusqlite::ToSql,
@@ -370,7 +436,7 @@ impl Database {
     pub fn get_tasks(&self, _completed: bool) -> Result<Vec<Record>> {
         eprintln!("[DB] get_tasks called");
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              WHERE record_type = 'task'
              ORDER BY created_at DESC"
@@ -392,7 +458,7 @@ impl Database {
     pub fn get_notes(&self) -> Result<Vec<Record>> {
         eprintln!("[DB] get_notes called");
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              WHERE record_type = 'note'
              ORDER BY created_at DESC"
@@ -413,7 +479,7 @@ impl Database {
 
     pub fn get_pending_reminders(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              WHERE completed_at IS NULL
                AND notified_at IS NULL
@@ -461,7 +527,7 @@ impl Database {
 
     pub fn get_timeline(&self, limit: i64, offset: i64) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              ORDER BY created_at DESC
              LIMIT ?1 OFFSET ?2"
@@ -487,7 +553,7 @@ impl Database {
             .join(" ");
 
         let mut stmt = self.conn.prepare(
-            "SELECT r.id, r.content, r.priority, r.status, r.created_at, r.updated_at,
+            "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
                     r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
                     r.cancelled_reason, r.record_type
              FROM records r
@@ -788,7 +854,7 @@ impl Database {
 
     pub fn get_record_by_id(&self, id: Uuid) -> Result<Option<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records WHERE id = ?1"
         )?;
 
@@ -804,25 +870,27 @@ impl Database {
 
     fn row_to_record(&self, row: &rusqlite::Row) -> Result<Record> {
         let id_str: String = row.get(0)?;
-        let content: String = row.get(1)?;
-        let priority_int: Option<i64> = row.get(2)?;
-        let status_str: Option<String> = row.get(3)?;
-        let created_at_str: String = row.get(4)?;
-        let updated_at_str: String = row.get(5)?;
-        let completed_at_str: Option<String> = row.get(6)?;
-        let scheduled_for_str: Option<String> = row.get(7)?;
-        let due_date_str: Option<String> = row.get(8)?;
-        let notified_at_str: Option<String> = row.get(9)?;
-        let cancelled_reason: Option<String> = row.get(10)?;
-        let record_type_str: String = row.get(11)?;
+        let title: Option<String> = row.get(1)?;
+        let content: String = row.get(2)?;
+        let priority_int: Option<i64> = row.get(3)?;
+        let status_str: Option<String> = row.get(4)?;
+        let created_at_str: String = row.get(5)?;
+        let updated_at_str: String = row.get(6)?;
+        let completed_at_str: Option<String> = row.get(7)?;
+        let scheduled_for_str: Option<String> = row.get(8)?;
+        let due_date_str: Option<String> = row.get(9)?;
+        let notified_at_str: Option<String> = row.get(10)?;
+        let cancelled_reason: Option<String> = row.get(11)?;
+        let record_type_str: String = row.get(12)?;
 
         eprintln!(
-            "[DB] Row: id={}, content='{}', priority_int={:?}",
-            id_str, content, priority_int
+            "[DB] Row: id={}, title={:?}, content='{}', priority_int={:?}",
+            id_str, title, content, priority_int
         );
 
         Ok(Record {
             id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+            title,
             content,
             priority: priority_int.map(|p| match p {
                 0 => Priority::High,
@@ -897,11 +965,16 @@ mod tests {
     fn test_create_and_get_record() {
         let (db, _temp) = setup_test_db();
 
-        let record = Record::new_task("Test task".to_string(), Priority::High);
+        let record = Record::new_task(
+            "Test Title".to_string(),
+            "Test task".to_string(),
+            Priority::High,
+        );
         db.create_record(&record).unwrap();
 
         let tasks = db.get_tasks(false).unwrap();
         assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, Some("Test Title".to_string()));
         assert_eq!(tasks[0].content, "Test task");
     }
 

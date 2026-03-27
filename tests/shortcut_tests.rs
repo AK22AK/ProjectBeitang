@@ -72,17 +72,22 @@ fn test_new_note_creates_note_without_priority() {
 
 #[test]
 fn test_new_task_creates_task_with_priority() {
-    let task = Record::new_task("Test task".to_string(), Priority::High);
-    assert_eq!(task.content, "Test task");
+    let task = Record::new_task(
+        "Test Title".to_string(),
+        "Test content".to_string(),
+        Priority::High,
+    );
+    assert_eq!(task.title, Some("Test Title".to_string()));
+    assert_eq!(task.content, "Test content");
     assert_eq!(task.priority, Some(Priority::High));
     assert_eq!(task.record_type, beitang::models::RecordType::Task);
 }
 
 #[test]
 fn test_new_task_with_different_priorities() {
-    let high_task = Record::new_task("High task".to_string(), Priority::High);
-    let medium_task = Record::new_task("Medium task".to_string(), Priority::Medium);
-    let low_task = Record::new_task("Low task".to_string(), Priority::Low);
+    let high_task = Record::new_task("High task".to_string(), "".to_string(), Priority::High);
+    let medium_task = Record::new_task("Medium task".to_string(), "".to_string(), Priority::Medium);
+    let low_task = Record::new_task("Low task".to_string(), "".to_string(), Priority::Low);
 
     assert_eq!(high_task.priority, Some(Priority::High));
     assert_eq!(medium_task.priority, Some(Priority::Medium));

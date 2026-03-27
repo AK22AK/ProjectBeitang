@@ -13,6 +13,7 @@ use crate::models::{Priority, Record, TaskStatus};
 
 pub struct TaskDetailSidebar {
     current_task_id: Option<String>,
+    task_title: Option<String>,
     task_content: String,
     priority: Option<Priority>,
     status: Option<TaskStatus>,
@@ -23,6 +24,7 @@ pub struct TaskDetailSidebar {
     time_input: Option<Entity<InputState>>,
     reminder_date_picker: Option<Entity<DatePickerState>>,
     reminder_time_input: Option<Entity<InputState>>,
+    title_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
@@ -32,6 +34,7 @@ pub struct TaskDetailSidebar {
 #[derive(Debug, Clone)]
 pub struct SavePayload {
     pub task_id: String,
+    pub title: Option<String>,
     pub content: String,
     pub priority: Priority,
     pub status: TaskStatus,
@@ -51,6 +54,7 @@ impl TaskDetailSidebar {
     pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
             current_task_id: None,
+            task_title: None,
             task_content: String::new(),
             priority: None,
             status: None,
@@ -61,6 +65,7 @@ impl TaskDetailSidebar {
             time_input: None,
             reminder_date_picker: None,
             reminder_time_input: None,
+            title_input: None,
             content_input: None,
             on_save: None,
             on_close: None,
@@ -92,6 +97,7 @@ impl TaskDetailSidebar {
 
         // 更新任务数据
         self.current_task_id = Some(task_id);
+        self.task_title = task.title.clone();
         self.task_content = task.content.clone();
         self.priority = task.priority.clone();
         self.status = task.status.clone();
@@ -179,6 +185,21 @@ impl TaskDetailSidebar {
                 // 创建空的提醒时间选择器状态
                 self.init_reminder_picker_states_empty(window, cx);
             }
+        }
+
+        // 初始化或更新标题输入框
+        let title_value = task.title.clone().unwrap_or_default();
+        if let Some(ref input) = self.title_input {
+            input.update(cx, |state, cx| {
+                state.set_value(&title_value, window, cx);
+            });
+        } else {
+            let title_input = cx.new(|cx| {
+                let mut input = InputState::new(window, cx);
+                input.set_value(&title_value, window, cx);
+                input
+            });
+            self.title_input = Some(title_input);
         }
 
         // 初始化或更新内容输入框
@@ -289,6 +310,19 @@ impl TaskDetailSidebar {
         if let (Some(ref task_id), Some(ref priority), Some(ref status)) =
             (&self.current_task_id, &self.priority, &self.status)
         {
+            let title = self
+                .title_input
+                .as_ref()
+                .map(|input| {
+                    let val = input.read(cx).value().to_string();
+                    if val.trim().is_empty() {
+                        None
+                    } else {
+                        Some(val)
+                    }
+                })
+                .unwrap_or_else(|| self.task_title.clone());
+
             let content = self
                 .content_input
                 .as_ref()
@@ -325,6 +359,7 @@ impl TaskDetailSidebar {
 
             let payload = SavePayload {
                 task_id: task_id.clone(),
+                title,
                 content,
                 priority: priority.clone(),
                 status: status.clone(),
@@ -500,6 +535,7 @@ impl Render for TaskDetailSidebar {
                             .child(
                                 v_flex()
                                     .gap(px(12.0))
+                                    // 标题输入
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
@@ -507,7 +543,39 @@ impl Render for TaskDetailSidebar {
                                                 div()
                                                     .text_xs()
                                                     .text_color(rgb(0x666666))
-                                                    .child("内容"),
+                                                    .child("标题"),
+                                            )
+                                            .when_some(self.title_input.clone(), |el, input| {
+                                                el.child(
+                                                    div()
+                                                        .on_mouse_down(
+                                                            gpui::MouseButton::Left,
+                                                            cx.listener(
+                                                                |_this, _event, _window, cx| {
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            ),
+                                                        )
+                                                        .child(
+                                                            Input::new(&input)
+                                                                .appearance(false)
+                                                                .text_size(px(16.0))
+                                                                .font_weight(
+                                                                    gpui::FontWeight::SEMIBOLD,
+                                                                ),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    // 内容输入
+                                    .child(
+                                        v_flex()
+                                            .gap(px(6.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x666666))
+                                                    .child("内容/详情"),
                                             )
                                             .when_some(content_input_clone.clone(), |el, input| {
                                                 el.child(
@@ -626,10 +694,12 @@ impl Render for TaskDetailSidebar {
                                                         Button::new("clear-due-date")
                                                             .child("清除")
                                                             .text_color(rgb(0x999999))
-                                                            .on_click(cx.listener(|this, _event, window, cx| {
-                                                                this.clear_due_date(window, cx);
-                                                                cx.stop_propagation();
-                                                            })),
+                                                            .on_click(cx.listener(
+                                                                |this, _event, window, cx| {
+                                                                    this.clear_due_date(window, cx);
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            )),
                                                     ),
                                             ),
                                     )
@@ -667,10 +737,14 @@ impl Render for TaskDetailSidebar {
                                                         Button::new("clear-reminder-time")
                                                             .child("清除")
                                                             .text_color(rgb(0x999999))
-                                                            .on_click(cx.listener(|this, _event, window, cx| {
-                                                                this.clear_reminder_time(window, cx);
-                                                                cx.stop_propagation();
-                                                            })),
+                                                            .on_click(cx.listener(
+                                                                |this, _event, window, cx| {
+                                                                    this.clear_reminder_time(
+                                                                        window, cx,
+                                                                    );
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            )),
                                                     ),
                                             ),
                                     )

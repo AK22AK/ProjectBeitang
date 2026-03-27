@@ -194,23 +194,21 @@ impl NotePanel {
         }).detach();
     }
 
-    // Parse note content to extract title (first line) and preview (second line)
-    fn parse_note_content(content: &str) -> (String, String) {
-        let lines: Vec<&str> = content.lines().collect();
-        if lines.is_empty() {
-            return ("无标题".to_string(), String::new());
-        }
+    // 从 Record 获取显示标题和预览
+    // 优先使用 title 字段，如果没有则从 content 提取
+    fn get_note_display(note: &Record) -> (String, String) {
+        // 标题：优先使用 title 字段
+        let title = note.title.clone().unwrap_or_else(|| {
+            // 如果没有 title，从 content 第一行提取
+            note.content.lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .unwrap_or_else(|| "无标题".to_string())
+        });
 
-        let title = lines[0].trim().to_string();
-        let title = if title.is_empty() {
-            "无标题".to_string()
-        } else {
-            title
-        };
-
-        // Get the second non-empty line as preview (if any)
-        let preview = lines[1..]
-            .iter()
+        // 预览：获取第二行非空内容作为预览
+        let preview = note.content.lines()
+            .skip(1)
             .find(|line| !line.trim().is_empty())
             .map(|line| line.trim().to_string())
             .unwrap_or_default();
@@ -278,7 +276,7 @@ impl Render for NotePanel {
                             .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
                         let note_id = note.id;
                         let is_editing = self.editing_note_id == Some(note_id);
-                        let (title, preview) = Self::parse_note_content(&note.content);
+                        let (title, preview) = Self::get_note_display(&note);
 
                         if is_editing {
                             if let Some(ref edit_input) = self.edit_input_state {
