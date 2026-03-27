@@ -21,3 +21,9 @@ hello_world_test
 .vscode/
 *.swp
 *.swo
+
+# Git worktrees
+.worktrees/
+
+# Claude IDE
+.claude/
