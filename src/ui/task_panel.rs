@@ -177,6 +177,7 @@ impl TaskPanel {
             task.priority = Some(payload.priority.clone());
             task.status = Some(payload.status.clone());
             task.due_date = payload.due_date;
+            task.scheduled_for = payload.scheduled_for;
             task.cancelled_reason = payload.cancel_reason.clone();
             task.updated_at = chrono::Utc::now();
 

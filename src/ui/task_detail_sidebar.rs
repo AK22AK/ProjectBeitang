@@ -17,9 +17,12 @@ pub struct TaskDetailSidebar {
     priority: Option<Priority>,
     status: Option<TaskStatus>,
     due_date: Option<DateTime<Utc>>,
+    scheduled_for: Option<DateTime<Utc>>,
     cancel_reason: Option<String>,
     date_picker: Option<Entity<DatePickerState>>,
     time_input: Option<Entity<InputState>>,
+    reminder_date_picker: Option<Entity<DatePickerState>>,
+    reminder_time_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
@@ -33,6 +36,7 @@ pub struct SavePayload {
     pub priority: Priority,
     pub status: TaskStatus,
     pub due_date: Option<DateTime<Utc>>,
+    pub scheduled_for: Option<DateTime<Utc>>,
     pub cancel_reason: Option<String>,
 }
 
@@ -51,9 +55,12 @@ impl TaskDetailSidebar {
             priority: None,
             status: None,
             due_date: None,
+            scheduled_for: None,
             cancel_reason: None,
             date_picker: None,
             time_input: None,
+            reminder_date_picker: None,
+            reminder_time_input: None,
             content_input: None,
             on_save: None,
             on_close: None,
@@ -89,9 +96,10 @@ impl TaskDetailSidebar {
         self.priority = task.priority.clone();
         self.status = task.status.clone();
         self.due_date = task.due_date;
+        self.scheduled_for = task.scheduled_for;
         self.cancel_reason = task.cancelled_reason.clone();
 
-        // 初始化或更新日期选择器状态
+        // 初始化或更新截止日期选择器状态
         let (init_date, init_time_str) = if let Some(due) = self.due_date {
             let local = due.with_timezone(&Local);
             (
@@ -102,6 +110,19 @@ impl TaskDetailSidebar {
             let now = Local::now();
             (now.naive_local().date(), now.format("%H:%M").to_string())
         };
+
+        // 初始化或更新提醒时间选择器状态
+        let (reminder_init_date, reminder_init_time_str) =
+            if let Some(scheduled) = self.scheduled_for {
+                let local = scheduled.with_timezone(&Local);
+                (
+                    local.naive_local().date(),
+                    local.format("%H:%M").to_string(),
+                )
+            } else {
+                let now = Local::now();
+                (now.naive_local().date(), now.format("%H:%M").to_string())
+            };
 
         // 如果日期选择器已存在，只更新值；否则创建新的
         if let (Some(ref dp), Some(ref ti)) = (&self.date_picker, &self.time_input) {
@@ -114,6 +135,26 @@ impl TaskDetailSidebar {
         } else {
             // 创建新的状态
             self.init_picker_states(init_date, &init_time_str, window, cx);
+        }
+
+        // 如果提醒时间选择器已存在，只更新值；否则创建新的
+        if let (Some(ref rdp), Some(ref rti)) =
+            (&self.reminder_date_picker, &self.reminder_time_input)
+        {
+            rdp.update(cx, |state, cx| {
+                state.set_date(reminder_init_date, window, cx);
+            });
+            rti.update(cx, |state, cx| {
+                state.set_value(&reminder_init_time_str, window, cx);
+            });
+        } else {
+            // 创建新的提醒时间选择器状态
+            self.init_reminder_picker_states(
+                reminder_init_date,
+                &reminder_init_time_str,
+                window,
+                cx,
+            );
         }
 
         // 初始化或更新内容输入框
@@ -177,6 +218,30 @@ impl TaskDetailSidebar {
         self.time_input = Some(time_input);
     }
 
+    fn init_reminder_picker_states(
+        &mut self,
+        init_date: NaiveDate,
+        init_time_str: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let reminder_date_picker = cx.new(|cx| {
+            let mut picker = DatePickerState::new(window, cx).date_format("%Y-%m-%d");
+            picker.set_date(init_date, window, cx);
+            picker
+        });
+
+        let time_str = init_time_str.to_string();
+        let reminder_time_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(&time_str, window, cx);
+            input
+        });
+
+        self.reminder_date_picker = Some(reminder_date_picker);
+        self.reminder_time_input = Some(reminder_time_input);
+    }
+
     fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let (Some(ref task_id), Some(ref priority), Some(ref status)) =
             (&self.current_task_id, &self.priority, &self.status)
@@ -197,7 +262,21 @@ impl TaskDetailSidebar {
                         .map(|ti| ti.read(cx).value().to_string())
                         .unwrap_or_else(|| "00:00".to_string());
 
-                    self.parse_due_date(d, &time_str)
+                    self.parse_datetime(d, &time_str)
+                })
+            });
+
+            let scheduled_for = self.reminder_date_picker.as_ref().and_then(|rdp| {
+                let date_range = rdp.read(cx).date();
+                let start_date = date_range.start();
+                start_date.and_then(|d| {
+                    let time_str = self
+                        .reminder_time_input
+                        .as_ref()
+                        .map(|rti| rti.read(cx).value().to_string())
+                        .unwrap_or_else(|| "00:00".to_string());
+
+                    self.parse_datetime(d, &time_str)
                 })
             });
 
@@ -207,6 +286,7 @@ impl TaskDetailSidebar {
                 priority: priority.clone(),
                 status: status.clone(),
                 due_date,
+                scheduled_for,
                 cancel_reason: self.cancel_reason.clone(),
             };
 
@@ -216,7 +296,7 @@ impl TaskDetailSidebar {
         }
     }
 
-    fn parse_due_date(&self, date: NaiveDate, time_str: &str) -> Option<DateTime<Utc>> {
+    fn parse_datetime(&self, date: NaiveDate, time_str: &str) -> Option<DateTime<Utc>> {
         let time_parts: Vec<&str> = time_str.split(':').collect();
         let hour = time_parts
             .first()
@@ -295,6 +375,8 @@ impl Render for TaskDetailSidebar {
         let is_visible = self.current_task_id.is_some();
         let dp_clone = self.date_picker.clone();
         let ti_clone = self.time_input.clone();
+        let rdp_clone = self.reminder_date_picker.clone();
+        let rti_clone = self.reminder_time_input.clone();
         let content_input_clone = self.content_input.clone();
 
         div()
@@ -479,6 +561,37 @@ impl Render for TaskDetailSidebar {
                                                             div()
                                                                 .w(px(80.0))
                                                                 .child(Input::new(&ti)),
+                                                        )
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .gap(px(6.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x666666))
+                                                    .child("提醒时间"),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap(px(6.0))
+                                                    .items_end()
+                                                    .when_some(rdp_clone.clone(), |el, rdp| {
+                                                        el.child(
+                                                            div().flex_1().child(
+                                                                DatePicker::new(&rdp)
+                                                                    .cleanable(true)
+                                                                    .number_of_months(1),
+                                                            ),
+                                                        )
+                                                    })
+                                                    .when_some(rti_clone.clone(), |el, rti| {
+                                                        el.child(
+                                                            div()
+                                                                .w(px(80.0))
+                                                                .child(Input::new(&rti)),
                                                         )
                                                     }),
                                             ),
