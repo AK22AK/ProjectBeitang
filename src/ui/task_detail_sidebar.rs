@@ -364,6 +364,21 @@ impl TaskDetailSidebar {
         self.priority = Some(priority);
         cx.notify();
     }
+    /// 清除截止日期
+    fn clear_due_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.due_date = None;
+        // 重新初始化空的日期选择器状态
+        self.init_picker_states_empty(window, cx);
+        cx.notify();
+    }
+
+    /// 清除提醒时间
+    fn clear_reminder_time(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.scheduled_for = None;
+        // 重新初始化空的提醒时间选择器状态
+        self.init_reminder_picker_states_empty(window, cx);
+        cx.notify();
+    }
 
     fn render_status_button(&self, status: TaskStatus, cx: &mut Context<Self>) -> impl IntoElement {
         let (label, color) = match status {
@@ -577,6 +592,7 @@ impl Render for TaskDetailSidebar {
                                                     ),
                                             ),
                                     )
+                                    // 截止日期：日期选择器 + 时间输入框 + 清除按钮
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
@@ -589,7 +605,7 @@ impl Render for TaskDetailSidebar {
                                             .child(
                                                 h_flex()
                                                     .gap(px(6.0))
-                                                    .items_end()
+                                                    .items_center()
                                                     .when_some(dp_clone.clone(), |el, dp| {
                                                         el.child(
                                                             div().flex_1().child(
@@ -602,12 +618,22 @@ impl Render for TaskDetailSidebar {
                                                     .when_some(ti_clone.clone(), |el, ti| {
                                                         el.child(
                                                             div()
-                                                                .w(px(80.0))
+                                                                .w(px(70.0))
                                                                 .child(Input::new(&ti)),
                                                         )
-                                                    }),
+                                                    })
+                                                    .child(
+                                                        Button::new("clear-due-date")
+                                                            .child("清除")
+                                                            .text_color(rgb(0x999999))
+                                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                                this.clear_due_date(window, cx);
+                                                                cx.stop_propagation();
+                                                            })),
+                                                    ),
                                             ),
                                     )
+                                    // 提醒时间：日期选择器 + 时间输入框 + 清除按钮
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
@@ -620,7 +646,7 @@ impl Render for TaskDetailSidebar {
                                             .child(
                                                 h_flex()
                                                     .gap(px(6.0))
-                                                    .items_end()
+                                                    .items_center()
                                                     .when_some(rdp_clone.clone(), |el, rdp| {
                                                         el.child(
                                                             div().flex_1().child(
@@ -633,10 +659,19 @@ impl Render for TaskDetailSidebar {
                                                     .when_some(rti_clone.clone(), |el, rti| {
                                                         el.child(
                                                             div()
-                                                                .w(px(80.0))
+                                                                .w(px(70.0))
                                                                 .child(Input::new(&rti)),
                                                         )
-                                                    }),
+                                                    })
+                                                    .child(
+                                                        Button::new("clear-reminder-time")
+                                                            .child("清除")
+                                                            .text_color(rgb(0x999999))
+                                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                                this.clear_reminder_time(window, cx);
+                                                                cx.stop_propagation();
+                                                            })),
+                                                    ),
                                             ),
                                     )
                                     .when(self.status == Some(TaskStatus::Cancelled), |el| {
