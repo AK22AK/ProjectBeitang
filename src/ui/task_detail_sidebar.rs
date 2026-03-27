@@ -122,42 +122,63 @@ impl TaskDetailSidebar {
                 (None, String::new())
             };
 
-        // 如果日期选择器已存在，只更新值；否则创建新的
-        if let (Some(ref dp), Some(ref ti)) = (&self.date_picker, &self.time_input) {
-            if let Some(date) = init_date {
+        // 处理截止日期选择器：如果存在则更新，不存在则创建
+        // 重要：如果任务没有截止日期，需要重置选择器状态
+        match (&self.date_picker, &self.time_input, init_date) {
+            (Some(_), Some(_), None) => {
+                // 之前有选择器但现在任务无日期，销毁并重建空的
+                self.date_picker = None;
+                self.time_input = None;
+                self.init_picker_states_empty(window, cx);
+            }
+            (Some(dp), Some(ti), Some(date)) => {
+                // 更新现有选择器
                 dp.update(cx, |state, cx| {
                     state.set_date(date, window, cx);
                 });
+                ti.update(cx, |state, cx| {
+                    state.set_value(&init_time_str, window, cx);
+                });
             }
-            ti.update(cx, |state, cx| {
-                state.set_value(&init_time_str, window, cx);
-            });
-        } else if let Some(date) = init_date {
-            // 创建新的状态
-            self.init_picker_states(date, &init_time_str, window, cx);
-        } else {
-            // 创建空的选择器状态
-            self.init_picker_states_empty(window, cx);
+            (None, None, Some(date)) => {
+                // 创建新的状态
+                self.init_picker_states(date, &init_time_str, window, cx);
+            }
+            _ => {
+                // 创建空的选择器状态
+                self.init_picker_states_empty(window, cx);
+            }
         }
 
-        // 如果提醒时间选择器已存在，只更新值；否则创建新的
-        if let (Some(ref rdp), Some(ref rti)) =
-            (&self.reminder_date_picker, &self.reminder_time_input)
-        {
-            if let Some(date) = reminder_init_date {
+        // 处理提醒时间选择器
+        match (
+            &self.reminder_date_picker,
+            &self.reminder_time_input,
+            reminder_init_date,
+        ) {
+            (Some(_), Some(_), None) => {
+                // 之前有选择器但现在任务无提醒时间，销毁并重建空的
+                self.reminder_date_picker = None;
+                self.reminder_time_input = None;
+                self.init_reminder_picker_states_empty(window, cx);
+            }
+            (Some(rdp), Some(rti), Some(date)) => {
+                // 更新现有选择器
                 rdp.update(cx, |state, cx| {
                     state.set_date(date, window, cx);
                 });
+                rti.update(cx, |state, cx| {
+                    state.set_value(&reminder_init_time_str, window, cx);
+                });
             }
-            rti.update(cx, |state, cx| {
-                state.set_value(&reminder_init_time_str, window, cx);
-            });
-        } else if let Some(date) = reminder_init_date {
-            // 创建新的提醒时间选择器状态
-            self.init_reminder_picker_states(date, &reminder_init_time_str, window, cx);
-        } else {
-            // 创建空的提醒时间选择器状态
-            self.init_reminder_picker_states_empty(window, cx);
+            (None, None, Some(date)) => {
+                // 创建新的提醒时间选择器状态
+                self.init_reminder_picker_states(date, &reminder_init_time_str, window, cx);
+            }
+            _ => {
+                // 创建空的提醒时间选择器状态
+                self.init_reminder_picker_states_empty(window, cx);
+            }
         }
 
         // 初始化或更新内容输入框
