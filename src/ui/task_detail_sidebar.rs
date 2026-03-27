@@ -103,12 +103,11 @@ impl TaskDetailSidebar {
         let (init_date, init_time_str) = if let Some(due) = self.due_date {
             let local = due.with_timezone(&Local);
             (
-                local.naive_local().date(),
+                Some(local.naive_local().date()),
                 local.format("%H:%M").to_string(),
             )
         } else {
-            let now = Local::now();
-            (now.naive_local().date(), now.format("%H:%M").to_string())
+            (None, String::new())
         };
 
         // 初始化或更新提醒时间选择器状态
@@ -116,45 +115,49 @@ impl TaskDetailSidebar {
             if let Some(scheduled) = self.scheduled_for {
                 let local = scheduled.with_timezone(&Local);
                 (
-                    local.naive_local().date(),
+                    Some(local.naive_local().date()),
                     local.format("%H:%M").to_string(),
                 )
             } else {
-                let now = Local::now();
-                (now.naive_local().date(), now.format("%H:%M").to_string())
+                (None, String::new())
             };
 
         // 如果日期选择器已存在，只更新值；否则创建新的
         if let (Some(ref dp), Some(ref ti)) = (&self.date_picker, &self.time_input) {
-            dp.update(cx, |state, cx| {
-                state.set_date(init_date, window, cx);
-            });
+            if let Some(date) = init_date {
+                dp.update(cx, |state, cx| {
+                    state.set_date(date, window, cx);
+                });
+            }
             ti.update(cx, |state, cx| {
                 state.set_value(&init_time_str, window, cx);
             });
-        } else {
+        } else if let Some(date) = init_date {
             // 创建新的状态
-            self.init_picker_states(init_date, &init_time_str, window, cx);
+            self.init_picker_states(date, &init_time_str, window, cx);
+        } else {
+            // 创建空的选择器状态
+            self.init_picker_states_empty(window, cx);
         }
 
         // 如果提醒时间选择器已存在，只更新值；否则创建新的
         if let (Some(ref rdp), Some(ref rti)) =
             (&self.reminder_date_picker, &self.reminder_time_input)
         {
-            rdp.update(cx, |state, cx| {
-                state.set_date(reminder_init_date, window, cx);
-            });
+            if let Some(date) = reminder_init_date {
+                rdp.update(cx, |state, cx| {
+                    state.set_date(date, window, cx);
+                });
+            }
             rti.update(cx, |state, cx| {
                 state.set_value(&reminder_init_time_str, window, cx);
             });
-        } else {
+        } else if let Some(date) = reminder_init_date {
             // 创建新的提醒时间选择器状态
-            self.init_reminder_picker_states(
-                reminder_init_date,
-                &reminder_init_time_str,
-                window,
-                cx,
-            );
+            self.init_reminder_picker_states(date, &reminder_init_time_str, window, cx);
+        } else {
+            // 创建空的提醒时间选择器状态
+            self.init_reminder_picker_states_empty(window, cx);
         }
 
         // 初始化或更新内容输入框
@@ -218,6 +221,15 @@ impl TaskDetailSidebar {
         self.time_input = Some(time_input);
     }
 
+    fn init_picker_states_empty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let date_picker = cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"));
+
+        let time_input = cx.new(|cx| InputState::new(window, cx));
+
+        self.date_picker = Some(date_picker);
+        self.time_input = Some(time_input);
+    }
+
     fn init_reminder_picker_states(
         &mut self,
         init_date: NaiveDate,
@@ -237,6 +249,16 @@ impl TaskDetailSidebar {
             input.set_value(&time_str, window, cx);
             input
         });
+
+        self.reminder_date_picker = Some(reminder_date_picker);
+        self.reminder_time_input = Some(reminder_time_input);
+    }
+
+    fn init_reminder_picker_states_empty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reminder_date_picker =
+            cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"));
+
+        let reminder_time_input = cx.new(|cx| InputState::new(window, cx));
 
         self.reminder_date_picker = Some(reminder_date_picker);
         self.reminder_time_input = Some(reminder_time_input);
