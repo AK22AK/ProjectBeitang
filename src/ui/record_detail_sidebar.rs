@@ -16,6 +16,8 @@ pub struct RecordDetailSidebar {
     record_content: String,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
+    tags: Vec<String>,
+    persons: Vec<String>,
     title_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
@@ -45,6 +47,8 @@ impl RecordDetailSidebar {
             record_content: String::new(),
             created_at: None,
             updated_at: None,
+            tags: Vec::new(),
+            persons: Vec::new(),
             title_input: None,
             content_input: None,
             on_save: None,
@@ -81,6 +85,8 @@ impl RecordDetailSidebar {
         self.record_content = record.content.clone();
         self.created_at = Some(record.created_at);
         self.updated_at = Some(record.updated_at);
+        self.tags = record.tags.clone();
+        self.persons = record.persons.clone();
 
         // 初始化或更新标题输入框
         let title_value = record.title.clone().unwrap_or_default();
@@ -340,7 +346,63 @@ impl Render for RecordDetailSidebar {
                                                         .unwrap_or_else(|| "-".to_string()),
                                                 ),
                                             ),
-                                    ),
+                                    )
+                                    // 标签
+                                    .when(!self.tags.is_empty(), |el| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x666666))
+                                                        .child("标签"),
+                                                )
+                                                .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                                                    self.tags.iter().enumerate().map(
+                                                        |(idx, tag)| {
+                                                            div()
+                                                                .id(("record-sidebar-tag", idx))
+                                                                .px(px(8.0))
+                                                                .py(px(4.0))
+                                                                .rounded(px(12.0))
+                                                                .bg(rgb(0xf5f5f5))
+                                                                .text_sm()
+                                                                .text_color(rgb(0x595959))
+                                                                .child(format!("#{}", tag))
+                                                        },
+                                                    ),
+                                                )),
+                                        )
+                                    })
+                                    // 相关人物
+                                    .when(!self.persons.is_empty(), |el| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x666666))
+                                                        .child("相关人物"),
+                                                )
+                                                .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                                                    self.persons.iter().enumerate().map(
+                                                        |(idx, person)| {
+                                                            div()
+                                                                .id(("record-sidebar-person", idx))
+                                                                .px(px(8.0))
+                                                                .py(px(4.0))
+                                                                .rounded(px(12.0))
+                                                                .bg(rgb(0xe6f7ff))
+                                                                .text_sm()
+                                                                .text_color(rgb(0x1890ff))
+                                                                .child(format!("@{}", person))
+                                                        },
+                                                    ),
+                                                )),
+                                        )
+                                    }),
                             ),
                     )
                     .child(

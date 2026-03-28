@@ -73,22 +73,38 @@ impl SearchPanel {
 
         let focus_handle = cx.focus_handle();
 
-        Self {
+        let mut panel = Self {
             store,
             query: String::new(),
             results: Vec::new(),
             filter_type: SearchFilterType::All,
             selected_tags: HashSet::new(),
-            available_tags: vec![
-                "工作".to_string(),
-                "个人".to_string(),
-                "代码重构".to_string(),
-            ],
+            available_tags: Vec::new(),
             input_state,
             focus_handle,
             _search_subscription: _subscription,
             is_searching: false,
-        }
+        };
+
+        panel.load_available_tags(cx);
+        panel
+    }
+
+    fn load_available_tags(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            match store.get_all_tags().await {
+                Ok(tags) => {
+                    let _ = view.update(cx, |panel, cx| {
+                        panel.available_tags = tags.into_iter().map(|t| t.name).collect();
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[SearchPanel] Failed to load tags: {}", e);
+                }
+            }
+        }).detach();
     }
 
     fn on_query_change(&mut self, query: String, cx: &mut Context<Self>) {
@@ -173,13 +189,17 @@ impl SearchPanel {
         cx.notify();
     }
 
-    #[allow(dead_code)]
-    fn toggle_tag(&mut self, tag: &str, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
         if self.selected_tags.contains(tag) {
             self.selected_tags.remove(tag);
         } else {
             self.selected_tags.insert(tag.to_string());
         }
+        cx.notify();
+    }
+
+    fn clear_tag_filters(&mut self, cx: &mut Context<Self>) {
+        self.selected_tags.clear();
         cx.notify();
     }
 
@@ -364,21 +384,49 @@ impl SearchPanel {
                             }))
                     }))
             )
-            .child(
-                div()
-                    .ml_auto()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .rounded(px(16.0))
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(rgb(0xd9d9d9))
-                    .bg(rgb(0xffffff))
-                    .text_color(rgb(0x8c8c8c))
-                    .text_sm()
-                    .hover(|s| s.bg(rgb(0xf5f5f5)))
-                    .child("标签 ▼")
-            )
+    }
+
+    fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_selected = !self.selected_tags.is_empty();
+
+        v_flex()
+            .gap(px(8.0))
+            .when(!self.available_tags.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .gap(px(4.0))
+                        .flex_wrap()
+                        .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
+                            let is_selected = self.selected_tags.contains(tag);
+                            let tag_clone = tag.clone();
+                            div()
+                                .id(("search-tag-filter", idx))
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(12.0))
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xd9d9d9) })
+                                .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
+                                .text_color(if is_selected { rgb(0x1890ff) } else { rgb(0x595959) })
+                                .text_sm()
+                                .hover(|s| s.bg(if is_selected { rgb(0xbae7ff) } else { rgb(0xf5f5f5) }))
+                                .child(format!("#{}", tag))
+                                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                    this.toggle_tag(&tag_clone, cx);
+                                }))
+                        }))
+                        .when(has_selected, |el| {
+                            el.child(
+                                Button::new("clear-search-tags")
+                                    .child("清除筛选")
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.clear_tag_filters(cx);
+                                    }))
+                            )
+                        })
+                )
+            })
     }
 
     fn render_search_result_item(&self, record: &Record, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -566,6 +614,7 @@ impl Render for SearchPanel {
             )
             .child(self.render_search_input(cx))
             .child(self.render_type_filter(cx))
+            .child(self.render_tag_filter(cx))
             .child(self.render_results(cx))
     }
 }

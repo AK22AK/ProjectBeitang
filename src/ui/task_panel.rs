@@ -1,5 +1,6 @@
 use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
+use crate::ui::parsing;
 use crate::ui::task_detail_sidebar::TaskDetailSidebar;
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::*;
@@ -9,7 +10,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::date_picker::{DatePicker, DatePickerState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, IconName};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 actions!(task_panel, [
@@ -72,6 +73,28 @@ pub enum PriorityFilter {
     Low,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TagFilterMode {
+    And,
+    Or,
+}
+
+impl TagFilterMode {
+    fn label(&self) -> &'static str {
+        match self {
+            TagFilterMode::And => "AND",
+            TagFilterMode::Or => "OR",
+        }
+    }
+
+    fn toggle(&self) -> Self {
+        match self {
+            TagFilterMode::And => TagFilterMode::Or,
+            TagFilterMode::Or => TagFilterMode::And,
+        }
+    }
+}
+
 impl PriorityFilter {
     #[allow(dead_code)]
     fn label(&self) -> &'static str {
@@ -112,6 +135,9 @@ pub struct TaskPanel {
     show_completed: bool,
     current_view: TaskView,
     priority_filter: PriorityFilter,
+    selected_tags: HashSet<String>,
+    available_tags: Vec<String>,
+    tag_filter_mode: TagFilterMode,
     task_detail_sidebar: Entity<TaskDetailSidebar>,
 }
 
@@ -119,7 +145,7 @@ impl TaskPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("!! 高优先级 | ! 普通优先级 | 直接输入")
+                .placeholder("!! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物")
         });
 
         let _subscription = cx.subscribe_in(
@@ -155,6 +181,9 @@ impl TaskPanel {
             show_completed: false,
             current_view: TaskView::List,
             priority_filter: PriorityFilter::All,
+            selected_tags: HashSet::new(),
+            available_tags: Vec::new(),
+            tag_filter_mode: TagFilterMode::And,
             task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
         };
 
@@ -168,6 +197,7 @@ impl TaskPanel {
         });
 
         panel.load_tasks(cx);
+        panel.load_available_tags(cx);
         panel
     }
 
@@ -180,6 +210,8 @@ impl TaskPanel {
             task.due_date = payload.due_date;
             task.scheduled_for = payload.scheduled_for;
             task.cancelled_reason = payload.cancel_reason.clone();
+            task.tags = payload.tags.clone();
+            task.persons = payload.persons.clone();
             task.updated_at = chrono::Utc::now();
 
             match payload.status {
@@ -229,8 +261,28 @@ impl TaskPanel {
             .iter()
             .filter(|t| self.priority_filter.matches(t.priority.clone()))
             .filter(|t| t.completed_at.is_none() || self.show_completed)
+            .filter(|t| self.matches_tag_filter(t))
             .cloned()
             .collect()
+    }
+
+    fn matches_tag_filter(&self, task: &Record) -> bool {
+        if self.selected_tags.is_empty() {
+            return true;
+        }
+
+        let task_tags: HashSet<&String> = task.tags.iter().collect();
+
+        match self.tag_filter_mode {
+            TagFilterMode::And => {
+                // AND 模式：任务必须包含所有选中的标签
+                self.selected_tags.iter().all(|tag| task_tags.contains(tag))
+            }
+            TagFilterMode::Or => {
+                // OR 模式：任务只需包含任意一个选中的标签
+                self.selected_tags.iter().any(|tag| task_tags.contains(tag))
+            }
+        }
     }
 
     fn group_tasks_by_quadrant(&self) -> HashMap<Quadrant, Vec<Record>> {
@@ -324,11 +376,13 @@ impl TaskPanel {
         if let Some(task_id) = self.editing_task_id {
             if let Some(input_state) = self.task_input_states.get(&task_id) {
                 let new_title = input_state.read(cx).text().to_string();
-                let (title, priority) = Self::parse_input_static(&new_title);
+                let (title, priority, tags, people) = parsing::parse_task_input(&new_title);
 
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
                     task.title = Some(title);
                     task.priority = Some(priority);
+                    task.tags = tags;
+                    task.persons = people;
                     let updated_task = task.clone();
                     let store = self.store.clone();
                     cx.spawn(async move |_view, _cx| {
@@ -492,6 +546,42 @@ impl TaskPanel {
         }).detach();
     }
 
+    fn load_available_tags(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            match store.get_all_tags().await {
+                Ok(tags) => {
+                    let _ = view.update(cx, |panel, cx| {
+                        panel.available_tags = tags.into_iter().map(|t| t.name).collect();
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[TaskPanel] Failed to load tags: {}", e);
+                }
+            }
+        }).detach();
+    }
+
+    fn toggle_tag_filter(&mut self, tag: &str, cx: &mut Context<Self>) {
+        if self.selected_tags.contains(tag) {
+            self.selected_tags.remove(tag);
+        } else {
+            self.selected_tags.insert(tag.to_string());
+        }
+        cx.notify();
+    }
+
+    fn clear_tag_filters(&mut self, cx: &mut Context<Self>) {
+        self.selected_tags.clear();
+        cx.notify();
+    }
+
+    fn toggle_tag_filter_mode(&mut self, cx: &mut Context<Self>) {
+        self.tag_filter_mode = self.tag_filter_mode.toggle();
+        cx.notify();
+    }
+
     fn create_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_state.read(cx).text().to_string();
         eprintln!("[TaskPanel] create_task called with text: '{}'", text);
@@ -500,11 +590,14 @@ impl TaskPanel {
             return;
         }
 
-        let (title, priority) = self.parse_input(&text);
-        eprintln!("[TaskPanel] Parsed title: '{}', priority: {:?}", title, priority);
+        let (title, priority, tags, people) = parsing::parse_task_input(&text);
+        eprintln!("[TaskPanel] Parsed title: '{}', priority: {:?}, tags: {:?}, people: {:?}", title, priority, tags, people);
+        
         // 任务创建时，输入内容作为 title，content 初始为空
-        let task = Record::new_task(title, String::new(), priority);
-        eprintln!("[TaskPanel] Created task with id: {}", task.id);
+        let mut task = Record::new_task(title, String::new(), priority);
+        task.tags = tags;
+        task.persons = people;
+        eprintln!("[TaskPanel] Created task with id: {}, tags: {:?}, persons: {:?}", task.id, task.tags, task.persons);
 
         self.input_state.update(cx, |state, cx| {
             state.set_value("", window, cx);
@@ -531,21 +624,6 @@ impl TaskPanel {
                 Err(e) => eprintln!("[TaskPanel] Failed to create task: {}", e),
             }
         }).detach();
-    }
-
-    fn parse_input(&self, input: &str) -> (String, Priority) {
-        Self::parse_input_static(input)
-    }
-
-    fn parse_input_static(input: &str) -> (String, Priority) {
-        let trimmed = input.trim();
-        if let Some(rest) = trimmed.strip_prefix("!!").or_else(|| trimmed.strip_prefix("！！")) {
-            (rest.trim_start().to_string(), Priority::High)
-        } else if let Some(rest) = trimmed.strip_prefix("!").or_else(|| trimmed.strip_prefix("！")) {
-            (rest.trim_start().to_string(), Priority::Medium)
-        } else {
-            (trimmed.to_string(), Priority::Low)
-        }
     }
 
     fn toggle_task_complete(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
@@ -759,6 +837,62 @@ impl TaskPanel {
             .child(self.render_priority_filter(cx))
     }
 
+    fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_selected = !self.selected_tags.is_empty();
+        let mode_label = self.tag_filter_mode.label();
+
+        v_flex()
+            .gap(px(8.0))
+            .when(!self.available_tags.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .gap(px(4.0))
+                        .flex_wrap()
+                        .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
+                            let is_selected = self.selected_tags.contains(tag);
+                            let tag_clone = tag.clone();
+                            div()
+                                .id(("tag-filter", idx))
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(12.0))
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xd9d9d9) })
+                                .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
+                                .text_color(if is_selected { rgb(0x1890ff) } else { rgb(0x595959) })
+                                .text_sm()
+                                .hover(|s| s.bg(if is_selected { rgb(0xbae7ff) } else { rgb(0xf5f5f5) }))
+                                .child(format!("#{}", tag))
+                                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                    this.toggle_tag_filter(&tag_clone, cx);
+                                }))
+                        }))
+                        .when(has_selected, |el| {
+                            el.child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(
+                                        Button::new("toggle-mode")
+                                            .child(mode_label.to_string())
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.toggle_tag_filter_mode(cx);
+                                            }))
+                                    )
+                                    .child(
+                                        Button::new("clear-tags")
+                                            .child("清除")
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.clear_tag_filters(cx);
+                                            }))
+                                    )
+                            )
+                        })
+                )
+            })
+    }
+
     fn render_task_card(&mut self, task: &Record, idx: usize, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let task_id = task.id;
         let is_completed = task.completed_at.is_some();
@@ -948,6 +1082,42 @@ impl TaskPanel {
                                             div()
                                                 .text_color(rgb(0x1890ff))
                                                 .child(format!("📅 {}", fmt_short(t)))
+                                        }))
+                                )
+                            })
+                            .when(!task.tags.is_empty(), |el| {
+                                el.child(
+                                    h_flex()
+                                        .gap(px(6.0))
+                                        .flex_wrap()
+                                        .children(task.tags.iter().enumerate().map(|(idx, tag)| {
+                                            div()
+                                                .id(("task-tag", idx))
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded(px(4.0))
+                                                .bg(rgb(0xf5f5f5))
+                                                .text_xs()
+                                                .text_color(rgb(0x595959))
+                                                .child(format!("#{}", tag))
+                                        }))
+                                )
+                            })
+                            .when(!task.persons.is_empty(), |el| {
+                                el.child(
+                                    h_flex()
+                                        .gap(px(6.0))
+                                        .flex_wrap()
+                                        .children(task.persons.iter().enumerate().map(|(idx, person)| {
+                                            div()
+                                                .id(("task-person", idx))
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded(px(4.0))
+                                                .bg(rgb(0xe6f7ff))
+                                                .text_xs()
+                                                .text_color(rgb(0x1890ff))
+                                                .child(format!("@{}", person))
                                         }))
                                 )
                             })
@@ -1228,9 +1398,10 @@ impl Render for TaskPanel {
                         div()
                             .text_sm()
                             .text_color(rgb(0x888888))
-                            .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入为低优先级")
+                            .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物")
                     )
                     .child(self.render_toolbar(cx))
+                    .child(self.render_tag_filter(cx))
                     .when(self.reminder_task_id.is_some(), |el| {
                         if let (Some(ref dp), Some(ref ti)) = (
                             &self.reminder_date_picker, 

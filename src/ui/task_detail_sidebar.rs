@@ -20,6 +20,8 @@ pub struct TaskDetailSidebar {
     due_date: Option<DateTime<Utc>>,
     scheduled_for: Option<DateTime<Utc>>,
     cancel_reason: Option<String>,
+    tags: Vec<String>,
+    persons: Vec<String>,
     date_picker: Option<Entity<DatePickerState>>,
     time_input: Option<Entity<InputState>>,
     reminder_date_picker: Option<Entity<DatePickerState>>,
@@ -41,6 +43,8 @@ pub struct SavePayload {
     pub due_date: Option<DateTime<Utc>>,
     pub scheduled_for: Option<DateTime<Utc>>,
     pub cancel_reason: Option<String>,
+    pub tags: Vec<String>,
+    pub persons: Vec<String>,
 }
 
 /// 侧边栏显示状态
@@ -61,6 +65,8 @@ impl TaskDetailSidebar {
             due_date: None,
             scheduled_for: None,
             cancel_reason: None,
+            tags: Vec::new(),
+            persons: Vec::new(),
             date_picker: None,
             time_input: None,
             reminder_date_picker: None,
@@ -104,6 +110,8 @@ impl TaskDetailSidebar {
         self.due_date = task.due_date;
         self.scheduled_for = task.scheduled_for;
         self.cancel_reason = task.cancelled_reason.clone();
+        self.tags = task.tags.clone();
+        self.persons = task.persons.clone();
 
         // 初始化或更新截止日期选择器状态
         let (init_date, init_time_str) = if let Some(due) = self.due_date {
@@ -366,6 +374,8 @@ impl TaskDetailSidebar {
                 due_date,
                 scheduled_for,
                 cancel_reason: self.cancel_reason.clone(),
+                tags: self.tags.clone(),
+                persons: self.persons.clone(),
             };
 
             if let Some(ref callback) = self.on_save {
@@ -764,6 +774,60 @@ impl Render for TaskDetailSidebar {
                                                         .text_color(rgb(0x999999))
                                                         .child("（此处可添加原因输入框）"),
                                                 ),
+                                        )
+                                    })
+                                    .when(!self.tags.is_empty(), |el| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x666666))
+                                                        .child("标签"),
+                                                )
+                                                .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                                                    self.tags.iter().enumerate().map(
+                                                        |(idx, tag)| {
+                                                            div()
+                                                                .id(("sidebar-tag", idx))
+                                                                .px(px(8.0))
+                                                                .py(px(4.0))
+                                                                .rounded(px(12.0))
+                                                                .bg(rgb(0xf5f5f5))
+                                                                .text_sm()
+                                                                .text_color(rgb(0x595959))
+                                                                .child(format!("#{}", tag))
+                                                        },
+                                                    ),
+                                                )),
+                                        )
+                                    })
+                                    .when(!self.persons.is_empty(), |el| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x666666))
+                                                        .child("相关人物"),
+                                                )
+                                                .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                                                    self.persons.iter().enumerate().map(
+                                                        |(idx, person)| {
+                                                            div()
+                                                                .id(("sidebar-person", idx))
+                                                                .px(px(8.0))
+                                                                .py(px(4.0))
+                                                                .rounded(px(12.0))
+                                                                .bg(rgb(0xe6f7ff))
+                                                                .text_sm()
+                                                                .text_color(rgb(0x1890ff))
+                                                                .child(format!("@{}", person))
+                                                        },
+                                                    ),
+                                                )),
                                         )
                                     }),
                             ),

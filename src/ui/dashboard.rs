@@ -7,6 +7,7 @@ use gpui_component::h_flex;
 pub struct Dashboard {
     store: Store,
     dashboard_data: Option<DashboardData>,
+    common_tags: Vec<String>,
     focus_handle: FocusHandle,
     _window_activation_subscription: Subscription,
 }
@@ -19,14 +20,17 @@ impl Dashboard {
         let mut dashboard = Self {
             store,
             dashboard_data: None,
+            common_tags: Vec::new(),
             focus_handle,
             _window_activation_subscription: cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.load_data(cx);
+                    this.load_common_tags(cx);
                 }
             }),
         };
         dashboard.load_data(cx);
+        dashboard.load_common_tags(cx);
         dashboard
     }
 
@@ -45,6 +49,32 @@ impl Dashboard {
                 }
             }
         }).detach();
+    }
+
+    fn load_common_tags(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            match store.get_all_tags().await {
+                Ok(tags) => {
+                    let _ = view.update(cx, |dashboard, cx| {
+                        // Take top 5 tags by usage count (for now just take first 5)
+                        dashboard.common_tags = tags.into_iter().take(5).map(|t| t.name).collect();
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[Dashboard] Failed to load tags: {}", e);
+                }
+            }
+        }).detach();
+    }
+
+    fn on_tag_click(&mut self, tag: &str, cx: &mut Context<Self>) {
+        // Navigate to timeline with tag filter
+        // This would typically emit an event or call a callback to switch panels
+        // For now, we'll just log it
+        eprintln!("[Dashboard] Tag clicked: #{} - would navigate to filtered view", tag);
+        cx.notify();
     }
 
     fn sort_by_quadrant(tasks: &mut Vec<Record>) {
@@ -439,22 +469,19 @@ impl Render for Dashboard {
                                     .text_color(rgb(0x666666))
                                     .child("常用:")
                             )
-                            .child(
+                            .children(self.common_tags.iter().enumerate().map(|(idx, tag)| {
+                                let tag_clone = tag.clone();
                                 div()
+                                    .id(("dashboard-tag", idx))
                                     .text_sm()
                                     .text_color(rgb(0x1890ff))
                                     .cursor_pointer()
                                     .hover(|s| s.text_color(rgb(0x40a9ff)))
-                                    .child("#工作")
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0x1890ff))
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(rgb(0x40a9ff)))
-                                    .child("#个人")
-                            )
+                                    .child(format!("#{}", tag))
+                                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                        this.on_tag_click(&tag_clone, cx);
+                                    }))
+                            }))
                     )
                     .child(
                         div()

@@ -26,12 +26,7 @@ impl Timeline {
             store,
             records: Vec::new(),
             selected_tags: HashSet::new(),
-            available_tags: vec![
-                "全部".to_string(),
-                "工作".to_string(),
-                "个人".to_string(),
-                "代码重构".to_string(),
-            ],
+            available_tags: vec!["全部".to_string()],
             is_loading: false,
             has_more: true,
             offset: 0,
@@ -42,6 +37,7 @@ impl Timeline {
             }),
         };
         panel.load_data(cx);
+        panel.load_available_tags(cx);
         panel
     }
 
@@ -50,6 +46,7 @@ impl Timeline {
         self.offset = 0;
         self.has_more = true;
         self.load_data(cx);
+        self.load_available_tags(cx);
     }
 
     fn load_data(&mut self, cx: &mut Context<Self>) {
@@ -83,6 +80,29 @@ impl Timeline {
                         panel.is_loading = false;
                         cx.notify();
                     });
+                }
+            }
+        }).detach();
+    }
+
+    fn load_available_tags(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+
+        cx.spawn(async move |view, cx| {
+            match store.get_all_tags().await {
+                Ok(tags) => {
+                    let _ = view.update(cx, |panel, cx| {
+                        // 保留 "全部" 选项，添加从数据库加载的标签
+                        let mut tag_names = vec!["全部".to_string()];
+                        for tag in tags {
+                            tag_names.push(tag.name);
+                        }
+                        panel.available_tags = tag_names;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[Timeline] Failed to load tags: {}", e);
                 }
             }
         }).detach();

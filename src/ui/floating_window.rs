@@ -3,8 +3,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui_component::input::{Input, InputEvent, InputState, Escape, IndentInline};
 use gpui_component::button::Button;
 use gpui_component::Selectable;
-use crate::models::{Priority, Record};
+use crate::models::Record;
 use crate::store::Store;
+use crate::ui::parsing;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum InputMode {
@@ -103,7 +104,7 @@ impl QuickAddWindow {
             return;
         }
 
-        let (title, priority, tags, people) = parse_task_input(&text);
+        let (title, priority, tags, people) = parsing::parse_task_input(&text);
         // 快速添加时，输入内容作为 title，content 初始为空
         let mut task = Record::new_task(title, String::new(), priority);
         
@@ -131,7 +132,7 @@ impl QuickAddWindow {
             return;
         }
 
-        let (content, tags, people) = parse_record_input(&text);
+        let (content, tags, people) = parsing::parse_record_input(&text);
         let mut record = Record::new_note(if content.is_empty() { text } else { content });
         
         // 添加标签和人物
@@ -262,51 +263,4 @@ impl Render for QuickAddWindow {
     }
 }
 
-/// 解析任务输入，返回 (内容, 优先级, 标签列表, 人物列表)
-fn parse_task_input(input: &str) -> (String, Priority, Vec<String>, Vec<String>) {
-    let (content_without_tags, tags, people) = parse_tags_and_people(input);
-    let (content, priority) = parse_priority(&content_without_tags);
-    (content, priority, tags, people)
-}
 
-/// 解析记录输入，返回 (内容, 标签列表, 人物列表)
-fn parse_record_input(input: &str) -> (String, Vec<String>, Vec<String>) {
-    parse_tags_and_people(input)
-}
-
-/// 解析优先级，返回 (去除优先级的内容, 优先级)
-fn parse_priority(input: &str) -> (String, Priority) {
-    let trimmed = input.trim();
-    if let Some(rest) = trimmed.strip_prefix("!!").or_else(|| trimmed.strip_prefix("！！")) {
-        (rest.trim_start().to_string(), Priority::High)
-    } else if let Some(rest) = trimmed.strip_prefix("!").or_else(|| trimmed.strip_prefix("！")) {
-        (rest.trim_start().to_string(), Priority::Medium)
-    } else {
-        (trimmed.to_string(), Priority::Low)
-    }
-}
-
-/// 解析标签和人物，返回 (纯内容, 标签列表, 人物列表)
-fn parse_tags_and_people(input: &str) -> (String, Vec<String>, Vec<String>) {
-    let mut tags = Vec::new();
-    let mut people = Vec::new();
-    let mut content_parts = Vec::new();
-
-    // 按空白字符分割输入
-    for word in input.split_whitespace() {
-        if let Some(tag) = word.strip_prefix('#') {
-            if !tag.is_empty() {
-                tags.push(tag.to_string());
-            }
-        } else if let Some(person) = word.strip_prefix('@') {
-            if !person.is_empty() {
-                people.push(person.to_string());
-            }
-        } else {
-            content_parts.push(word);
-        }
-    }
-
-    let content = content_parts.join(" ");
-    (content, tags, people)
-}

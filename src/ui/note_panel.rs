@@ -1,7 +1,9 @@
 use crate::models::Record;
 use crate::store::Store;
+use crate::ui::parsing;
 use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
 use gpui::*;
+use gpui::prelude::FluentBuilder as _;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
 use gpui_component::scroll::ScrollableElement;
@@ -23,7 +25,7 @@ impl NotePanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("输入笔记内容，第一行自动作为标题，Enter 保存")
+                .placeholder("输入笔记内容，第一行自动作为标题，Enter 保存 | #标签 @人物")
         });
 
         let _subscription = cx.subscribe_in(
@@ -192,8 +194,13 @@ impl NotePanel {
             return;
         }
 
-        let note = Record::new_note(text);
-        eprintln!("[NotePanel] Created note with id: {}", note.id);
+        let (content, tags, people) = parsing::parse_record_input(&text);
+        eprintln!("[NotePanel] Parsed content: '{}', tags: {:?}, people: {:?}", content, tags, people);
+
+        let mut note = Record::new_note(if content.is_empty() { text } else { content });
+        note.tags = tags;
+        note.persons = people;
+        eprintln!("[NotePanel] Created note with id: {}, tags: {:?}, persons: {:?}", note.id, note.tags, note.persons);
 
         // Clear input
         self.input_state.update(cx, |state, cx| {
@@ -215,7 +222,7 @@ impl NotePanel {
                     if let Err(e) = update_result {
                         eprintln!("[NotePanel] Failed to update view: {:?}", e);
                     } else {
-                        eprintln!("[NotePanel] View update succeeded");
+                        eprintln!("[NotePanel] View view succeeded");
                     }
                 }
                 Err(e) => eprintln!("[NotePanel] Failed to create note: {}", e),
@@ -316,7 +323,7 @@ impl Render for NotePanel {
                         div()
                             .text_sm()
                             .text_color(rgb(0x888888))
-                            .child("输入记录内容，第一行自动作为标题，Enter 保存")
+                            .child("输入记录内容，第一行自动作为标题，Enter 保存 | #标签 @人物")
                     )
                     .child(
                         div()
@@ -450,6 +457,44 @@ impl Render for NotePanel {
                                                     .child(format!("创建于: {}", note.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
                                             )
                                     )
+                                    .when(!note.tags.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .flex()
+                                                .gap(px(6.0))
+                                                .flex_wrap()
+                                                .children(note.tags.iter().enumerate().map(|(tag_idx, tag)| {
+                                                    div()
+                                                        .id(("note-tag", tag_idx))
+                                                        .px(px(6.0))
+                                                        .py(px(2.0))
+                                                        .rounded(px(4.0))
+                                                        .bg(rgb(0xf5f5f5))
+                                                        .text_xs()
+                                                        .text_color(rgb(0x595959))
+                                                        .child(format!("#{}", tag))
+                                                }))
+                                        )
+                                    })
+                                    .when(!note.persons.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .flex()
+                                                .gap(px(6.0))
+                                                .flex_wrap()
+                                                .children(note.persons.iter().enumerate().map(|(person_idx, person)| {
+                                                    div()
+                                                        .id(("note-person", person_idx))
+                                                        .px(px(6.0))
+                                                        .py(px(2.0))
+                                                        .rounded(px(4.0))
+                                                        .bg(rgb(0xe6f7ff))
+                                                        .text_xs()
+                                                        .text_color(rgb(0x1890ff))
+                                                        .child(format!("@{}", person))
+                                                }))
+                                        )
+                                    })
                                     .into_any_element()
                             }))
                         )
