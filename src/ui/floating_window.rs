@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::input::{Input, InputEvent, InputState, Escape};
+use gpui_component::input::{Input, InputEvent, InputState, Escape, IndentInline};
 use gpui_component::button::Button;
 use gpui_component::Selectable;
 use crate::models::{Priority, Record};
@@ -22,8 +22,8 @@ impl InputMode {
 
     fn placeholder(&self) -> &'static str {
         match self {
-            InputMode::Task => "输入任务内容 (Enter 保存, Esc 取消, Tab 切换模式)",
-            InputMode::Record => "输入记录内容 (Enter 保存, Esc 取消, Tab 切换模式)",
+            InputMode::Task => "输入任务 (Enter保存, Esc取消, Tab切换)",
+            InputMode::Record => "输入记录 (Enter保存, Esc取消, Tab切换)",
         }
     }
 }
@@ -220,11 +220,8 @@ impl Render for QuickAddWindow {
                     cx.hide();
                 }
             }))
-            // Tab 键切换模式
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key.as_str() == "tab" {
-                    this.toggle_mode(window, cx);
-                }
+            .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                this.toggle_mode(window, cx);
             }))
             // 输入区域
             .child(
