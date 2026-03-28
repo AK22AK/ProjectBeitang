@@ -5,6 +5,7 @@ use beitang::ui::dashboard::Dashboard;
 use beitang::ui::floating_window::QuickAddWindow;
 use beitang::ui::timeline::Timeline;
 use beitang::ui::search::SearchPanel;
+use beitang::ui::note_panel::NotePanel;
 use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -177,6 +178,7 @@ pub struct MainView {
     search_panel: Entity<SearchPanel>,
     task_panel: Entity<TaskPanel>,
     timeline_panel: Entity<Timeline>,
+    notes_panel: Entity<NotePanel>,
     store: Store,
     focus_handle: FocusHandle,
 }
@@ -187,9 +189,9 @@ impl MainView {
         let dashboard_panel = cx.new(|cx| Dashboard::new(store_for_panels.clone(), window, cx));
         let search_panel = cx.new(|cx| SearchPanel::new(store_for_panels.clone(), window, cx));
         let task_panel = cx.new(|cx| TaskPanel::new(store_for_panels.clone(), window, cx));
-        let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels, window, cx));
+        let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels.clone(), window, cx));
+        let notes_panel = cx.new(|cx| NotePanel::new(store_for_panels, window, cx));
         let focus_handle = cx.focus_handle();
-        // 初始时请求焦点，使键盘事件可以被捕获
         focus_handle.focus(window, cx);
         Self {
             current_panel: Panel::Dashboard,
@@ -197,6 +199,7 @@ impl MainView {
             search_panel,
             task_panel,
             timeline_panel,
+            notes_panel,
             store,
             focus_handle,
         }
@@ -278,6 +281,10 @@ impl Render for MainView {
                             eprintln!("[MainView] Cmd+4 pressed - switching to Tasks");
                             this.switch_to_panel(Panel::Tasks, cx);
                         }
+                        "5" => {
+                            eprintln!("[MainView] Cmd+5 pressed - switching to Records");
+                            this.switch_to_panel(Panel::Records, cx);
+                        }
                         "0" => {
                             eprintln!("[MainView] Cmd+0 pressed - activating window");
                             window.activate_window();
@@ -302,6 +309,7 @@ impl Render for MainView {
                         Panel::Search => self.search_panel.clone().into_any_element(),
                         Panel::Tasks => self.task_panel.clone().into_any_element(),
                         Panel::Timeline => self.timeline_panel.clone().into_any_element(),
+                        Panel::Records => self.notes_panel.clone().into_any_element(),
                     })
             )
     }

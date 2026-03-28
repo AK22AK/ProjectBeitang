@@ -8,6 +8,7 @@ pub enum Panel {
     Search,
     Tasks,
     Timeline,
+    Records,
 }
 
 #[derive(IntoElement)]
@@ -40,6 +41,7 @@ impl RenderOnce for Sidebar {
             (Panel::Search, "搜索"),
             (Panel::Tasks, "任务"),
             (Panel::Timeline, "时间线"),
+            (Panel::Records, "记录"),
         ];
 
         div()

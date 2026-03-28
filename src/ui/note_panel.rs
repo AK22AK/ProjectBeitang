@@ -1,5 +1,6 @@
 use crate::models::Record;
 use crate::store::Store;
+use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::button::Button;
@@ -11,11 +12,11 @@ pub struct NotePanel {
     notes: Vec<Record>,
     input_state: Entity<InputState>,
     _subscription: Subscription,
-    // 编辑状态
     editing_note_id: Option<uuid::Uuid>,
     edit_input_state: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
     _window_activation_subscription: Subscription,
+    record_detail_sidebar: Entity<RecordDetailSidebar>,
 }
 
 impl NotePanel {
@@ -36,7 +37,7 @@ impl NotePanel {
         );
 
         let mut panel = Self {
-            store,
+            store: store.clone(),
             notes: Vec::new(),
             input_state,
             _subscription,
@@ -48,9 +49,51 @@ impl NotePanel {
                     this.load_notes(cx);
                 }
             }),
+            record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(window, cx)),
         };
+
+        let handle = cx.entity().clone();
+        panel.record_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_save(move |payload, cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_sidebar_save(&payload, cx);
+                });
+            });
+        });
+
         panel.load_notes(cx);
         panel
+    }
+
+    fn handle_sidebar_save(&mut self, payload: &SavePayload, cx: &mut Context<Self>) {
+        if let Some(note) = self.notes.iter_mut().find(|n| n.id.to_string() == payload.record_id) {
+            note.title = payload.title.clone();
+            note.content = payload.content.clone();
+            note.updated_at = chrono::Utc::now();
+
+            let updated_note = note.clone();
+            let store = self.store.clone();
+            cx.spawn(async move |_view, _cx| {
+                if let Err(e) = store.update_record(updated_note).await {
+                    eprintln!("[NotePanel] Failed to update note: {}", e);
+                }
+            }).detach();
+
+            cx.notify();
+        }
+    }
+
+    fn select_record(&mut self, record: &Record, window: &mut Window, cx: &mut Context<Self>) {
+        self.record_detail_sidebar.update(cx, |sidebar, cx| {
+            sidebar.show_record(record, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_record_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.record_detail_sidebar.update(cx, |sidebar, cx| {
+            sidebar.close(window, cx);
+        });
     }
 
     fn start_edit(&mut self, note: Record, window: &mut Window, cx: &mut Context<Self>) {
@@ -221,166 +264,197 @@ impl Render for NotePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         eprintln!("[NotePanel] Rendering {} notes", self.notes.len());
 
+        let sidebar_task_id = self.record_detail_sidebar.read(cx).current_record_id().map(|s| s.to_string());
+
         div()
             .size_full()
             .flex()
-            .flex_col()
-            .gap(px(16.0))
+            .flex_row()
+            .relative()
             .child(
                 div()
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("笔记 ({})", self.notes.len()))
-            )
-            .child(
-                div()
+                    .id("note-panel-main")
+                    .flex_1()
                     .flex()
-                    .gap(px(8.0))
+                    .flex_col()
+                    .gap(px(16.0))
+                    .p(px(16.0))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        if this.record_detail_sidebar.read(cx).current_record_id().is_some() {
+                            this.close_record_detail(window, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("记录 ({})", self.notes.len()))
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                                        if event.keystroke.key == "enter" {
+                                            this.create_note(window, cx);
+                                        }
+                                    }))
+                                    .child(Input::new(&self.input_state))
+                            )
+                            .child(
+                                Button::new("add-btn")
+                                    .child("添加")
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                                        this.create_note(window, cx);
+                                    }))
+                            )
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x888888))
+                            .child("输入记录内容，第一行自动作为标题，Enter 保存")
+                    )
                     .child(
                         div()
                             .flex_1()
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                                if event.keystroke.key == "enter" {
-                                    this.create_note(window, cx);
-                                }
-                            }))
-                            .child(Input::new(&self.input_state))
-                    )
-                    .child(
-                        Button::new("add-btn")
-                            .child("添加")
-                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                                this.create_note(window, cx);
-                            }))
-                    )
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x888888))
-                    .child("输入笔记内容，第一行自动作为标题，Enter 保存")
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .id("note-list")
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .pr(px(16.0))
-                            .overflow_y_scrollbar()
-                            .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
-                        let note_id = note.id;
-                        let is_editing = self.editing_note_id == Some(note_id);
-                        let (title, preview) = Self::get_note_display(&note);
-
-                        if is_editing {
-                            if let Some(ref edit_input) = self.edit_input_state {
-                                let edit_input_clone = edit_input.clone();
-                                return div()
-                                    .id(("edit", idx))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("note-list")
+                                    .size_full()
                                     .flex()
+                                    .flex_col()
                                     .gap(px(8.0))
-                                    .items_center()
+                                    .pr(px(16.0))
+                                    .overflow_y_scrollbar()
+                                    .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
+                                let note_id = note.id;
+                                let is_editing = self.editing_note_id == Some(note_id);
+                                let is_selected = sidebar_task_id.as_ref() == Some(&note_id.to_string());
+                                let (title, preview) = Self::get_note_display(&note);
+
+                                if is_editing {
+                                    if let Some(ref edit_input) = self.edit_input_state {
+                                        let edit_input_clone = edit_input.clone();
+                                        return div()
+                                            .id(("edit", idx))
+                                            .flex()
+                                            .gap(px(8.0))
+                                            .items_center()
+                                            .px(px(12.0))
+                                            .py(px(8.0))
+                                            .rounded(px(6.0))
+                                            .bg(rgb(0xd0e8ff))
+                                            .child(Input::new(&edit_input_clone).flex_1())
+                                            .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
+                                                this.save_edit(window, cx);
+                                            })))
+                                            .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
+                                                this.cancel_edit(window, cx);
+                                            })))
+                                            .into_any_element();
+                                    }
+                                }
+
+                                div()
+                                    .id(idx)
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
                                     .px(px(12.0))
                                     .py(px(8.0))
                                     .rounded(px(6.0))
-                                    .bg(rgb(0xd0e8ff))
-                                    .child(Input::new(&edit_input_clone).flex_1())
-                                    .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
-                                        this.save_edit(window, cx);
-                                    })))
-                                    .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
-                                        this.cancel_edit(window, cx);
-                                    })))
-                                    .into_any_element();
-                            }
-                        }
-
-                        div()
-                            .id(idx)
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0xe8e8e8))
-                            .text_color(rgb(0x000000))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.0))
-                                    .items_center()
+                                    .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xe8e8e8) })
+                                    .border_1()
+                                    .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xe8e8e8) })
+                                    .text_color(rgb(0x000000))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xf0f0f0) }))
+                                    .on_click(cx.listener({
+                                        let note = note.clone();
+                                        move |this, _event: &ClickEvent, window, cx| {
+                                            this.select_record(&note, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                    }))
                                     .child(
                                         div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0x000000))
-                                            .child(title)
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
+                                            .flex()
+                                            .gap(px(8.0))
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0x000000))
+                                                    .child(title)
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .gap(px(4.0))
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .cursor_pointer()
+                                                            .px(px(4.0))
+                                                            .text_color(rgb(0x888888))
+                                                            .hover(|style| style.text_color(rgb(0x1890ff)))
+                                                            .child("✎")
+                                                            .id(("edit", idx))
+                                                            .on_click(cx.listener({
+                                                                let note = note.clone();
+                                                                move |this, _event: &ClickEvent, window, cx| {
+                                                                    this.start_edit(note.clone(), window, cx);
+                                                                    cx.stop_propagation();
+                                                                }
+                                                            }))
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .cursor_pointer()
+                                                            .px(px(4.0))
+                                                            .text_color(rgb(0x888888))
+                                                            .hover(|style| style.text_color(rgb(0xff4d4f)))
+                                                            .child("×")
+                                                            .id(("delete", idx))
+                                                            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                                                this.delete_note(note_id, cx);
+                                                                cx.stop_propagation();
+                                                            }))
+                                                    )
+                                            )
                                     )
                                     .child(
                                         div()
                                             .flex()
-                                            .gap(px(4.0))
+                                            .justify_between()
                                             .items_center()
                                             .child(
                                                 div()
-                                                    .cursor_pointer()
-                                                    .px(px(4.0))
-                                                    .text_color(rgb(0x888888))
-                                                    .hover(|style| style.text_color(rgb(0x1890ff)))
-                                                    .child("✎")
-                                                    .id(("edit", idx))
-                                                    .on_click(cx.listener({
-                                                        let note = note.clone();
-                                                        move |this, _event: &ClickEvent, window, cx| {
-                                                            this.start_edit(note.clone(), window, cx);
-                                                        }
-                                                    }))
+                                                    .text_sm()
+                                                    .text_color(rgb(0x444444))
+                                                    .child(if preview.is_empty() { "...".to_string() } else { preview })
                                             )
                                             .child(
                                                 div()
-                                                    .cursor_pointer()
-                                                    .px(px(4.0))
-                                                    .text_color(rgb(0x888888))
-                                                    .hover(|style| style.text_color(rgb(0xff4d4f)))
-                                                    .child("×")
-                                                    .id(("delete", idx))
-                                                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                                        this.delete_note(note_id, cx);
-                                                    }))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x999999))
+                                                    .child(format!("创建于: {}", note.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
                                             )
                                     )
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x444444))
-                                            .child(if preview.is_empty() { "...".to_string() } else { preview })
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(0x999999))
-                                            .child(format!("创建于: {}", note.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
-                                    )
-                            )
-                            .into_any_element()
-                    }))
-                )
+                                    .into_any_element()
+                            }))
+                        )
+                    )
             )
+            .child(self.record_detail_sidebar.clone())
     }
 }

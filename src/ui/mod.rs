@@ -1,6 +1,7 @@
 pub mod dashboard;
 pub mod floating_window;
 pub mod note_panel;
+pub mod record_detail_sidebar;
 pub mod search;
 pub mod sidebar;
 pub mod task_detail_sidebar;

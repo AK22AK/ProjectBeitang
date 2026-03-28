@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui::prelude::FluentBuilder as _;
 use gpui_component::input::{Input, InputEvent, InputState, Escape};
 use gpui_component::button::Button;
 use gpui_component::Selectable;
@@ -241,6 +242,26 @@ impl Render for QuickAddWindow {
             )
             // 提示区域
             .child(self.render_tips())
+            // 查看记录按钮（仅在记录模式下显示）
+            .when(self.mode == InputMode::Record, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .child(
+                            Button::new("view-records-btn")
+                                .child("查看记录 (Cmd+5)")
+                                .text_color(rgb(0x1890ff))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let hide = this.hide_app_on_close;
+                                    window.remove_window();
+                                    if hide {
+                                        cx.hide();
+                                    }
+                                }))
+                        )
+                )
+            })
     }
 }
 
