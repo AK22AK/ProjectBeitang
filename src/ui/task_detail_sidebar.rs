@@ -496,14 +496,20 @@ impl Render for TaskDetailSidebar {
             .flex()
             .flex_row()
             .justify_end()
-            .occlude()
             .cursor_default()
             .child(
                 div()
                     .id("task-detail-sidebar-dismiss-area")
                     .flex_1()
                     .h_full()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_this, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
                     .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
                         this.close(window, cx);
                         if let Some(ref callback) = this.on_close {
                             callback(cx);
@@ -517,6 +523,7 @@ impl Render for TaskDetailSidebar {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .occlude()
                     .overflow_hidden()
                     .border_l_1()
                     .border_color(rgb(0xe8e8e8))
