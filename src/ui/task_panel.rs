@@ -318,12 +318,6 @@ impl TaskPanel {
         cx.notify();
     }
 
-    fn close_task_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.task_detail_sidebar.update(cx, |sidebar, cx| {
-            sidebar.close(window, cx);
-        });
-    }
-
     fn start_edit(&mut self, task: Record, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing_task_id == Some(task.id) {
             return;
@@ -1361,11 +1355,6 @@ impl Render for TaskPanel {
                     .flex_col()
                     .gap(px(16.0))
                     .p(px(16.0))
-                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                        if this.task_detail_sidebar.read(cx).current_task_id().is_some() {
-                            this.close_task_detail(window, cx);
-                        }
-                    }))
                     .child(
                         div()
                             .text_xl()

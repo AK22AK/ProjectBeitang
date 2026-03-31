@@ -92,12 +92,6 @@ impl NotePanel {
         cx.notify();
     }
 
-    fn close_record_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.record_detail_sidebar.update(cx, |sidebar, cx| {
-            sidebar.close(window, cx);
-        });
-    }
-
     fn start_edit(&mut self, note: Record, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_note_id = Some(note.id);
         let edit_input = cx.new(|cx| {
@@ -286,11 +280,6 @@ impl Render for NotePanel {
                     .flex_col()
                     .gap(px(16.0))
                     .p(px(16.0))
-                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                        if this.record_detail_sidebar.read(cx).current_record_id().is_some() {
-                            this.close_record_detail(window, cx);
-                        }
-                    }))
                     .child(
                         div()
                             .text_xl()

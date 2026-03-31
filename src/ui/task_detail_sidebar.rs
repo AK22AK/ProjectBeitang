@@ -476,6 +476,10 @@ impl TaskDetailSidebar {
 impl Render for TaskDetailSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_visible = self.current_task_id.is_some();
+        if !is_visible {
+            return div().into_any_element();
+        }
+
         let dp_clone = self.date_picker.clone();
         let ti_clone = self.time_input.clone();
         let rdp_clone = self.reminder_date_picker.clone();
@@ -486,28 +490,41 @@ impl Render for TaskDetailSidebar {
             .id("task-detail-sidebar")
             .absolute()
             .top(px(0.0))
+            .left(px(0.0))
             .right(px(0.0))
             .bottom(px(0.0))
-            .w(px(360.0))
-            .when(!is_visible, |el| el.invisible())
-            .overflow_hidden()
-            .border_l_1()
-            .border_color(rgb(0xe8e8e8))
-            .bg(rgb(0xffffff))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .occlude()
             .cursor_default()
-            .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
-                cx.stop_propagation();
-            }))
             .child(
                 div()
+                    .id("task-detail-sidebar-dismiss-area")
+                    .flex_1()
+                    .h_full()
+                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        this.close(window, cx);
+                        if let Some(ref callback) = this.on_close {
+                            callback(cx);
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .id("task-detail-sidebar-pane")
                     .w(px(360.0))
                     .h_full()
                     .flex()
                     .flex_col()
+                    .overflow_hidden()
                     .border_l_1()
                     .border_color(rgb(0xe8e8e8))
                     .bg(rgb(0xffffff))
                     .cursor_default()
+                    .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                    }))
                     .child(
                         div()
                             .p(px(12.0))
@@ -539,12 +556,14 @@ impl Render for TaskDetailSidebar {
                     .child(
                         div()
                             .flex_1()
-                            .p(px(12.0))
-                            .overflow_y_scrollbar()
+                            .min_h_0()
+                            .overflow_hidden()
                             .cursor_default()
                             .child(
                                 v_flex()
+                                    .p(px(12.0))
                                     .gap(px(12.0))
+                                    .overflow_y_scrollbar()
                                     // 标题输入
                                     .child(
                                         v_flex()
