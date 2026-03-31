@@ -198,20 +198,7 @@ impl Render for RecordDetailSidebar {
                 div()
                     .id("record-detail-sidebar-dismiss-area")
                     .flex_1()
-                    .h_full()
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|_this, _event, _window, cx| {
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.close(window, cx);
-                        if let Some(ref callback) = this.on_close {
-                            callback(cx);
-                        }
-                    })),
+                    .h_full(),
             )
             .child(
                 div()

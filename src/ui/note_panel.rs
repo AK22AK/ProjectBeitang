@@ -280,6 +280,13 @@ impl Render for NotePanel {
                     .flex_col()
                     .gap(px(16.0))
                     .p(px(16.0))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        if this.record_detail_sidebar.read(cx).current_record_id().is_some() {
+                            this.record_detail_sidebar.update(cx, |sidebar, cx| {
+                                sidebar.close(window, cx);
+                            });
+                        }
+                    }))
                     .child(
                         div()
                             .text_xl()
