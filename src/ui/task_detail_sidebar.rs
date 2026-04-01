@@ -28,6 +28,7 @@ pub struct TaskDetailSidebar {
     reminder_time_input: Option<Entity<InputState>>,
     title_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
+    content_expanded: bool,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
 }
@@ -73,6 +74,7 @@ impl TaskDetailSidebar {
             reminder_time_input: None,
             title_input: None,
             content_input: None,
+            content_expanded: false,
             on_save: None,
             on_close: None,
         }
@@ -210,14 +212,14 @@ impl TaskDetailSidebar {
             self.title_input = Some(title_input);
         }
 
-        // 初始化或更新内容输入框
+        // 初始化或更新内容输入框（多行文本区域）
         if let Some(ref input) = self.content_input {
             input.update(cx, |state, cx| {
                 state.set_value(&task.content, window, cx);
             });
         } else {
             let content_input = cx.new(|cx| {
-                let mut input = InputState::new(window, cx);
+                let mut input = InputState::new(window, cx).multi_line(true).auto_grow(1, 6);
                 input.set_value(&task.content, window, cx);
                 input
             });
@@ -409,6 +411,23 @@ impl TaskDetailSidebar {
         self.priority = Some(priority);
         cx.notify();
     }
+
+    /// 切换内容输入框的展开/收起状态
+    fn toggle_content_expanded(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.content_expanded = !self.content_expanded;
+        cx.notify();
+    }
+
+    fn estimate_line_count(content: &str) -> usize {
+        if content.is_empty() {
+            return 1;
+        }
+        // 估算行数：基于换行符数量
+        // 考虑中文字符宽度约为英文字符的2倍
+        let newline_count = content.matches('\n').count();
+        let estimated_lines = newline_count + 1;
+        estimated_lines.max(1)
+    }
     /// 清除截止日期
     fn clear_due_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.due_date = None;
@@ -485,6 +504,7 @@ impl Render for TaskDetailSidebar {
         let rdp_clone = self.reminder_date_picker.clone();
         let rti_clone = self.reminder_time_input.clone();
         let content_input_clone = self.content_input.clone();
+        let content_expanded = self.content_expanded;
 
         div()
             .id("task-detail-sidebar")
@@ -590,17 +610,41 @@ impl Render for TaskDetailSidebar {
                                                 )
                                             }),
                                     )
-                                    // 内容输入
+                                    // 内容输入（多行文本区域）
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
                                             .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(0x666666))
-                                                    .child("内容/详情"),
+                                                h_flex()
+                                                    .justify_between()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0x666666))
+                                                            .child("内容/详情"),
+                                                    )
+                                                    .when(content_input_clone.as_ref().map_or(false, |input| {
+                                                        let content = input.read(cx).value();
+                                                        Self::estimate_line_count(&content) > 6
+                                                    }), |el| {
+                                                        el.child(
+                                                            Button::new("toggle-content-expand")
+                                                                .child(if content_expanded { "收起" } else { "展开" })
+                                                                .text_color(rgb(0x1890ff))
+                                                                .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                                                                    this.toggle_content_expanded(window, cx);
+                                                                    cx.stop_propagation();
+                                                                })),
+                                                        )
+                                                    }),
                                             )
                                             .when_some(content_input_clone.clone(), |el, input| {
+                                                let content = input.read(cx).value();
+                                                let line_count = Self::estimate_line_count(&content);
+                                                let needs_scroll = line_count > 6 && !content_expanded;
+                                                let is_expanded = content_expanded;
+                                                
                                                 el.child(
                                                     div()
                                                         .on_mouse_down(
@@ -611,10 +655,21 @@ impl Render for TaskDetailSidebar {
                                                                 },
                                                             ),
                                                         )
+                                                        .when(!needs_scroll && !is_expanded, |d| {
+                                                            d.h_auto()
+                                                        })
+                                                        .when(needs_scroll, |d| {
+                                                            d.h(px(144.0))
+                                                        })
+                                                        .when(is_expanded, |d| {
+                                                            d.flex_1()
+                                                        })
                                                         .child(
                                                             Input::new(&input)
                                                                 .appearance(false)
-                                                                .text_size(px(14.0)),
+                                                                .text_size(px(14.0))
+                                                                .when(needs_scroll, |i| i.h_full())
+                                                                .when(is_expanded, |i| i.h_full()),
                                                         ),
                                                 )
                                             }),
