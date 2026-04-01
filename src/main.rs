@@ -9,13 +9,14 @@ use beitang::ui::note_panel::NotePanel;
 use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component_assets::Assets;
 use gpui_platform::application;
 
 use std::rc::Rc;
 use std::cell::RefCell;
 
 fn main() {
-    let app = application();
+    let app = application().with_assets(Assets);
 
     // 创建异步 store
     let (store, mut runtime) = create_store();
@@ -270,20 +271,20 @@ impl Render for MainView {
                             this.switch_to_panel(Panel::Dashboard, cx);
                         }
                         "2" => {
-                            eprintln!("[MainView] Cmd+2 pressed - switching to Search");
-                            this.switch_to_panel(Panel::Search, cx);
-                        }
-                        "3" => {
-                            eprintln!("[MainView] Cmd+3 pressed - switching to Timeline");
-                            this.switch_to_panel(Panel::Timeline, cx);
-                        }
-                        "4" => {
-                            eprintln!("[MainView] Cmd+4 pressed - switching to Tasks");
+                            eprintln!("[MainView] Cmd+2 pressed - switching to Tasks");
                             this.switch_to_panel(Panel::Tasks, cx);
                         }
-                        "5" => {
-                            eprintln!("[MainView] Cmd+5 pressed - switching to Records");
+                        "3" => {
+                            eprintln!("[MainView] Cmd+3 pressed - switching to Records");
                             this.switch_to_panel(Panel::Records, cx);
+                        }
+                        "4" => {
+                            eprintln!("[MainView] Cmd+4 pressed - switching to Timeline");
+                            this.switch_to_panel(Panel::Timeline, cx);
+                        }
+                        "5" => {
+                            eprintln!("[MainView] Cmd+5 pressed - switching to Search");
+                            this.switch_to_panel(Panel::Search, cx);
                         }
                         "0" => {
                             eprintln!("[MainView] Cmd+0 pressed - activating window");
@@ -306,10 +307,12 @@ impl Render for MainView {
                     .bg(rgb(0xffffff))
                     .child(match self.current_panel {
                         Panel::Dashboard => self.dashboard_panel.clone().into_any_element(),
-                        Panel::Search => self.search_panel.clone().into_any_element(),
                         Panel::Tasks => self.task_panel.clone().into_any_element(),
-                        Panel::Timeline => self.timeline_panel.clone().into_any_element(),
                         Panel::Records => self.notes_panel.clone().into_any_element(),
+                        Panel::Timeline => self.timeline_panel.clone().into_any_element(),
+                        Panel::Search => self.search_panel.clone().into_any_element(),
+                        Panel::AI => div().child("AI 面板开发中...").into_any_element(),
+                        Panel::Settings => div().child("设置面板开发中...").into_any_element(),
                     })
             )
     }
