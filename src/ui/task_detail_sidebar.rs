@@ -418,14 +418,27 @@ impl TaskDetailSidebar {
         cx.notify();
     }
 
+    const APPROX_CHARS_PER_LINE: usize = 45;
+
     fn estimate_line_count(content: &str) -> usize {
         if content.is_empty() {
             return 1;
         }
-        // 估算行数：基于换行符数量
-        // 考虑中文字符宽度约为英文字符的2倍
+
         let newline_count = content.matches('\n').count();
-        let estimated_lines = newline_count + 1;
+
+        // 估算基于字符宽度的额外行数
+        // 中文字符按1.5个宽度计算，英文字母按1个宽度计算
+        let total_width: usize = content
+            .chars()
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum();
+
+        let estimated_lines_from_width =
+            (total_width + Self::APPROX_CHARS_PER_LINE - 1) / Self::APPROX_CHARS_PER_LINE;
+
+        // 取换行符行数和字符宽度行数的较大值
+        let estimated_lines = newline_count + estimated_lines_from_width;
         estimated_lines.max(1)
     }
     /// 清除截止日期
@@ -624,7 +637,7 @@ impl Render for TaskDetailSidebar {
                                                             .text_color(rgb(0x666666))
                                                             .child("内容/详情"),
                                                     )
-                                                    .when(content_input_clone.as_ref().map_or(false, |input| {
+                                                    .when(self.content_input.as_ref().map_or(false, |input| {
                                                         let content = input.read(cx).value();
                                                         Self::estimate_line_count(&content) > 6
                                                     }), |el| {
@@ -662,14 +675,14 @@ impl Render for TaskDetailSidebar {
                                                             d.h(px(144.0))
                                                         })
                                                         .when(is_expanded, |d| {
-                                                            d.flex_1()
+                                                            let total_height = ((line_count as f32) * 20.0 + 16.0).max(144.0);
+                                                            d.h(px(total_height))
                                                         })
                                                         .child(
                                                             Input::new(&input)
                                                                 .appearance(false)
                                                                 .text_size(px(14.0))
-                                                                .when(needs_scroll, |i| i.h_full())
-                                                                .when(is_expanded, |i| i.h_full()),
+                                                                .when(needs_scroll || is_expanded, |i| i.h_full()),
                                                         ),
                                                 )
                                             }),

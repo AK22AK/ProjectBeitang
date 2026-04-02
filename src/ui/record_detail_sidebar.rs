@@ -148,12 +148,27 @@ impl RecordDetailSidebar {
         cx.notify();
     }
 
+    const APPROX_CHARS_PER_LINE: usize = 45;
+
     fn estimate_line_count(content: &str) -> usize {
         if content.is_empty() {
             return 1;
         }
+
         let newline_count = content.matches('\n').count();
-        newline_count + 1
+
+        // Estimate additional lines based on character width
+        // Chinese characters count as 2 units, ASCII characters count as 1 unit
+        let total_width: usize = content
+            .chars()
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum();
+
+        let estimated_lines_from_width =
+            (total_width + Self::APPROX_CHARS_PER_LINE - 1) / Self::APPROX_CHARS_PER_LINE;
+
+        let estimated_lines = newline_count + estimated_lines_from_width;
+        estimated_lines.max(1)
     }
 
     fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -318,7 +333,7 @@ impl Render for RecordDetailSidebar {
                                                             .text_color(rgb(0x666666))
                                                             .child("内容"),
                                                     )
-                                                    .when(content_input_clone.as_ref().map_or(false, |input| {
+                                                    .when(self.content_input.as_ref().map_or(false, |input| {
                                                         let content = input.read(cx).value();
                                                         Self::estimate_line_count(&content) > 6
                                                     }), |el| {
@@ -356,14 +371,14 @@ impl Render for RecordDetailSidebar {
                                                             d.h(px(144.0))
                                                         })
                                                         .when(is_expanded, |d| {
-                                                            d.flex_1()
+                                                            let total_height = ((line_count as f32) * 20.0 + 16.0).max(144.0);
+                                                            d.h(px(total_height))
                                                         })
                                                         .child(
                                                             Input::new(&input)
                                                                 .appearance(false)
                                                                 .text_size(px(14.0))
-                                                                .when(needs_scroll, |i| i.h_full())
-                                                                .when(is_expanded, |i| i.h_full()),
+                                                                .when(needs_scroll || is_expanded, |i| i.h_full()),
                                                         ),
                                                 )
                                             }),
