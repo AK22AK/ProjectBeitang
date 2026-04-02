@@ -3,24 +3,34 @@ use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::task_detail_sidebar::TaskDetailSidebar;
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
-use gpui::*;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui::StatefulInteractiveElement as _;
+use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::date_picker::{DatePicker, DatePickerState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, IconName};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-actions!(task_panel, [
-    EditTaskAction, 
-    DeleteTaskAction, 
-    SetReminderAction,
-    SetReminderTodayAction,
-    SetReminderTomorrowAction,
-    SetReminderNextWeekAction
-]);
+actions!(
+    task_panel,
+    [
+        EditTaskAction,
+        DeleteTaskAction,
+        SetReminderAction,
+        SetReminderTodayAction,
+        SetReminderTomorrowAction,
+        SetReminderNextWeekAction
+    ]
+);
+
+const MAIN_SIDEBAR_WIDTH: Pixels = px(200.0);
+const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(360.0);
+const TASK_PANEL_HORIZONTAL_PADDING: Pixels = px(32.0);
+const MATRIX_COLUMN_GAP: Pixels = px(8.0);
+const MIN_VISIBLE_QUADRANT_WIDTH: Pixels = px(280.0);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskView {
@@ -63,6 +73,12 @@ impl Quadrant {
             Quadrant::NotUrgentNotImportant => rgb(0x52c41a).into(),
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MatrixLayoutMode {
+    Grid,
+    Stacked,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -132,8 +148,12 @@ pub struct TaskPanel {
     reminder_error_message: Option<String>,
     _reminder_subscriptions: Vec<Subscription>,
     _window_activation_subscription: Subscription,
+    _window_bounds_subscription: Subscription,
     show_completed: bool,
     current_view: TaskView,
+    matrix_layout_mode: MatrixLayoutMode,
+    matrix_stack_scroll_handle: ScrollHandle,
+    pending_stack_scroll_target: Option<usize>,
     priority_filter: PriorityFilter,
     selected_tags: HashSet<String>,
     available_tags: Vec<String>,
@@ -158,6 +178,17 @@ impl TaskPanel {
             },
         );
 
+        let _window_activation_subscription =
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.load_tasks(cx);
+                    this.sync_matrix_layout_mode(window, cx, false);
+                }
+            });
+        let _window_bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
+            this.sync_matrix_layout_mode(window, cx, false);
+        });
+
         let mut panel = Self {
             store,
             tasks: Vec::new(),
@@ -173,13 +204,13 @@ impl TaskPanel {
             reminder_time_input: None,
             reminder_error_message: None,
             _reminder_subscriptions: Vec::new(),
-            _window_activation_subscription: cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    this.load_tasks(cx);
-                }
-            }),
+            _window_activation_subscription,
+            _window_bounds_subscription,
             show_completed: false,
             current_view: TaskView::List,
+            matrix_layout_mode: MatrixLayoutMode::Grid,
+            matrix_stack_scroll_handle: ScrollHandle::new(),
+            pending_stack_scroll_target: None,
             priority_filter: PriorityFilter::All,
             selected_tags: HashSet::new(),
             available_tags: Vec::new(),
@@ -195,14 +226,30 @@ impl TaskPanel {
                 });
             });
         });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_close(move |cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_sidebar_close(cx);
+                });
+            });
+        });
 
         panel.load_tasks(cx);
         panel.load_available_tags(cx);
         panel
     }
 
-    fn handle_sidebar_save(&mut self, payload: &crate::ui::task_detail_sidebar::SavePayload, cx: &mut Context<Self>) {
-        if let Some(task) = self.tasks.iter_mut().find(|t| t.id.to_string() == payload.task_id) {
+    fn handle_sidebar_save(
+        &mut self,
+        payload: &crate::ui::task_detail_sidebar::SavePayload,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(task) = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.id.to_string() == payload.task_id)
+        {
             task.title = payload.title.clone();
             task.content = payload.content.clone();
             task.priority = Some(payload.priority.clone());
@@ -236,7 +283,8 @@ impl TaskPanel {
                 if let Err(e) = store.update_record(updated_task).await {
                     eprintln!("[TaskPanel] Failed to update task: {}", e);
                 }
-            }).detach();
+            })
+            .detach();
 
             cx.notify();
         }
@@ -247,7 +295,7 @@ impl TaskPanel {
             d.signed_duration_since(Utc::now()).num_hours() < 24
         });
         let is_important = matches!(task.priority, Some(Priority::High));
-        
+
         match (is_urgent, is_important) {
             (true, true) => Quadrant::UrgentImportant,
             (false, true) => Quadrant::NotUrgentImportant,
@@ -287,26 +335,42 @@ impl TaskPanel {
 
     fn group_tasks_by_quadrant(&self) -> HashMap<Quadrant, Vec<Record>> {
         let mut groups: HashMap<Quadrant, Vec<Record>> = HashMap::new();
-        
+
         groups.insert(Quadrant::UrgentImportant, Vec::new());
         groups.insert(Quadrant::NotUrgentImportant, Vec::new());
         groups.insert(Quadrant::UrgentNotImportant, Vec::new());
         groups.insert(Quadrant::NotUrgentNotImportant, Vec::new());
-        
-        for task in self.get_filtered_tasks().iter().filter(|t| t.completed_at.is_none()) {
+
+        for task in self
+            .get_filtered_tasks()
+            .iter()
+            .filter(|t| t.completed_at.is_none())
+        {
             let quadrant = Self::categorize_quadrant(task);
             groups.entry(quadrant).or_default().push(task.clone());
         }
-        
+
         groups
     }
 
-    fn set_view(&mut self, view: TaskView, _window: &mut Window, cx: &mut Context<Self>) {
+    fn set_view(&mut self, view: TaskView, window: &mut Window, cx: &mut Context<Self>) {
         self.current_view = view;
+        if view != TaskView::Matrix {
+            self.matrix_layout_mode = MatrixLayoutMode::Grid;
+            self.pending_stack_scroll_target = None;
+        } else {
+            self.sync_matrix_layout_mode(window, cx, true);
+            return;
+        }
         cx.notify();
     }
 
-    fn set_priority_filter(&mut self, filter: PriorityFilter, _window: &mut Window, cx: &mut Context<Self>) {
+    fn set_priority_filter(
+        &mut self,
+        filter: PriorityFilter,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.priority_filter = filter;
         cx.notify();
     }
@@ -315,19 +379,111 @@ impl TaskPanel {
         self.task_detail_sidebar.update(cx, |sidebar, cx| {
             sidebar.show_task(task, window, cx);
         });
+        self.sync_matrix_layout_mode(window, cx, true);
+    }
+
+    fn handle_sidebar_close(&mut self, cx: &mut Context<Self>) {
+        self.matrix_layout_mode = MatrixLayoutMode::Grid;
+        self.pending_stack_scroll_target = None;
         cx.notify();
+    }
+
+    fn sidebar_visible(&self, cx: &App) -> bool {
+        self.task_detail_sidebar
+            .read(cx)
+            .current_task_id()
+            .is_some()
+    }
+
+    fn selected_task_quadrant(&self, cx: &App) -> Option<Quadrant> {
+        let task_id = self
+            .task_detail_sidebar
+            .read(cx)
+            .current_task_id()?
+            .to_string();
+        self.tasks
+            .iter()
+            .find(|task| task.id.to_string() == task_id)
+            .map(Self::categorize_quadrant)
+    }
+
+    fn quadrant_stack_index(quadrant: Quadrant) -> usize {
+        match quadrant {
+            Quadrant::UrgentImportant => 0,
+            Quadrant::NotUrgentImportant => 1,
+            Quadrant::UrgentNotImportant => 2,
+            Quadrant::NotUrgentNotImportant => 3,
+        }
+    }
+
+    fn selected_quadrant_visible_width(&self, quadrant: Quadrant, window: &Window) -> Pixels {
+        let task_panel_width =
+            std::cmp::max(window.viewport_size().width - MAIN_SIDEBAR_WIDTH, px(0.0));
+        let matrix_content_width =
+            std::cmp::max(task_panel_width - TASK_PANEL_HORIZONTAL_PADDING, px(0.0));
+        let column_width = std::cmp::max((matrix_content_width - MATRIX_COLUMN_GAP) * 0.5, px(0.0));
+
+        match quadrant {
+            Quadrant::NotUrgentImportant | Quadrant::NotUrgentNotImportant => {
+                std::cmp::max(column_width - TASK_DETAIL_SIDEBAR_WIDTH, px(0.0))
+            }
+            Quadrant::UrgentImportant | Quadrant::UrgentNotImportant => column_width,
+        }
+    }
+
+    fn current_matrix_layout_mode(&self, window: &Window, cx: &App) -> MatrixLayoutMode {
+        if self.current_view != TaskView::Matrix || !self.sidebar_visible(cx) {
+            return MatrixLayoutMode::Grid;
+        }
+
+        let Some(quadrant) = self.selected_task_quadrant(cx) else {
+            return MatrixLayoutMode::Grid;
+        };
+
+        if self.selected_quadrant_visible_width(quadrant, window) < MIN_VISIBLE_QUADRANT_WIDTH {
+            MatrixLayoutMode::Stacked
+        } else {
+            MatrixLayoutMode::Grid
+        }
+    }
+
+    fn sync_matrix_layout_mode(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        force_scroll_to_selected: bool,
+    ) {
+        let next_mode = self.current_matrix_layout_mode(window, cx);
+        let previous_mode = self.matrix_layout_mode;
+
+        if next_mode == MatrixLayoutMode::Stacked
+            && (force_scroll_to_selected || next_mode != previous_mode)
+        {
+            self.pending_stack_scroll_target = self
+                .selected_task_quadrant(cx)
+                .map(Self::quadrant_stack_index);
+        } else if next_mode == MatrixLayoutMode::Grid {
+            self.pending_stack_scroll_target = None;
+        }
+
+        self.matrix_layout_mode = next_mode;
+
+        if previous_mode != next_mode || force_scroll_to_selected {
+            cx.notify();
+        }
     }
 
     fn start_edit(&mut self, task: Record, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing_task_id == Some(task.id) {
             return;
         }
-        
+
         self.editing_task_id = Some(task.id);
         let task_id = task.id;
         let content = task.content.clone();
-        
-        let input_state = self.task_input_states
+
+        let input_state = self
+            .task_input_states
             .get(&task_id)
             .cloned()
             .unwrap_or_else(|| {
@@ -337,11 +493,11 @@ impl TaskPanel {
                     state
                 })
             });
-        
+
         input_state.update(cx, |state, cx| {
             state.focus(window, cx);
         });
-        
+
         if !self.task_input_states.contains_key(&task_id) {
             self.task_input_states.insert(task_id, input_state.clone());
         }
@@ -349,16 +505,14 @@ impl TaskPanel {
         let _edit_subscription = cx.subscribe_in(
             &input_state,
             window,
-            |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.save_edit(window, cx);
-                    }
-                    InputEvent::Blur => {
-                        this.save_edit(window, cx);
-                    }
-                    _ => {}
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    this.save_edit(window, cx);
                 }
+                InputEvent::Blur => {
+                    this.save_edit(window, cx);
+                }
+                _ => {}
             },
         );
 
@@ -383,7 +537,8 @@ impl TaskPanel {
                         if let Err(e) = store.update_record(updated_task).await {
                             eprintln!("[TaskPanel] Failed to update task: {}", e);
                         }
-                    }).detach();
+                    })
+                    .detach();
                 }
             }
         }
@@ -398,23 +553,22 @@ impl TaskPanel {
 
         let (init_date, init_time_str) = if let Some(scheduled) = task.scheduled_for {
             let local = scheduled.with_timezone(&chrono::Local);
-            (local.naive_local().date(), local.format("%H:%M").to_string())
+            (
+                local.naive_local().date(),
+                local.format("%H:%M").to_string(),
+            )
         } else {
             let now = chrono::Local::now();
             (now.naive_local().date(), now.format("%H:%M").to_string())
         };
 
         let date_picker = cx.new(|cx| {
-            let mut picker = DatePickerState::new(window, cx)
-                .date_format("%Y-%m-%d");
+            let mut picker = DatePickerState::new(window, cx).date_format("%Y-%m-%d");
             picker.set_date(init_date, window, cx);
             picker
         });
 
-        let time_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("HH:MM 如 14:30")
-        });
+        let time_input = cx.new(|cx| InputState::new(window, cx).placeholder("HH:MM 如 14:30"));
         time_input.update(cx, |state, cx| {
             state.set_value(&init_time_str, window, cx);
         });
@@ -438,7 +592,7 @@ impl TaskPanel {
             if let Some(naive_date) = date.start() {
                 let parts: Vec<&str> = time_str.split(':').collect();
                 let is_valid = parts.len() == 2 && parts[0].len() <= 2 && parts[1].len() == 2;
-                
+
                 let time_parsed = if is_valid {
                     match (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
                         (Ok(h), Ok(m)) if h <= 23 && m <= 59 => Some((h, m)),
@@ -451,7 +605,9 @@ impl TaskPanel {
                 if let Some((hour, minute)) = time_parsed {
                     self.reminder_error_message = None;
                     if let Some(naive_dt) = naive_date.and_hms_opt(hour, minute, 0) {
-                        if let Some(local_dt) = chrono::Local.from_local_datetime(&naive_dt).single() {
+                        if let Some(local_dt) =
+                            chrono::Local.from_local_datetime(&naive_dt).single()
+                        {
                             let utc_dt = local_dt.with_timezone(&chrono::Utc);
 
                             if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
@@ -461,14 +617,19 @@ impl TaskPanel {
                                 let store = self.store.clone();
                                 cx.spawn(async move |_view, _cx| {
                                     if let Err(e) = store.update_record(updated_task).await {
-                                        eprintln!("[TaskPanel] Failed to update task reminder: {}", e);
+                                        eprintln!(
+                                            "[TaskPanel] Failed to update task reminder: {}",
+                                            e
+                                        );
                                     }
-                                }).detach();
+                                })
+                                .detach();
                             }
                         }
                     }
                 } else {
-                    self.reminder_error_message = Some("时间格式无效，请输入 HH:MM（例 14:30）".to_string());
+                    self.reminder_error_message =
+                        Some("时间格式无效，请输入 HH:MM（例 14:30）".to_string());
                     cx.notify();
                     return;
                 }
@@ -481,7 +642,12 @@ impl TaskPanel {
         self.cancel_reminder(window, cx);
     }
 
-    fn update_task_reminder(&mut self, task_id: Uuid, scheduled_for: chrono::DateTime<chrono::Utc>, cx: &mut Context<Self>) {
+    fn update_task_reminder(
+        &mut self,
+        task_id: Uuid,
+        scheduled_for: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
             task.scheduled_for = Some(scheduled_for);
             let updated_task = task.clone();
@@ -490,7 +656,8 @@ impl TaskPanel {
                 if let Err(e) = store.update_record(updated_task).await {
                     eprintln!("[TaskPanel] Failed to update reminder: {}", e);
                 }
-            }).detach();
+            })
+            .detach();
             cx.notify();
         }
     }
@@ -510,7 +677,10 @@ impl TaskPanel {
         cx.spawn(async move |view, cx| {
             let mut retries = 0;
             let tasks = loop {
-                eprintln!("[TaskPanel] Fetching tasks from store... (attempt {})", retries + 1);
+                eprintln!(
+                    "[TaskPanel] Fetching tasks from store... (attempt {})",
+                    retries + 1
+                );
                 match store.get_tasks(false).await {
                     Ok(tasks) => break tasks,
                     Err(e) => {
@@ -528,33 +698,36 @@ impl TaskPanel {
             eprintln!("[TaskPanel] Loaded {} tasks", tasks.len());
             let update_result = view.update(cx, |panel, cx| {
                 panel.tasks = tasks;
-                panel.task_input_states.retain(|id, _| {
-                    panel.tasks.iter().any(|t| t.id == *id)
-                });
+                panel
+                    .task_input_states
+                    .retain(|id, _| panel.tasks.iter().any(|t| t.id == *id));
                 cx.notify();
-                eprintln!("[TaskPanel] Tasks updated and notified, panel now has {} tasks", panel.tasks.len());
+                eprintln!(
+                    "[TaskPanel] Tasks updated and notified, panel now has {} tasks",
+                    panel.tasks.len()
+                );
             });
             if let Err(e) = update_result {
                 eprintln!("[TaskPanel] Failed to update view: {:?}", e);
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn load_available_tags(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        cx.spawn(async move |view, cx| {
-            match store.get_all_tags().await {
-                Ok(tags) => {
-                    let _ = view.update(cx, |panel, cx| {
-                        panel.available_tags = tags.into_iter().map(|t| t.name).collect();
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[TaskPanel] Failed to load tags: {}", e);
-                }
+        cx.spawn(async move |view, cx| match store.get_all_tags().await {
+            Ok(tags) => {
+                let _ = view.update(cx, |panel, cx| {
+                    panel.available_tags = tags.into_iter().map(|t| t.name).collect();
+                    cx.notify();
+                });
             }
-        }).detach();
+            Err(e) => {
+                eprintln!("[TaskPanel] Failed to load tags: {}", e);
+            }
+        })
+        .detach();
     }
 
     fn toggle_tag_filter(&mut self, tag: &str, cx: &mut Context<Self>) {
@@ -585,13 +758,19 @@ impl TaskPanel {
         }
 
         let (title, priority, tags, people) = parsing::parse_task_input(&text);
-        eprintln!("[TaskPanel] Parsed title: '{}', priority: {:?}, tags: {:?}, people: {:?}", title, priority, tags, people);
-        
+        eprintln!(
+            "[TaskPanel] Parsed title: '{}', priority: {:?}, tags: {:?}, people: {:?}",
+            title, priority, tags, people
+        );
+
         // 任务创建时，输入内容作为 title，content 初始为空
         let mut task = Record::new_task(title, String::new(), priority);
         task.tags = tags;
         task.persons = people;
-        eprintln!("[TaskPanel] Created task with id: {}, tags: {:?}, persons: {:?}", task.id, task.tags, task.persons);
+        eprintln!(
+            "[TaskPanel] Created task with id: {}, tags: {:?}, persons: {:?}",
+            task.id, task.tags, task.persons
+        );
 
         self.input_state.update(cx, |state, cx| {
             state.set_value("", window, cx);
@@ -617,7 +796,8 @@ impl TaskPanel {
                 }
                 Err(e) => eprintln!("[TaskPanel] Failed to create task: {}", e),
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn toggle_task_complete(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
@@ -632,32 +812,36 @@ impl TaskPanel {
             let updated_task = task.clone();
             let store = self.store.clone();
 
-            cx.spawn(async move |view, cx| {
-                match store.update_record(updated_task).await {
+            cx.spawn(
+                async move |view, cx| match store.update_record(updated_task).await {
                     Ok(_) => {
                         view.update(cx, |panel, cx| {
                             panel.load_tasks(cx);
-                        }).ok();
+                        })
+                        .ok();
                     }
                     Err(e) => eprintln!("Failed to toggle task: {}", e),
-                }
-            }).detach();
+                },
+            )
+            .detach();
         }
     }
 
     fn delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        
-        cx.spawn(async move |view, cx| {
-            match store.delete_record(task_id).await {
+
+        cx.spawn(
+            async move |view, cx| match store.delete_record(task_id).await {
                 Ok(_) => {
                     view.update(cx, |panel, cx| {
                         panel.load_tasks(cx);
-                    }).ok();
+                    })
+                    .ok();
                 }
                 Err(e) => eprintln!("Failed to delete task: {}", e),
-            }
-        }).detach();
+            },
+        )
+        .detach();
     }
 
     fn render_custom_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -668,46 +852,87 @@ impl TaskPanel {
 
         Some(
             deferred(
-                anchored()
-                    .position(position)
-                    .child(
-                        v_flex()
-                            .id("custom-context-menu")
-                            .bg(rgb(0xffffff))
-                            .border_1()
-                            .border_color(rgb(0xe0e0e0))
-                            .rounded(px(8.0))
-                            .shadow_md()
-                            .min_w(px(200.0))
-                            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                                this.context_menu_task_id = None;
-                                this.context_menu_position = None;
-                                cx.notify();
-                            }))
-                            .child(
-                                v_flex()
-                                    .p(px(8.0))
-                                    .child(div().text_xs().text_color(rgb(0xaaaaaa)).mb_1().child("日期"))
-                                    .child(
-                                        h_flex()
-                                            .justify_between()
-                                            .child(self.render_menu_shortcut(IconName::Sun, SetReminderTodayAction, cx))
-                                            .child(self.render_menu_shortcut(IconName::Bell, SetReminderTomorrowAction, cx))
-                                            .child(self.render_menu_shortcut(IconName::Calendar, SetReminderNextWeekAction, cx))
-                                            .child(self.render_menu_shortcut(IconName::Plus, SetReminderAction, cx))
-                                    )
-                            )
-                            .child(div().h_px().bg(rgb(0xeeeeee)))
-                            .child(self.render_menu_item("设置提醒", IconName::Bell, SetReminderAction, cx))
-                            .child(self.render_menu_item("编辑", IconName::Settings, EditTaskAction, cx))
-                            .child(div().h_px().bg(rgb(0xeeeeee)))
-                            .child(self.render_menu_item("删除", IconName::Delete, DeleteTaskAction, cx))
-                    )
-            ).into_any()
+                anchored().position(position).child(
+                    v_flex()
+                        .id("custom-context-menu")
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe0e0e0))
+                        .rounded(px(8.0))
+                        .shadow_md()
+                        .min_w(px(200.0))
+                        .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                            this.context_menu_task_id = None;
+                            this.context_menu_position = None;
+                            cx.notify();
+                        }))
+                        .child(
+                            v_flex()
+                                .p(px(8.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0xaaaaaa))
+                                        .mb_1()
+                                        .child("日期"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .child(self.render_menu_shortcut(
+                                            IconName::Sun,
+                                            SetReminderTodayAction,
+                                            cx,
+                                        ))
+                                        .child(self.render_menu_shortcut(
+                                            IconName::Bell,
+                                            SetReminderTomorrowAction,
+                                            cx,
+                                        ))
+                                        .child(self.render_menu_shortcut(
+                                            IconName::Calendar,
+                                            SetReminderNextWeekAction,
+                                            cx,
+                                        ))
+                                        .child(self.render_menu_shortcut(
+                                            IconName::Plus,
+                                            SetReminderAction,
+                                            cx,
+                                        )),
+                                ),
+                        )
+                        .child(div().h_px().bg(rgb(0xeeeeee)))
+                        .child(self.render_menu_item(
+                            "设置提醒",
+                            IconName::Bell,
+                            SetReminderAction,
+                            cx,
+                        ))
+                        .child(self.render_menu_item(
+                            "编辑",
+                            IconName::Settings,
+                            EditTaskAction,
+                            cx,
+                        ))
+                        .child(div().h_px().bg(rgb(0xeeeeee)))
+                        .child(self.render_menu_item(
+                            "删除",
+                            IconName::Delete,
+                            DeleteTaskAction,
+                            cx,
+                        )),
+                ),
+            )
+            .into_any(),
         )
     }
 
-    fn render_menu_shortcut<A: Action + 'static>(&self, icon: IconName, action: A, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_menu_shortcut<A: Action + 'static>(
+        &self,
+        icon: IconName,
+        action: A,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .id(("shortcut", icon.clone() as usize))
             .p(px(6.0))
@@ -720,11 +945,17 @@ impl TaskPanel {
             .child(
                 gpui_component::Icon::new(icon)
                     .size(px(18.0))
-                    .text_color(rgb(0x666666))
+                    .text_color(rgb(0x666666)),
             )
     }
 
-    fn render_menu_item<A: Action + 'static>(&self, label: &'static str, icon: IconName, action: A, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_menu_item<A: Action + 'static>(
+        &self,
+        label: &'static str,
+        icon: IconName,
+        action: A,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         h_flex()
             .id(label)
             .w_full()
@@ -742,14 +973,9 @@ impl TaskPanel {
             .child(
                 gpui_component::Icon::new(icon)
                     .size(px(16.0))
-                    .text_color(rgb(0x666666))
+                    .text_color(rgb(0x666666)),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x333333))
-                    .child(label)
-            )
+            .child(div().text_sm().text_color(rgb(0x333333)).child(label))
     }
 
     fn render_view_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -763,7 +989,7 @@ impl TaskPanel {
                     })
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_view(TaskView::List, window, cx);
-                    }))
+                    })),
             )
             .child(
                 Button::new("view-matrix")
@@ -773,7 +999,7 @@ impl TaskPanel {
                     })
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_view(TaskView::Matrix, window, cx);
-                    }))
+                    })),
             )
     }
 
@@ -788,7 +1014,7 @@ impl TaskPanel {
                     })
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::High, window, cx);
-                    }))
+                    })),
             )
             .child(
                 Button::new("filter-medium")
@@ -798,7 +1024,7 @@ impl TaskPanel {
                     })
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::Medium, window, cx);
-                    }))
+                    })),
             )
             .child(
                 Button::new("filter-low")
@@ -808,7 +1034,7 @@ impl TaskPanel {
                     })
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::Low, window, cx);
-                    }))
+                    })),
             )
             .child(
                 Button::new("filter-all")
@@ -818,7 +1044,7 @@ impl TaskPanel {
                     })
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::All, window, cx);
-                    }))
+                    })),
             )
     }
 
@@ -852,15 +1078,35 @@ impl TaskPanel {
                                 .rounded(px(12.0))
                                 .cursor_pointer()
                                 .border_1()
-                                .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xd9d9d9) })
-                                .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
-                                .text_color(if is_selected { rgb(0x1890ff) } else { rgb(0x595959) })
+                                .border_color(if is_selected {
+                                    rgb(0x1890ff)
+                                } else {
+                                    rgb(0xd9d9d9)
+                                })
+                                .bg(if is_selected {
+                                    rgb(0xe6f7ff)
+                                } else {
+                                    rgb(0xffffff)
+                                })
+                                .text_color(if is_selected {
+                                    rgb(0x1890ff)
+                                } else {
+                                    rgb(0x595959)
+                                })
                                 .text_sm()
-                                .hover(|s| s.bg(if is_selected { rgb(0xbae7ff) } else { rgb(0xf5f5f5) }))
+                                .hover(|s| {
+                                    s.bg(if is_selected {
+                                        rgb(0xbae7ff)
+                                    } else {
+                                        rgb(0xf5f5f5)
+                                    })
+                                })
                                 .child(format!("#{}", tag))
-                                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                    this.toggle_tag_filter(&tag_clone, cx);
-                                }))
+                                .on_click(cx.listener(
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        this.toggle_tag_filter(&tag_clone, cx);
+                                    },
+                                ))
                         }))
                         .when(has_selected, |el| {
                             el.child(
@@ -872,25 +1118,34 @@ impl TaskPanel {
                                             .child(mode_label.to_string())
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 this.toggle_tag_filter_mode(cx);
-                                            }))
+                                            })),
                                     )
-                                    .child(
-                                        Button::new("clear-tags")
-                                            .child("清除")
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.clear_tag_filters(cx);
-                                            }))
-                                    )
+                                    .child(Button::new("clear-tags").child("清除").on_click(
+                                        cx.listener(|this, _event, _window, cx| {
+                                            this.clear_tag_filters(cx);
+                                        }),
+                                    )),
                             )
-                        })
+                        }),
                 )
             })
     }
 
-    fn render_task_card(&mut self, task: &Record, idx: usize, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_task_card(
+        &mut self,
+        task: &Record,
+        idx: usize,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let task_id = task.id;
         let is_completed = task.completed_at.is_some();
-        let sidebar_task_id = self.task_detail_sidebar.read(cx).current_task_id().map(|s| s.to_string());
+        let sidebar_task_id = self
+            .task_detail_sidebar
+            .read(cx)
+            .current_task_id()
+            .map(|s| s.to_string());
         let is_selected = sidebar_task_id == Some(task_id.to_string());
 
         let priority_marker = match task.priority {
@@ -910,14 +1165,22 @@ impl TaskPanel {
             if local.date_naive() == now.date_naive() {
                 format!("今天 {}", local.format("%H:%M"))
             } else if local.year() == now.year() {
-                format!("{}月{}日 {}", local.month(), local.day(), local.format("%H:%M"))
+                format!(
+                    "{}月{}日 {}",
+                    local.month(),
+                    local.day(),
+                    local.format("%H:%M")
+                )
             } else {
                 local.format("%Y-%m-%d %H:%M").to_string()
             }
         };
 
         // 任务显示标题，如有详细内容则显示预览
-        let display_title = task.title.clone().unwrap_or_else(|| "无标题任务".to_string());
+        let display_title = task
+            .title
+            .clone()
+            .unwrap_or_else(|| "无标题任务".to_string());
         let has_content_preview = !task.content.trim().is_empty();
         let content_preview = if has_content_preview {
             let preview: String = task.content.chars().take(60).collect();
@@ -935,12 +1198,12 @@ impl TaskPanel {
             .w_full()
             .p(px(if compact { 8.0 } else { 12.0 }))
             .rounded(px(6.0))
-            .bg(if is_selected { 
-                rgb(0xe6f7ff) 
-            } else if is_completed { 
-                rgb(0xf5f5f5) 
-            } else { 
-                rgb(0xffffff) 
+            .bg(if is_selected {
+                rgb(0xe6f7ff)
+            } else if is_completed {
+                rgb(0xf5f5f5)
+            } else {
+                rgb(0xffffff)
             })
             .border_1()
             .border_color(if is_selected {
@@ -1119,34 +1382,119 @@ impl TaskPanel {
             )
     }
 
-    fn render_matrix_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_matrix_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let groups = self.group_tasks_by_quadrant();
-        
-        let urgent_important = groups.get(&Quadrant::UrgentImportant).cloned().unwrap_or_default();
-        let not_urgent_important = groups.get(&Quadrant::NotUrgentImportant).cloned().unwrap_or_default();
-        let urgent_not_important = groups.get(&Quadrant::UrgentNotImportant).cloned().unwrap_or_default();
-        let not_urgent_not_important = groups.get(&Quadrant::NotUrgentNotImportant).cloned().unwrap_or_default();
 
-        v_flex()
-            .flex_1()
-            .gap(px(8.0))
-            .child(
-                h_flex()
-                    .h_1_2()
+        let urgent_important = groups
+            .get(&Quadrant::UrgentImportant)
+            .cloned()
+            .unwrap_or_default();
+        let not_urgent_important = groups
+            .get(&Quadrant::NotUrgentImportant)
+            .cloned()
+            .unwrap_or_default();
+        let urgent_not_important = groups
+            .get(&Quadrant::UrgentNotImportant)
+            .cloned()
+            .unwrap_or_default();
+        let not_urgent_not_important = groups
+            .get(&Quadrant::NotUrgentNotImportant)
+            .cloned()
+            .unwrap_or_default();
+
+        let layout_mode = self.current_matrix_layout_mode(window, cx);
+        self.matrix_layout_mode = layout_mode;
+
+        match layout_mode {
+            MatrixLayoutMode::Grid => v_flex()
+                .flex_1()
+                .gap(px(8.0))
+                .child(
+                    h_flex()
+                        .h_1_2()
+                        .gap(px(8.0))
+                        .child(self.render_quadrant(
+                            Quadrant::UrgentImportant,
+                            &urgent_important,
+                            window,
+                            cx,
+                        ))
+                        .child(self.render_quadrant(
+                            Quadrant::NotUrgentImportant,
+                            &not_urgent_important,
+                            window,
+                            cx,
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .h_1_2()
+                        .gap(px(8.0))
+                        .child(self.render_quadrant(
+                            Quadrant::UrgentNotImportant,
+                            &urgent_not_important,
+                            window,
+                            cx,
+                        ))
+                        .child(self.render_quadrant(
+                            Quadrant::NotUrgentNotImportant,
+                            &not_urgent_not_important,
+                            window,
+                            cx,
+                        )),
+                )
+                .into_any_element(),
+            MatrixLayoutMode::Stacked => {
+                if let Some(target) = self.pending_stack_scroll_target.take() {
+                    self.matrix_stack_scroll_handle
+                        .scroll_to_top_of_item(target);
+                }
+
+                div()
+                    .id("matrix-stacked-scroll")
+                    .size_full()
+                    .flex()
+                    .flex_col()
                     .gap(px(8.0))
-                    .child(self.render_quadrant(Quadrant::UrgentImportant, &urgent_important, window, cx))
-                    .child(self.render_quadrant(Quadrant::NotUrgentImportant, &not_urgent_important, window, cx))
-            )
-            .child(
-                h_flex()
-                    .h_1_2()
-                    .gap(px(8.0))
-                    .child(self.render_quadrant(Quadrant::UrgentNotImportant, &urgent_not_important, window, cx))
-                    .child(self.render_quadrant(Quadrant::NotUrgentNotImportant, &not_urgent_not_important, window, cx))
-            )
+                    .track_scroll(&self.matrix_stack_scroll_handle)
+                    .overflow_y_scroll()
+                    .vertical_scrollbar(&self.matrix_stack_scroll_handle)
+                    .child(self.render_stacked_quadrant(
+                        Quadrant::UrgentImportant,
+                        &urgent_important,
+                        window,
+                        cx,
+                    ))
+                    .child(self.render_stacked_quadrant(
+                        Quadrant::NotUrgentImportant,
+                        &not_urgent_important,
+                        window,
+                        cx,
+                    ))
+                    .child(self.render_stacked_quadrant(
+                        Quadrant::UrgentNotImportant,
+                        &urgent_not_important,
+                        window,
+                        cx,
+                    ))
+                    .child(self.render_stacked_quadrant(
+                        Quadrant::NotUrgentNotImportant,
+                        &not_urgent_not_important,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+        }
     }
 
-    fn render_quadrant(&mut self, quadrant: Quadrant, tasks: &[Record], window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_quadrant(
+        &mut self,
+        quadrant: Quadrant,
+        tasks: &[Record],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let quadrant_color = quadrant.color();
         let task_count = tasks.len();
         let quadrant_idx = match quadrant {
@@ -1155,7 +1503,7 @@ impl TaskPanel {
             Quadrant::UrgentNotImportant => 2,
             Quadrant::NotUrgentNotImportant => 3,
         };
-        
+
         v_flex()
             .flex_1()
             .rounded(px(8.0))
@@ -1176,40 +1524,107 @@ impl TaskPanel {
                                     .w(px(8.0))
                                     .h(px(8.0))
                                     .rounded_full()
-                                    .bg(quadrant_color)
+                                    .bg(quadrant_color),
                             )
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(quadrant_color)
-                                    .child(quadrant.label())
+                                    .child(quadrant.label()),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(rgb(0x999999))
-                                    .child(format!("({})", task_count))
-                            )
-                    )
+                                    .child(format!("({})", task_count)),
+                            ),
+                    ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .p(px(8.0))
-                    .overflow_y_scrollbar()
-                    .child(
-                        v_flex()
-                            .gap(px(6.0))
-                            .children(tasks.iter().enumerate().map(|(idx, task)| {
-                                self.render_task_card(task, quadrant_idx * 1000 + idx, true, window, cx).into_any_element()
-                            }))
-                    )
+                div().flex_1().p(px(8.0)).overflow_y_scrollbar().child(
+                    v_flex()
+                        .gap(px(6.0))
+                        .children(tasks.iter().enumerate().map(|(idx, task)| {
+                            self.render_task_card(task, quadrant_idx * 1000 + idx, true, window, cx)
+                                .into_any_element()
+                        })),
+                ),
             )
     }
 
-    fn render_list_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let filtered_tasks: Vec<_> = self.tasks
+    fn render_stacked_quadrant(
+        &mut self,
+        quadrant: Quadrant,
+        tasks: &[Record],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let quadrant_color = quadrant.color();
+        let task_count = tasks.len();
+        let quadrant_idx = match quadrant {
+            Quadrant::UrgentImportant => 0,
+            Quadrant::NotUrgentImportant => 1,
+            Quadrant::UrgentNotImportant => 2,
+            Quadrant::NotUrgentNotImportant => 3,
+        };
+
+        v_flex()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(quadrant_color.opacity(0.3))
+            .bg(quadrant_color.opacity(0.05))
+            .child(
+                div()
+                    .p(px(12.0))
+                    .border_b_1()
+                    .border_color(quadrant_color.opacity(0.2))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .w(px(8.0))
+                                    .h(px(8.0))
+                                    .rounded_full()
+                                    .bg(quadrant_color),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(quadrant_color)
+                                    .child(quadrant.label()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x999999))
+                                    .child(format!("({})", task_count)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .p(px(8.0))
+                    .min_h(px(if tasks.is_empty() { 72.0 } else { 0.0 }))
+                    .child(v_flex().gap(px(6.0)).children(tasks.iter().enumerate().map(
+                        |(idx, task)| {
+                            self.render_task_card(task, quadrant_idx * 1000 + idx, true, window, cx)
+                                .into_any_element()
+                        },
+                    ))),
+            )
+    }
+
+    fn render_list_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let filtered_tasks: Vec<_> = self
+            .tasks
             .iter()
             .filter(|t| self.priority_filter.matches(t.priority.clone()))
             .cloned()
@@ -1240,10 +1655,13 @@ impl TaskPanel {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x666666))
                             .child(format!("待办任务 ({})", pending_count))
-                            .into_any_element()
+                            .into_any_element(),
                     );
                     for (idx, task) in pending_tasks.iter().enumerate() {
-                        elements.push(self.render_task_card(task, idx, false, window, cx).into_any_element());
+                        elements.push(
+                            self.render_task_card(task, idx, false, window, cx)
+                                .into_any_element(),
+                        );
                     }
                 }
 
@@ -1258,24 +1676,27 @@ impl TaskPanel {
                                 cx.notify();
                             }))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0x999999))
-                                            .child(format!("{} 已完成 ({})", if self.show_completed { "▼" } else { "▶" }, completed_count))
-                                    )
+                                div().flex().items_center().gap(px(4.0)).child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0x999999))
+                                        .child(format!(
+                                            "{} 已完成 ({})",
+                                            if self.show_completed { "▼" } else { "▶" },
+                                            completed_count
+                                        )),
+                                ),
                             )
-                            .into_any_element()
+                            .into_any_element(),
                     );
-                    
+
                     if self.show_completed {
                         for (idx, task) in completed_tasks.iter().enumerate() {
-                            elements.push(self.render_task_card(task, idx, false, window, cx).into_any_element());
+                            elements.push(
+                                self.render_task_card(task, idx, false, window, cx)
+                                    .into_any_element(),
+                            );
                         }
                     }
                 }
@@ -1283,14 +1704,13 @@ impl TaskPanel {
                 elements
             })
     }
-
 }
 
 impl Render for TaskPanel {
     #[allow(unused_variables)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (pending_count, completed_count): (usize, usize) = self.tasks.iter()
-            .fold((0, 0), |(p, c), task| {
+        let (pending_count, completed_count): (usize, usize) =
+            self.tasks.iter().fold((0, 0), |(p, c), task| {
                 if task.completed_at.is_some() {
                     (p, c + 1)
                 } else {
@@ -1303,38 +1723,58 @@ impl Render for TaskPanel {
             .flex()
             .flex_row()
             .relative()
-            .on_action(cx.listener(|this, _action: &SetReminderAction, window, cx| {
-                if let Some(task_id) = this.context_menu_task_id {
-                    if let Some(task) = this.tasks.iter().find(|t| t.id == task_id).cloned() {
-                        this.start_reminder(&task, window, cx);
+            .on_action(
+                cx.listener(|this, _action: &SetReminderAction, window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        if let Some(task) = this.tasks.iter().find(|t| t.id == task_id).cloned() {
+                            this.start_reminder(&task, window, cx);
+                        }
                     }
-                }
-            }))
-            .on_action(cx.listener(|this, _action: &SetReminderTodayAction, _window, cx| {
-                if let Some(task_id) = this.context_menu_task_id {
-                    let now = Local::now();
-                    let target = if now.hour() >= 17 {
-                        now + Duration::hours(1)
-                    } else {
-                        now.date_naive().and_hms_opt(18, 0, 0).unwrap().and_local_timezone(Local).unwrap()
-                    };
-                    this.update_task_reminder(task_id, target.with_timezone(&chrono::Utc), cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _action: &SetReminderTomorrowAction, _window, cx| {
-                if let Some(task_id) = this.context_menu_task_id {
-                    let tomorrow = (Local::now() + Duration::days(1)).date_naive();
-                    let target = tomorrow.and_hms_opt(9, 0, 0).unwrap().and_local_timezone(Local).unwrap();
-                    this.update_task_reminder(task_id, target.with_timezone(&chrono::Utc), cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _action: &SetReminderNextWeekAction, _window, cx| {
-                if let Some(task_id) = this.context_menu_task_id {
-                    let next_week = (Local::now() + Duration::days(7)).date_naive();
-                    let target = next_week.and_hms_opt(9, 0, 0).unwrap().and_local_timezone(Local).unwrap();
-                    this.update_task_reminder(task_id, target.with_timezone(&chrono::Utc), cx);
-                }
-            }))
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &SetReminderTodayAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let now = Local::now();
+                        let target = if now.hour() >= 17 {
+                            now + Duration::hours(1)
+                        } else {
+                            now.date_naive()
+                                .and_hms_opt(18, 0, 0)
+                                .unwrap()
+                                .and_local_timezone(Local)
+                                .unwrap()
+                        };
+                        this.update_task_reminder(task_id, target.with_timezone(&chrono::Utc), cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &SetReminderTomorrowAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let tomorrow = (Local::now() + Duration::days(1)).date_naive();
+                        let target = tomorrow
+                            .and_hms_opt(9, 0, 0)
+                            .unwrap()
+                            .and_local_timezone(Local)
+                            .unwrap();
+                        this.update_task_reminder(task_id, target.with_timezone(&chrono::Utc), cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &SetReminderNextWeekAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let next_week = (Local::now() + Duration::days(7)).date_naive();
+                        let target = next_week
+                            .and_hms_opt(9, 0, 0)
+                            .unwrap()
+                            .and_local_timezone(Local)
+                            .unwrap();
+                        this.update_task_reminder(task_id, target.with_timezone(&chrono::Utc), cx);
+                    }
+                }),
+            )
             .on_action(cx.listener(|this, _action: &EditTaskAction, window, cx| {
                 if let Some(task_id) = this.context_menu_task_id {
                     if let Some(task) = this.tasks.iter().find(|t| t.id == task_id).cloned() {
@@ -1342,11 +1782,13 @@ impl Render for TaskPanel {
                     }
                 }
             }))
-            .on_action(cx.listener(|this, _action: &DeleteTaskAction, _window, cx| {
-                if let Some(task_id) = this.context_menu_task_id {
-                    this.delete_task(task_id, cx);
-                }
-            }))
+            .on_action(
+                cx.listener(|this, _action: &DeleteTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        this.delete_task(task_id, cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .id("task-panel-main")
@@ -1356,17 +1798,26 @@ impl Render for TaskPanel {
                     .gap(px(16.0))
                     .p(px(16.0))
                     .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                        if this.task_detail_sidebar.read(cx).current_task_id().is_some() {
+                        if this
+                            .task_detail_sidebar
+                            .read(cx)
+                            .current_task_id()
+                            .is_some()
+                        {
                             this.task_detail_sidebar.update(cx, |sidebar, cx| {
                                 sidebar.close(window, cx);
                             });
+                            this.handle_sidebar_close(cx);
                         }
                     }))
                     .child(
                         div()
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("任务 ({} 待办 / {} 已完成)", pending_count, completed_count))
+                            .child(format!(
+                                "任务 ({} 待办 / {} 已完成)",
+                                pending_count, completed_count
+                            )),
                     )
                     .child(
                         div()
@@ -1375,37 +1826,37 @@ impl Render for TaskPanel {
                             .child(
                                 div()
                                     .flex_1()
-                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                                        if event.keystroke.key == "enter" {
-                                            this.create_task(window, cx);
-                                        }
-                                    }))
-                                    .child(Input::new(&self.input_state))
+                                    .on_key_down(cx.listener(
+                                        |this, event: &KeyDownEvent, window, cx| {
+                                            if event.keystroke.key == "enter" {
+                                                this.create_task(window, cx);
+                                            }
+                                        },
+                                    ))
+                                    .child(Input::new(&self.input_state)),
                             )
-                            .child(
-                                Button::new("add-btn")
-                                    .child("添加")
-                                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                                        this.create_task(window, cx);
-                                    }))
-                            )
+                            .child(Button::new("add-btn").child("添加").on_click(cx.listener(
+                                |this, _event: &ClickEvent, window, cx| {
+                                    this.create_task(window, cx);
+                                },
+                            ))),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(rgb(0x888888))
-                            .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物")
+                            .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物"),
                     )
                     .child(self.render_toolbar(cx))
                     .child(self.render_tag_filter(cx))
                     .when(self.reminder_task_id.is_some(), |el| {
-                        if let (Some(ref dp), Some(ref ti)) = (
-                            &self.reminder_date_picker, 
-                            &self.reminder_time_input
-                        ) {
+                        if let (Some(ref dp), Some(ref ti)) =
+                            (&self.reminder_date_picker, &self.reminder_time_input)
+                        {
                             let dp_clone = dp.clone();
                             let ti_clone = ti.clone();
-                            let task_name = self.reminder_task_id
+                            let task_name = self
+                                .reminder_task_id
                                 .and_then(|id| self.tasks.iter().find(|t| t.id == id))
                                 .map(|t| t.content.clone())
                                 .unwrap_or_default();
@@ -1430,14 +1881,14 @@ impl Render for TaskPanel {
                                                 div()
                                                     .text_sm()
                                                     .font_weight(FontWeight::SEMIBOLD)
-                                                    .child("⏰ 设置提醒时间")
+                                                    .child("⏰ 设置提醒时间"),
                                             )
                                             .child(
                                                 div()
                                                     .text_sm()
                                                     .text_color(rgb(0x666666))
-                                                    .child(task_name)
-                                            )
+                                                    .child(task_name),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -1450,12 +1901,17 @@ impl Render for TaskPanel {
                                                     .flex()
                                                     .flex_col()
                                                     .gap(px(4.0))
-                                                    .child(div().text_xs().text_color(rgb(0x888888)).child("日期"))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0x888888))
+                                                            .child("日期"),
+                                                    )
                                                     .child(
                                                         DatePicker::new(&dp_clone)
                                                             .cleanable(true)
-                                                            .number_of_months(1)
-                                                    )
+                                                            .number_of_months(1),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -1463,11 +1919,14 @@ impl Render for TaskPanel {
                                                     .flex()
                                                     .flex_col()
                                                     .gap(px(4.0))
-                                                    .child(div().text_xs().text_color(rgb(0x888888)).child("时间 (HH:MM)"))
                                                     .child(
-                                                        Input::new(&ti_clone)
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0x888888))
+                                                            .child("时间 (HH:MM)"),
                                                     )
-                                            )
+                                                    .child(Input::new(&ti_clone)),
+                                            ),
                                     )
                                     .children(self.reminder_error_message.as_ref().map(|err_msg| {
                                         div()
@@ -1483,18 +1942,22 @@ impl Render for TaskPanel {
                                             .child(
                                                 Button::new("cancel-reminder")
                                                     .child("取消")
-                                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                                        this.cancel_reminder(window, cx);
-                                                    }))
+                                                    .on_click(cx.listener(
+                                                        |this, _event, window, cx| {
+                                                            this.cancel_reminder(window, cx);
+                                                        },
+                                                    )),
                                             )
                                             .child(
                                                 Button::new("save-reminder")
                                                     .child("设定")
-                                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                                        this.save_reminder(window, cx);
-                                                    }))
-                                            )
-                                    )
+                                                    .on_click(cx.listener(
+                                                        |this, _event, window, cx| {
+                                                            this.save_reminder(window, cx);
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
                             )
                         } else {
                             el
@@ -1505,14 +1968,14 @@ impl Render for TaskPanel {
                             .id("task-view-container")
                             .flex_1()
                             .overflow_hidden()
-                            .child(
-                                match self.current_view {
-                                    TaskView::List => self.render_list_view(window, cx).into_any_element(),
-                                    TaskView::Matrix => self.render_matrix_view(window, cx).into_any_element(),
+                            .child(match self.current_view {
+                                TaskView::List => {
+                                    self.render_list_view(window, cx).into_any_element()
                                 }
-                            )
+                                TaskView::Matrix => self.render_matrix_view(window, cx),
+                            }),
                     )
-                    .children(self.render_custom_context_menu(cx))
+                    .children(self.render_custom_context_menu(cx)),
             )
             .child(self.task_detail_sidebar.clone())
     }
