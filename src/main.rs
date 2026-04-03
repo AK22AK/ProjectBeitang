@@ -2,7 +2,7 @@ use beitang::store::{create_store, Store};
 use beitang::ui::sidebar::{Panel, Sidebar};
 use beitang::ui::task_panel::TaskPanel;
 use beitang::ui::dashboard::Dashboard;
-use beitang::ui::floating_window::QuickAddWindow;
+use beitang::ui::floating_window::{quick_add_window_size, QuickAddWindow};
 use beitang::ui::timeline::Timeline;
 use beitang::ui::search::SearchPanel;
 use beitang::ui::note_panel::NotePanel;
@@ -113,8 +113,7 @@ fn main() {
                                     if !closed_existing {
                                         let store = store_for_hotkey.clone();
                                         
-                                        // 预置一个小窗大小
-                                        let window_size = size(px(400.0), px(80.0));
+                                        let window_size = quick_add_window_size();
                                         let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
                                         
                                         if let Ok(handle) = cx.open_window(
@@ -245,8 +244,7 @@ impl Render for MainView {
                 let is_cmd = modifiers.platform;
 
                 if is_cmd {
-                    // 预计算窗口大小以避免借用冲突
-                    let window_size = size(px(400.0), px(80.0));
+                    let window_size = quick_add_window_size();
                     match key {
                         "n" => {
                             eprintln!("[MainView] Cmd+N pressed - opening quick add window");

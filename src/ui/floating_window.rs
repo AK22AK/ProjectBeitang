@@ -1,8 +1,6 @@
 use gpui::*;
-use gpui::prelude::FluentBuilder as _;
 use gpui_component::input::{Input, InputEvent, InputState, Escape, IndentInline};
-use gpui_component::button::Button;
-use gpui_component::Selectable;
+use gpui_component::IconName;
 use crate::models::Record;
 use crate::store::Store;
 use crate::ui::parsing;
@@ -21,12 +19,23 @@ impl InputMode {
         }
     }
 
+    fn submit_label(&self) -> &'static str {
+        match self {
+            InputMode::Task => "创建一条任务",
+            InputMode::Record => "创建一条记录",
+        }
+    }
+
     fn placeholder(&self) -> &'static str {
         match self {
             InputMode::Task => "输入任务 (Enter保存, Esc取消, Tab切换)",
             InputMode::Record => "输入记录 (Enter保存, Esc取消, Tab切换)",
         }
     }
+}
+
+pub fn quick_add_window_size() -> Size<Pixels> {
+    size(px(520.0), px(132.0))
 }
 
 pub struct QuickAddWindow {
@@ -53,12 +62,7 @@ impl QuickAddWindow {
             window,
             |this, _state, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
-                    this.submit(cx);
-                    let hide = this.hide_app_on_close;
-                    window.remove_window();
-                    if hide {
-                        cx.hide();
-                    }
+                    this.submit_and_close(window, cx);
                 }
             },
         );
@@ -95,6 +99,15 @@ impl QuickAddWindow {
         match self.mode {
             InputMode::Task => self.submit_task(cx),
             InputMode::Record => self.submit_record(cx),
+        }
+    }
+
+    fn submit_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit(cx);
+        let hide = self.hide_app_on_close;
+        window.remove_window();
+        if hide {
+            cx.hide();
         }
     }
 
@@ -153,44 +166,83 @@ impl QuickAddWindow {
         cx.emit(DismissEvent);
     }
 
-    fn render_mode_tab(&self, mode: InputMode, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_active = self.mode == mode;
-        let label = mode.label();
-        
-        Button::new(label)
-            .label(label)
-            .selected(is_active)
-            .on_click(cx.listener(move |this, _, window, cx| {
+    fn render_submit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (bg, hover, border) = match self.mode {
+            InputMode::Task => (rgb(0xfff7e6), rgb(0xffe7ba), rgb(0xffbb96)),
+            InputMode::Record => (rgb(0xe6f4ff), rgb(0xbae0ff), rgb(0x91caff)),
+        };
+
+        div()
+            .id(format!("submit-{}", self.mode.label()))
+            .flex()
+            .justify_center()
+            .items_center()
+            .px(px(14.0))
+            .py(px(8.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(border)
+            .bg(bg)
+            .text_color(rgb(0x0958d9))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .hover(|style| style.bg(hover))
+            .child(self.mode.submit_label())
+            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                this.submit_and_close(window, cx);
+            }))
+    }
+
+    fn render_mode_switch_button(&self, mode: InputMode, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(format!("switch-to-{}", mode.label()))
+            .flex()
+            .justify_center()
+            .items_center()
+            .w(px(36.0))
+            .h(px(36.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(rgb(0xd9d9d9))
+            .bg(rgb(0xffffff))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(0xf5f5f5)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(0.0))
+                    .child(
+                        gpui_component::Icon::new(IconName::ArrowRight)
+                            .size(px(15.0))
+                            .text_color(rgb(0x262626)),
+                    )
+                    .child(
+                        gpui_component::Icon::new(IconName::ArrowLeft)
+                            .size(px(15.0))
+                            .text_color(rgb(0x262626)),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 this.set_mode(mode, window, cx);
             }))
     }
 
-    fn render_tips(&self) -> impl IntoElement {
-        let task_tips = "任务模式: !!高优先级  !普通优先级  #标签  @人物";
-        let record_tips = "记录模式: #标签  @人物";
+    fn render_mode_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let next_mode = match self.mode {
+            InputMode::Task => InputMode::Record,
+            InputMode::Record => InputMode::Task,
+        };
 
         div()
             .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x666666))
-                    .child("提示:")
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x999999))
-                    .child(task_tips)
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x999999))
-                    .child(record_tips)
-            )
+            .items_center()
+            .gap(px(12.0))
+            .child(self.render_submit_button(cx))
+            .child(self.render_mode_switch_button(next_mode, cx))
     }
 }
 
@@ -209,10 +261,11 @@ impl Render for QuickAddWindow {
 
         div()
             .size_full()
-            .p(px(16.0))
+            .bg(rgb(0xfcfcfd))
+            .p(px(14.0))
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(10.0))
             .track_focus(&self.focus_handle(cx))
             .on_action(cx.listener(|this, _action: &Escape, window, cx| {
                 let hide = this.hide_app_on_close;
@@ -224,43 +277,13 @@ impl Render for QuickAddWindow {
             .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
                 this.toggle_mode(window, cx);
             }))
-            // 输入区域
-            .child(
-                div()
-                    .flex_1()
-                    .child(Input::new(&self.input_state))
-            )
-            // Tab 切换按钮
+            .child(div().child(Input::new(&self.input_state)))
             .child(
                 div()
                     .flex()
-                    .gap(px(8.0))
-                    .child(self.render_mode_tab(InputMode::Task, cx))
-                    .child(self.render_mode_tab(InputMode::Record, cx))
+                    .items_center()
+                    .justify_between()
+                    .child(self.render_mode_switcher(cx)),
             )
-            // 提示区域
-            .child(self.render_tips())
-            // 查看记录按钮（仅在记录模式下显示）
-            .when(self.mode == InputMode::Record, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            Button::new("view-records-btn")
-                                .child("查看记录 (Cmd+5)")
-                                .text_color(rgb(0x1890ff))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let hide = this.hide_app_on_close;
-                                    window.remove_window();
-                                    if hide {
-                                        cx.hide();
-                                    }
-                                }))
-                        )
-                )
-            })
     }
 }
-
-
