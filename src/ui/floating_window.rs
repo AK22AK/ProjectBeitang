@@ -4,6 +4,7 @@ use gpui_component::IconName;
 use crate::models::Record;
 use crate::store::Store;
 use crate::ui::parsing;
+use std::time::Duration as StdDuration;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum InputMode {
@@ -35,7 +36,14 @@ impl InputMode {
 }
 
 pub fn quick_add_window_size() -> Size<Pixels> {
-    size(px(520.0), px(132.0))
+    size(px(520.0), px(168.0))
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum QuickAddFeedback {
+    Idle,
+    EmptySubmitWarning,
+    EscConfirmPending { generation: u64 },
 }
 
 pub struct QuickAddWindow {
@@ -44,6 +52,8 @@ pub struct QuickAddWindow {
     _subscription: Subscription,
     mode: InputMode,
     focus_handle: FocusHandle,
+    feedback: QuickAddFeedback,
+    esc_confirm_generation: u64,
     pub hide_app_on_close: bool,
 }
 
@@ -61,8 +71,14 @@ impl QuickAddWindow {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.submit_and_close(window, cx);
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.try_submit(window, cx);
+                    }
+                    InputEvent::Change => {
+                        this.clear_transient_feedback(cx);
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
                 }
             },
         );
@@ -73,12 +89,15 @@ impl QuickAddWindow {
             _subscription,
             mode,
             focus_handle,
+            feedback: QuickAddFeedback::Idle,
+            esc_confirm_generation: 0,
             hide_app_on_close: false,
         }
     }
 
     fn set_mode(&mut self, mode: InputMode, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode != mode {
+            self.clear_transient_feedback(cx);
             self.mode = mode;
             self.input_state.update(cx, |input, cx| {
                 input.set_placeholder(mode.placeholder(), window, cx);
@@ -95,6 +114,14 @@ impl QuickAddWindow {
         self.set_mode(new_mode, window, cx);
     }
 
+    fn input_text(&self, cx: &Context<Self>) -> String {
+        self.input_state.read(cx).text().to_string()
+    }
+
+    fn has_input(&self, cx: &Context<Self>) -> bool {
+        !self.input_text(cx).trim().is_empty()
+    }
+
     fn submit(&mut self, cx: &mut Context<Self>) {
         match self.mode {
             InputMode::Task => self.submit_task(cx),
@@ -102,13 +129,105 @@ impl QuickAddWindow {
         }
     }
 
-    fn submit_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.submit(cx);
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let hide = self.hide_app_on_close;
         window.remove_window();
         if hide {
             cx.hide();
         }
+    }
+
+    fn submit_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_transient_feedback(cx);
+        self.submit(cx);
+        self.close_window(window, cx);
+    }
+
+    fn try_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_input(cx) {
+            self.feedback = QuickAddFeedback::EmptySubmitWarning;
+            cx.notify();
+            return;
+        }
+
+        self.submit_and_close(window, cx);
+    }
+
+    fn clear_transient_feedback(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.feedback, QuickAddFeedback::Idle) {
+            self.feedback = QuickAddFeedback::Idle;
+            cx.notify();
+        }
+    }
+
+    fn start_escape_confirm_timeout(&mut self, cx: &mut Context<Self>) {
+        self.esc_confirm_generation += 1;
+        let generation = self.esc_confirm_generation;
+        self.feedback = QuickAddFeedback::EscConfirmPending { generation };
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(StdDuration::from_secs(5))
+                .await;
+
+            let _ = view.update(cx, |this, cx| {
+                if matches!(
+                    this.feedback,
+                    QuickAddFeedback::EscConfirmPending {
+                        generation: current_generation
+                    } if current_generation == generation
+                ) {
+                    this.feedback = QuickAddFeedback::Idle;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_input(cx) {
+            self.close_window(window, cx);
+            return;
+        }
+
+        match self.feedback {
+            QuickAddFeedback::EscConfirmPending { .. } => self.close_window(window, cx),
+            QuickAddFeedback::Idle | QuickAddFeedback::EmptySubmitWarning => {
+                self.start_escape_confirm_timeout(cx);
+            }
+        }
+    }
+
+    fn feedback_style(&self) -> Option<(Hsla, Hsla, Hsla, &'static str)> {
+        match self.feedback {
+            QuickAddFeedback::Idle => None,
+            QuickAddFeedback::EmptySubmitWarning => Some((
+                rgb(0xff4d4f).into(),
+                rgb(0xfff1f0).into(),
+                rgb(0xffccc7).into(),
+                "没有输入内容，不能记录",
+            )),
+            QuickAddFeedback::EscConfirmPending { .. } => Some((
+                rgb(0xfa8c16).into(),
+                rgb(0xfff7e6).into(),
+                rgb(0xffd591).into(),
+                "再次按 Esc 关闭输入",
+            )),
+        }
+    }
+
+    fn render_feedback_message(&self) -> Option<impl IntoElement> {
+        let (text_color, _, _, message) = self.feedback_style()?;
+
+        Some(
+            div()
+                .text_sm()
+                .text_color(text_color)
+                .font_weight(FontWeight::MEDIUM)
+                .child(message),
+        )
     }
 
     fn submit_task(&mut self, cx: &mut Context<Self>) {
@@ -190,7 +309,7 @@ impl QuickAddWindow {
             .hover(|style| style.bg(hover))
             .child(self.mode.submit_label())
             .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                this.submit_and_close(window, cx);
+                this.try_submit(window, cx);
             }))
     }
 
@@ -227,6 +346,7 @@ impl QuickAddWindow {
                     ),
             )
             .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                this.clear_transient_feedback(cx);
                 this.set_mode(mode, window, cx);
             }))
     }
@@ -259,6 +379,8 @@ impl Render for QuickAddWindow {
         // 将焦点直接赋予给文本输入框
         self.input_state.update(cx, |input, cx| input.focus(window, cx));
 
+        let feedback_style = self.feedback_style();
+
         div()
             .size_full()
             .bg(rgb(0xfcfcfd))
@@ -268,16 +390,35 @@ impl Render for QuickAddWindow {
             .gap(px(10.0))
             .track_focus(&self.focus_handle(cx))
             .on_action(cx.listener(|this, _action: &Escape, window, cx| {
-                let hide = this.hide_app_on_close;
-                window.remove_window();
-                if hide {
-                    cx.hide();
-                }
+                this.handle_escape(window, cx);
             }))
             .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                this.clear_transient_feedback(cx);
                 this.toggle_mode(window, cx);
             }))
-            .child(div().child(Input::new(&self.input_state)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key != "escape" {
+                    this.clear_transient_feedback(cx);
+                }
+            }))
+            .child(
+                div()
+                    .rounded(px(12.0))
+                    .border_1()
+                    .border_color(
+                        feedback_style
+                            .map(|(_, _, border_color, _)| border_color)
+                            .unwrap_or_else(transparent_black),
+                    )
+                    .bg(
+                        feedback_style
+                            .map(|(_, bg_color, _, _)| bg_color)
+                            .unwrap_or_else(transparent_white),
+                    )
+                    .p(px(2.0))
+                    .child(Input::new(&self.input_state)),
+            )
+            .children(self.render_feedback_message())
             .child(
                 div()
                     .flex()
