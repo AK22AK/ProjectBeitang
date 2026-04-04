@@ -1,54 +1,60 @@
-use beitang::config::ShortcutConfig;
+use beitang::config::{parse_hotkey, ShortcutConfig};
 use beitang::models::{Priority, Record};
 use beitang::shortcut_manager::ShortcutEvent;
-
-// ========== Shortcut Configuration Tests ==========
 
 #[test]
 fn test_default_shortcut_config() {
     let config = ShortcutConfig::default();
-    assert_eq!(config.quick_add_task, "Cmd+N");
-    assert_eq!(config.quick_add_note, "Cmd+M");
-    assert_eq!(config.view_tasks, "Cmd+1");
-    assert_eq!(config.view_notes, "Cmd+2");
+    assert_eq!(config.quick_capture, "Cmd+Shift+T");
     assert_eq!(config.open_main, "Cmd+0");
+    assert_eq!(config.open_tasks, "Cmd+2");
+    assert_eq!(config.open_records, "Cmd+3");
 }
 
 #[test]
 fn test_shortcut_config_load_returns_default() {
     let config = ShortcutConfig::load();
-    // Currently load() just returns default
-    assert_eq!(config.quick_add_task, "Cmd+N");
-    assert_eq!(config.quick_add_note, "Cmd+M");
+    assert_eq!(config.quick_capture, "Cmd+Shift+T");
+    assert_eq!(config.open_main, "Cmd+0");
 }
 
-// ========== Shortcut Event Tests ==========
+#[test]
+fn test_parse_hotkey_supports_default_shortcuts() {
+    assert!(parse_hotkey("Cmd+Shift+T").is_ok());
+    assert!(parse_hotkey("Cmd+0").is_ok());
+    assert!(parse_hotkey("Cmd+2").is_ok());
+    assert!(parse_hotkey("Cmd+3").is_ok());
+}
+
+#[test]
+fn test_parse_hotkey_rejects_invalid_shortcuts() {
+    assert!(parse_hotkey("Cmd+Shift").is_err());
+    assert!(parse_hotkey("Cmd+Shift+T+Y").is_err());
+    assert!(parse_hotkey("Cmd+Space").is_err());
+}
 
 #[test]
 fn test_shortcut_event_equality() {
-    assert_eq!(ShortcutEvent::QuickAddTask, ShortcutEvent::QuickAddTask);
-    assert_ne!(ShortcutEvent::QuickAddTask, ShortcutEvent::QuickAddNote);
+    assert_eq!(ShortcutEvent::QuickCapture, ShortcutEvent::QuickCapture);
+    assert_ne!(ShortcutEvent::QuickCapture, ShortcutEvent::OpenMain);
 }
 
 #[test]
 fn test_shortcut_event_clone() {
-    let event = ShortcutEvent::ViewTasks;
+    let event = ShortcutEvent::OpenTasks;
     let cloned = event;
     assert_eq!(event, cloned);
 }
 
 #[test]
 fn test_shortcut_event_variants() {
-    // Test all event variants exist and can be compared
     let events = vec![
-        ShortcutEvent::QuickAddTask,
-        ShortcutEvent::QuickAddNote,
-        ShortcutEvent::ViewTasks,
-        ShortcutEvent::ViewNotes,
+        ShortcutEvent::QuickCapture,
         ShortcutEvent::OpenMain,
+        ShortcutEvent::OpenTasks,
+        ShortcutEvent::OpenRecords,
     ];
 
-    // Ensure all events are unique
     for (i, event) in events.iter().enumerate() {
         for (j, other) in events.iter().enumerate() {
             if i == j {
@@ -59,8 +65,6 @@ fn test_shortcut_event_variants() {
         }
     }
 }
-
-// ========== Record Creation Tests ==========
 
 #[test]
 fn test_new_note_creates_note_without_priority() {

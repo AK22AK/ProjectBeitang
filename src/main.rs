@@ -1,59 +1,61 @@
+use beitang::config::ShortcutConfig;
 use beitang::store::{create_store, Store};
+use beitang::ui::dashboard::Dashboard;
+use beitang::ui::floating_window::{
+    quick_add_window_size, QuickAddDestination, QuickAddSessionController, QuickAddSessionStatus,
+    QuickAddWindow,
+};
+use beitang::ui::note_panel::NotePanel;
+use beitang::ui::search::SearchPanel;
 use beitang::ui::sidebar::{Panel, Sidebar};
 use beitang::ui::task_panel::TaskPanel;
-use beitang::ui::dashboard::Dashboard;
-use beitang::ui::floating_window::{quick_add_window_size, QuickAddWindow};
 use beitang::ui::timeline::Timeline;
-use beitang::ui::search::SearchPanel;
-use beitang::ui::note_panel::NotePanel;
-use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component_assets::Assets;
 use gpui_platform::application;
-
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct MainWindowController {
+    handle: Option<AnyWindowHandle>,
+    current_panel: Panel,
+}
+
+impl Default for MainWindowController {
+    fn default() -> Self {
+        Self {
+            handle: None,
+            current_panel: Panel::Dashboard,
+        }
+    }
+}
 
 fn main() {
     let app = application().with_assets(Assets);
 
-    // 创建异步 store
     let (store, mut runtime) = create_store();
-    
-    let store_for_main = store.clone();
-    let store_for_hotkey = store.clone();
+    let shortcuts = ShortcutConfig::load();
 
-    let main_window_handle: Rc<RefCell<Option<AnyWindowHandle>>> = Rc::new(RefCell::new(None));
-    
-    let main_window_for_reopen = main_window_handle.clone();
+    let main_window = Rc::new(RefCell::new(MainWindowController::default()));
+    let quick_add_session = Rc::new(RefCell::new(QuickAddSessionController::default()));
+
+    let main_window_for_reopen = main_window.clone();
     let store_for_reopen = store.clone();
-    
     app.on_reopen(move |cx| {
-        let mut needs_open = true;
-        if let Some(handle) = main_window_for_reopen.borrow().as_ref() {
-            if handle.update(cx, |_, window, _| {
-                window.activate_window();
-            }).is_ok() {
-                needs_open = false;
-            }
-        }
-        
-        if needs_open {
-            let new_handle = open_main_window(cx, store_for_reopen.clone()).ok();
-            *main_window_for_reopen.borrow_mut() = new_handle;
-        }
+        activate_main_window(cx, &main_window_for_reopen, &store_for_reopen, None);
     });
 
-    let main_window_for_run = main_window_handle.clone();
+    let main_window_for_run = main_window.clone();
+    let quick_add_for_run = quick_add_session.clone();
+    let store_for_run = store.clone();
     app.run(move |cx| {
-        // 初始化 gpui-component
         gpui_component::init(cx);
-
-        // 强制使用浅色主题
         gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
 
-        // 后台运行 store
         cx.spawn(|_cx: &mut AsyncApp| async move {
             let data_dir = dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -62,90 +64,98 @@ fn main() {
 
             let db_path = data_dir.join("data.db");
             runtime.run(db_path).await;
-        }).detach();
+        })
+        .detach();
 
-        // 异步打开原始的主窗口
-        let store_local = store_for_main.clone();
-        let handle = open_main_window(cx, store_local).ok();
-        *main_window_for_run.borrow_mut() = handle;
-        // 这里只是为了初始显示，真正的持久句柄由 on_reopen 闭包持有（如果能共用更好，但由于 cx 借用限制，先让 initial 打开）
-        // 如果想让 initial 窗口也能被 Dock 激活，需要更复杂的同步。先解决 Dock 点击能开窗的问题。
+        activate_main_window(
+            cx,
+            &main_window_for_run,
+            &store_for_run,
+            Some(Panel::Dashboard),
+        );
 
-        // --- 全局快捷键注册 ---
-        // 注意：要在能够维持生命周期的作用域内保存 manager 防止其被 drop 而注销快捷键
         if let Ok(manager) = GlobalHotKeyManager::new() {
-            let hotkey = HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyT); // Cmd+Shift+T
-            if let Err(e) = manager.register(hotkey) {
-                eprintln!("[Global Hotkey] Failed to register: {}", e);
-            } else {
-                eprintln!("[Global Hotkey] Registered Cmd+Shift+T");
-                
-                let store_for_hotkey = store_for_hotkey.clone();
-                cx.spawn(async move |cx| {
-                    // 持有 manager，保证热键生效
-                    let _manager = manager;
-                    let receiver = GlobalHotKeyEvent::receiver();
-                    let mut quick_add_window: Option<gpui::AnyWindowHandle> = None;
-                    
-                    loop {
-                        if let Ok(event) = receiver.try_recv() {
-                            if event.id == hotkey.id() && event.state == HotKeyState::Released {
-                                // 使用 update 跳到了由 App context 支持的主线程环境
-                                cx.update(|cx| {
-                                    let was_active = cx.active_window().is_some();
-                                    
-                                    // 唤醒当前应用使其成为屏幕前置焦点
-                                    cx.activate(true);
-                                    
-                                    let mut closed_existing = false;
-                                    if let Some(handle) = quick_add_window.take() {
-                                        if handle.update(cx, |_, window, _| {
-                                            window.remove_window();
-                                        }).is_ok() {
-                                            closed_existing = true;
-                                            // 如果是重新 toggle 关掉，并且应用原本不在前台，一并隐藏整个应用
-                                            if !was_active {
-                                                cx.hide();
-                                            }
-                                        }
-                                    }
-                                    
-                                    if !closed_existing {
-                                        let store = store_for_hotkey.clone();
-                                        
-                                        let window_size = quick_add_window_size();
-                                        let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
-                                        
-                                        if let Ok(handle) = cx.open_window(
-                                            WindowOptions {
-                                                window_bounds: Some(window_bounds),
-                                                ..Default::default()
-                                            },
-                                            |window, cx| {
-                                                let view = cx.new(|cx| {
-                                                    let mut view = QuickAddWindow::new(store, window, cx);
-                                                    view.hide_app_on_close = !was_active;
-                                                    view
-                                                });
-                                                cx.new(|cx| {
-                                                    gpui_component::Root::new(view, window, cx)
-                                                        .bg(cx.theme().background)
-                                                })
-                                            },
-                                        ) {
-                                            quick_add_window = Some(handle.into());
-                                        }
-                                    }
-                                });
-                            }
+            let quick_capture = shortcuts.quick_capture_hotkey();
+            let open_main = shortcuts.open_main_hotkey();
+            let open_tasks = shortcuts.open_tasks_hotkey();
+            let open_records = shortcuts.open_records_hotkey();
+
+            match (quick_capture, open_main, open_tasks, open_records) {
+                (Ok(quick_capture), Ok(open_main), Ok(open_tasks), Ok(open_records)) => {
+                    let registrations = [
+                        (quick_capture, shortcuts.quick_capture.as_str()),
+                        (open_main, shortcuts.open_main.as_str()),
+                        (open_tasks, shortcuts.open_tasks.as_str()),
+                        (open_records, shortcuts.open_records.as_str()),
+                    ];
+
+                    let mut failed = false;
+                    for (hotkey, label) in registrations {
+                        if let Err(err) = manager.register(hotkey) {
+                            failed = true;
+                            eprintln!("[Global Hotkey] Failed to register {}: {}", label, err);
+                        } else {
+                            eprintln!("[Global Hotkey] Registered {}", label);
                         }
-                        
-                        // 定期检查（这里 GPUI 的 async timer 最好基于 background_executor）
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(100))
-                            .await;
                     }
-                }).detach();
+
+                    if !failed {
+                        let store_for_hotkey = store_for_run.clone();
+                        let main_window_for_hotkey = main_window_for_run.clone();
+                        let quick_add_for_hotkey = quick_add_for_run.clone();
+
+                        cx.spawn(async move |cx| {
+                            let _manager = manager;
+                            let receiver = GlobalHotKeyEvent::receiver();
+
+                            loop {
+                                if let Ok(event) = receiver.try_recv() {
+                                    if event.state == HotKeyState::Released {
+                                        cx.update(|cx| {
+                                            if event.id == quick_capture.id() {
+                                                handle_quick_capture_hotkey(
+                                                    cx,
+                                                    store_for_hotkey.clone(),
+                                                    main_window_for_hotkey.clone(),
+                                                    quick_add_for_hotkey.clone(),
+                                                );
+                                            } else if event.id == open_main.id() {
+                                                activate_main_window(
+                                                    cx,
+                                                    &main_window_for_hotkey,
+                                                    &store_for_hotkey,
+                                                    None,
+                                                );
+                                            } else if event.id == open_tasks.id() {
+                                                activate_main_window(
+                                                    cx,
+                                                    &main_window_for_hotkey,
+                                                    &store_for_hotkey,
+                                                    Some(Panel::Tasks),
+                                                );
+                                            } else if event.id == open_records.id() {
+                                                activate_main_window(
+                                                    cx,
+                                                    &main_window_for_hotkey,
+                                                    &store_for_hotkey,
+                                                    Some(Panel::Records),
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(100))
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                _ => {
+                    eprintln!("[Global Hotkey] Failed to parse shortcut config");
+                }
             }
         } else {
             eprintln!("[Global Hotkey] Initialization failed!");
@@ -153,23 +163,209 @@ fn main() {
     });
 }
 
-fn open_main_window(cx: &mut App, store: Store) -> Result<AnyWindowHandle> {
+fn handle_quick_capture_hotkey(
+    cx: &mut App,
+    store: Store,
+    main_window: Rc<RefCell<MainWindowController>>,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+) {
+    let status = quick_add_session.borrow().status;
+    match status {
+        QuickAddSessionStatus::Closed => {
+            let hide_app_on_close = cx.active_window().is_none();
+            open_quick_add_window(cx, store, main_window, quick_add_session, hide_app_on_close);
+        }
+        QuickAddSessionStatus::Dormant => {
+            open_quick_add_window(cx, store, main_window, quick_add_session, false);
+        }
+        QuickAddSessionStatus::Visible => {
+            if quick_add_session.borrow().has_draft() {
+                show_quick_add_hotkey_protection(cx, &quick_add_session);
+            } else {
+                close_visible_quick_add(cx, &quick_add_session);
+            }
+        }
+    }
+}
+
+fn open_quick_add_window(
+    cx: &mut App,
+    store: Store,
+    main_window: Rc<RefCell<MainWindowController>>,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    hide_app_on_close: bool,
+) {
+    {
+        let mut session = quick_add_session.borrow_mut();
+        session.status = QuickAddSessionStatus::Visible;
+        session.handle = None;
+        session.hide_app_on_close = hide_app_on_close;
+    }
+
+    cx.activate(true);
+
+    let window_size = quick_add_window_size();
+    let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
+
+    let open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)> = {
+        let store = store.clone();
+        let main_window = main_window.clone();
+        Arc::new(move |destination, cx| match destination {
+            QuickAddDestination::Main => {
+                activate_main_window(cx, &main_window, &store, None);
+            }
+            QuickAddDestination::Tasks => {
+                activate_main_window(cx, &main_window, &store, Some(Panel::Tasks));
+            }
+            QuickAddDestination::Records => {
+                activate_main_window(cx, &main_window, &store, Some(Panel::Records));
+            }
+        })
+    };
+
+    let session_for_window = quick_add_session.clone();
+    let open_destination_for_window = open_destination.clone();
+    let store_for_window = store.clone();
+
+    match cx.open_window(
+        WindowOptions {
+            window_bounds: Some(window_bounds),
+            ..Default::default()
+        },
+        move |window, cx| {
+            let session = session_for_window.clone();
+            let open_destination = open_destination_for_window.clone();
+            let store = store_for_window.clone();
+            let view = cx.new(|cx| {
+                let mut view = QuickAddWindow::new(store, session, open_destination, window, cx);
+                view.hide_app_on_close = hide_app_on_close;
+                view
+            });
+            cx.new(|cx| gpui_component::Root::new(view, window, cx).bg(cx.theme().background))
+        },
+    ) {
+        Ok(handle) => {
+            quick_add_session.borrow_mut().handle = Some(handle.into());
+        }
+        Err(err) => {
+            quick_add_session.borrow_mut().clear();
+            eprintln!("[QuickAdd] Failed to open window: {}", err);
+        }
+    }
+}
+
+fn close_visible_quick_add(
+    cx: &mut App,
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+) {
+    let (handle, hide_app_on_close) = {
+        let session = quick_add_session.borrow();
+        (session.handle, session.hide_app_on_close)
+    };
+
+    if let Some(handle) = handle {
+        let _ = handle.update(cx, |_, window, _| {
+            window.remove_window();
+        });
+    }
+
+    let should_hide = {
+        let mut session = quick_add_session.borrow_mut();
+        let should_hide = hide_app_on_close && !session.has_draft();
+        session.clear();
+        should_hide
+    };
+
+    if should_hide {
+        cx.hide();
+    }
+}
+
+fn show_quick_add_hotkey_protection(
+    cx: &mut App,
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+) {
+    let handle = quick_add_session.borrow().handle;
+    if let Some(handle) = handle {
+        let _ = handle.update(cx, |root_view, window, cx| {
+            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                root.update(cx, |root, cx| {
+                    if let Ok(view) = root.view().clone().downcast::<QuickAddWindow>() {
+                        view.update(cx, |view, cx| view.show_hotkey_protection(cx));
+                    }
+                });
+            }
+            window.activate_window();
+        });
+    }
+}
+
+fn activate_main_window(
+    cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
+    store: &Store,
+    target_panel: Option<Panel>,
+) {
+    let desired_panel = target_panel.unwrap_or_else(|| controller.borrow().current_panel);
+    let existing_handle = controller.borrow().handle;
+
+    if let Some(handle) = existing_handle {
+        if handle
+            .update(cx, |root_view, window, cx| {
+                update_main_window(root_view, window, cx, desired_panel);
+            })
+            .is_ok()
+        {
+            controller.borrow_mut().current_panel = desired_panel;
+            return;
+        }
+    }
+
+    match open_main_window(cx, store.clone(), controller.clone(), desired_panel) {
+        Ok(handle) => {
+            let mut state = controller.borrow_mut();
+            state.handle = Some(handle);
+            state.current_panel = desired_panel;
+        }
+        Err(err) => {
+            eprintln!("[MainWindow] Failed to open main window: {}", err);
+        }
+    }
+}
+
+fn update_main_window(root_view: AnyView, window: &mut Window, cx: &mut App, panel: Panel) {
+    if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+        root.update(cx, |root, cx| {
+            if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
+                main_view.update(cx, |this, cx| this.switch_to_panel(panel, cx));
+            }
+        });
+    }
+    window.activate_window();
+}
+
+fn open_main_window(
+    cx: &mut App,
+    store: Store,
+    controller: Rc<RefCell<MainWindowController>>,
+    initial_panel: Panel,
+) -> Result<AnyWindowHandle> {
     let window_size = size(px(900.0), px(600.0));
     let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
-    
+
     cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
             ..Default::default()
         },
-        |window, cx| {
-            let view = cx.new(|cx| MainView::new(store, window, cx));
-            cx.new(|cx| {
-                gpui_component::Root::new(view, window, cx)
-                    .bg(cx.theme().background)
-            })
+        move |window, cx| {
+            let store = store.clone();
+            let controller = controller.clone();
+            let view = cx.new(|cx| MainView::new(store, controller, initial_panel, window, cx));
+            cx.new(|cx| gpui_component::Root::new(view, window, cx).bg(cx.theme().background))
         },
-    ).map(|h| h.into())
+    )
+    .map(|h| h.into())
 }
 
 pub struct MainView {
@@ -179,12 +375,19 @@ pub struct MainView {
     task_panel: Entity<TaskPanel>,
     timeline_panel: Entity<Timeline>,
     notes_panel: Entity<NotePanel>,
-    store: Store,
+    shortcut_config: ShortcutConfig,
+    window_state: Rc<RefCell<MainWindowController>>,
     focus_handle: FocusHandle,
 }
 
 impl MainView {
-    pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        store: Store,
+        window_state: Rc<RefCell<MainWindowController>>,
+        initial_panel: Panel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let store_for_panels = store.clone();
         let dashboard_panel = cx.new(|cx| Dashboard::new(store_for_panels.clone(), window, cx));
         let search_panel = cx.new(|cx| SearchPanel::new(store_for_panels.clone(), window, cx));
@@ -193,22 +396,89 @@ impl MainView {
         let notes_panel = cx.new(|cx| NotePanel::new(store_for_panels, window, cx));
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+
+        window_state.borrow_mut().current_panel = initial_panel;
+
         Self {
-            current_panel: Panel::Dashboard,
+            current_panel: initial_panel,
             dashboard_panel,
             search_panel,
             task_panel,
             timeline_panel,
             notes_panel,
-            store,
+            shortcut_config: ShortcutConfig::load(),
+            window_state,
             focus_handle,
         }
     }
 
     pub fn switch_to_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
-        eprintln!("[MainView] Switching panel from {:?} to {:?}", self.current_panel, panel);
-        self.current_panel = panel;
-        cx.notify();
+        if self.current_panel != panel {
+            eprintln!(
+                "[MainView] Switching panel from {:?} to {:?}",
+                self.current_panel, panel
+            );
+            self.current_panel = panel;
+            self.window_state.borrow_mut().current_panel = panel;
+            cx.notify();
+        }
+    }
+
+    fn render_settings_panel(&self) -> impl IntoElement {
+        let shortcut_entries = self
+            .shortcut_config
+            .entries()
+            .into_iter()
+            .map(|(label, shortcut)| (label.to_string(), shortcut.to_string()))
+            .collect::<Vec<_>>();
+
+        div()
+            .size_full()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(18.0))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x262626))
+                    .child("快捷键"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .child("本轮先展示当前全局快捷键，后续再开放自定义编辑。"),
+            )
+            .child(div().flex().flex_col().gap(px(10.0)).children(
+                shortcut_entries.into_iter().map(|(label, shortcut)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(14.0))
+                        .py(px(12.0))
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(rgb(0xf0f0f0))
+                        .bg(rgb(0xfafafa))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0x262626))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_family(".SystemUIFont")
+                                .text_color(rgb(0x0958d9))
+                                .child(shortcut),
+                        )
+                }),
+            ))
     }
 }
 
@@ -221,80 +491,41 @@ impl Focusable for MainView {
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_panel = self.current_panel;
-        let on_panel_change = cx.listener(|this: &mut MainView, panel: &Panel, _window: &mut Window, cx: &mut Context<MainView>| {
-            eprintln!("Panel changing from {:?} to {:?}", this.current_panel, panel);
-            this.current_panel = *panel;
-            cx.notify();  // 强制刷新界面
-        });
-
-        // 获取 store 用于快捷键打开浮动窗口
-        let store_for_shortcut = self.store.clone();
+        let on_panel_change = cx.listener(
+            |this: &mut MainView,
+             panel: &Panel,
+             _window: &mut Window,
+             cx: &mut Context<MainView>| {
+                this.switch_to_panel(*panel, cx);
+            },
+        );
 
         div()
             .size_full()
             .flex()
             .bg(rgb(0xf0f0f0))
             .track_focus(&self.focus_handle(cx))
-            // 添加 GPUI 层面的键盘快捷键处理
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                let modifiers = event.keystroke.modifiers;
-                let key = event.keystroke.key.as_str();
+                if !event.keystroke.modifiers.platform {
+                    return;
+                }
 
-                // 检查是否是 Cmd 键 (macOS 的 platform 修饰符)
-                let is_cmd = modifiers.platform;
-
-                if is_cmd {
-                    let window_size = quick_add_window_size();
-                    match key {
-                        "n" => {
-                            eprintln!("[MainView] Cmd+N pressed - opening quick add window");
-                            let store = store_for_shortcut.clone();
-                            let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
-                            cx.open_window(
-                                WindowOptions {
-                                    window_bounds: Some(window_bounds),
-                                    ..Default::default()
-                                },
-                                |window, cx| {
-                                    let view = cx.new(|cx| QuickAddWindow::new(store, window, cx));
-                                    cx.new(|cx| {
-                                        gpui_component::Root::new(view, window, cx)
-                                            .bg(cx.theme().background)
-                                    })
-                                },
-                            ).ok();
-                        }
-                        "1" => {
-                            eprintln!("[MainView] Cmd+1 pressed - switching to Dashboard");
-                            this.switch_to_panel(Panel::Dashboard, cx);
-                        }
-                        "2" => {
-                            eprintln!("[MainView] Cmd+2 pressed - switching to Tasks");
-                            this.switch_to_panel(Panel::Tasks, cx);
-                        }
-                        "3" => {
-                            eprintln!("[MainView] Cmd+3 pressed - switching to Records");
-                            this.switch_to_panel(Panel::Records, cx);
-                        }
-                        "4" => {
-                            eprintln!("[MainView] Cmd+4 pressed - switching to Timeline");
-                            this.switch_to_panel(Panel::Timeline, cx);
-                        }
-                        "5" => {
-                            eprintln!("[MainView] Cmd+5 pressed - switching to Search");
-                            this.switch_to_panel(Panel::Search, cx);
-                        }
-                        "0" => {
-                            eprintln!("[MainView] Cmd+0 pressed - activating window");
-                            window.activate_window();
-                        }
-                        _ => {}
-                    }
+                match event.keystroke.key.as_str() {
+                    "0" => window.activate_window(),
+                    "1" => this.switch_to_panel(Panel::Dashboard, cx),
+                    "2" => this.switch_to_panel(Panel::Tasks, cx),
+                    "3" => this.switch_to_panel(Panel::Records, cx),
+                    "4" => this.switch_to_panel(Panel::Timeline, cx),
+                    "5" => this.switch_to_panel(Panel::Search, cx),
+                    _ => {}
                 }
             }))
-            .child(Sidebar::new(move |panel, _window, _cx| {
-                on_panel_change(&panel, _window, _cx)
-            }).with_panel(current_panel))
+            .child(
+                Sidebar::new(move |panel, window, app| {
+                    on_panel_change(&panel, window, app);
+                })
+                .with_panel(current_panel),
+            )
             .child(
                 div()
                     .flex_1()
@@ -310,8 +541,8 @@ impl Render for MainView {
                         Panel::Timeline => self.timeline_panel.clone().into_any_element(),
                         Panel::Search => self.search_panel.clone().into_any_element(),
                         Panel::AI => div().child("AI 面板开发中...").into_any_element(),
-                        Panel::Settings => div().child("设置面板开发中...").into_any_element(),
-                    })
+                        Panel::Settings => self.render_settings_panel().into_any_element(),
+                    }),
             )
     }
 }

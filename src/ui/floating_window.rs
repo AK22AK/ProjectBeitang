@@ -1,15 +1,24 @@
-use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState, Escape, IndentInline};
-use gpui_component::IconName;
 use crate::models::Record;
 use crate::store::Store;
 use crate::ui::parsing;
+use gpui::*;
+use gpui_component::input::{Escape, IndentInline, Input, InputEvent, InputState};
+use gpui_component::IconName;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputMode {
     Task,
     Record,
+}
+
+impl Default for InputMode {
+    fn default() -> Self {
+        Self::Record
+    }
 }
 
 impl InputMode {
@@ -29,14 +38,63 @@ impl InputMode {
 
     fn placeholder(&self) -> &'static str {
         match self {
-            InputMode::Task => "输入任务 (Enter保存, Esc取消, Tab切换)",
-            InputMode::Record => "输入记录 (Enter保存, Esc取消, Tab切换)",
+            InputMode::Task => "输入任务 (Enter 保存, Cmd+Enter 打开任务, Tab 切换)",
+            InputMode::Record => "输入记录 (Enter 保存, Cmd+Enter 打开记录, Tab 切换)",
+        }
+    }
+
+    fn destination(&self) -> QuickAddDestination {
+        match self {
+            InputMode::Task => QuickAddDestination::Tasks,
+            InputMode::Record => QuickAddDestination::Records,
         }
     }
 }
 
 pub fn quick_add_window_size() -> Size<Pixels> {
-    size(px(520.0), px(168.0))
+    size(px(520.0), px(188.0))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuickAddDestination {
+    Main,
+    Tasks,
+    Records,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum QuickAddSessionStatus {
+    #[default]
+    Closed,
+    Visible,
+    Dormant,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct QuickAddSessionController {
+    pub handle: Option<AnyWindowHandle>,
+    pub draft_text: String,
+    pub mode: InputMode,
+    pub status: QuickAddSessionStatus,
+    pub hide_app_on_close: bool,
+}
+
+impl QuickAddSessionController {
+    pub fn has_draft(&self) -> bool {
+        !self.draft_text.trim().is_empty()
+    }
+
+    pub fn mark_visible(&mut self) {
+        self.status = QuickAddSessionStatus::Visible;
+    }
+
+    pub fn clear(&mut self) {
+        self.handle = None;
+        self.draft_text.clear();
+        self.mode = InputMode::Record;
+        self.status = QuickAddSessionStatus::Closed;
+        self.hide_app_on_close = false;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -44,10 +102,13 @@ enum QuickAddFeedback {
     Idle,
     EmptySubmitWarning,
     EscConfirmPending { generation: u64 },
+    HotkeyDraftProtected,
 }
 
 pub struct QuickAddWindow {
     store: Store,
+    session: Rc<RefCell<QuickAddSessionController>>,
+    open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
     input_state: Entity<InputState>,
     _subscription: Subscription,
     mode: InputMode,
@@ -58,33 +119,47 @@ pub struct QuickAddWindow {
 }
 
 impl QuickAddWindow {
-    pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Store,
+        session: Rc<RefCell<QuickAddSessionController>>,
+        open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
-        let mode = InputMode::Record; // 默认记录模式
+        let snapshot = session.borrow().clone();
+        let mode = snapshot.mode;
+        let initial_text = snapshot.draft_text;
 
         let input_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(mode.placeholder())
+            let mut input = InputState::new(window, cx).placeholder(mode.placeholder());
+            if !initial_text.is_empty() {
+                input.set_value(initial_text, window, cx);
+            }
+            input
         });
 
         let _subscription = cx.subscribe_in(
             &input_state,
             window,
-            |this, _state, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        this.try_submit(window, cx);
-                    }
-                    InputEvent::Change => {
-                        this.clear_transient_feedback(cx);
-                    }
-                    InputEvent::Focus | InputEvent::Blur => {}
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    this.try_submit(window, cx);
                 }
+                InputEvent::Change => {
+                    this.sync_session_state(cx);
+                    this.clear_transient_feedback(cx);
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
             },
         );
 
+        session.borrow_mut().mark_visible();
+
         Self {
             store,
+            session,
+            open_destination,
             input_state,
             _subscription,
             mode,
@@ -95,6 +170,11 @@ impl QuickAddWindow {
         }
     }
 
+    pub fn show_hotkey_protection(&mut self, cx: &mut Context<Self>) {
+        self.feedback = QuickAddFeedback::HotkeyDraftProtected;
+        cx.notify();
+    }
+
     fn set_mode(&mut self, mode: InputMode, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode != mode {
             self.clear_transient_feedback(cx);
@@ -102,6 +182,7 @@ impl QuickAddWindow {
             self.input_state.update(cx, |input, cx| {
                 input.set_placeholder(mode.placeholder(), window, cx);
             });
+            self.sync_session_state(cx);
             cx.notify();
         }
     }
@@ -122,6 +203,25 @@ impl QuickAddWindow {
         !self.input_text(cx).trim().is_empty()
     }
 
+    fn sync_session_state(&self, cx: &Context<Self>) {
+        let mut session = self.session.borrow_mut();
+        session.draft_text = self.input_text(cx);
+        session.mode = self.mode;
+        session.status = QuickAddSessionStatus::Visible;
+    }
+
+    fn clear_session(&self) {
+        self.session.borrow_mut().clear();
+    }
+
+    fn mark_session_dormant(&self, cx: &Context<Self>) {
+        let mut session = self.session.borrow_mut();
+        session.handle = None;
+        session.draft_text = self.input_text(cx);
+        session.mode = self.mode;
+        session.status = QuickAddSessionStatus::Dormant;
+    }
+
     fn submit(&mut self, cx: &mut Context<Self>) {
         match self.mode {
             InputMode::Task => self.submit_task(cx),
@@ -129,12 +229,22 @@ impl QuickAddWindow {
         }
     }
 
-    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let hide = self.hide_app_on_close;
+    fn remove_window(&mut self, window: &mut Window) {
+        self.session.borrow_mut().handle = None;
         window.remove_window();
+    }
+
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_session();
+        let hide = self.hide_app_on_close;
+        self.remove_window(window);
         if hide {
             cx.hide();
         }
+    }
+
+    fn close_window_preserving_session(&mut self, window: &mut Window) {
+        self.remove_window(window);
     }
 
     fn submit_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -151,6 +261,41 @@ impl QuickAddWindow {
         }
 
         self.submit_and_close(window, cx);
+    }
+
+    fn try_submit_and_open(
+        &mut self,
+        destination: QuickAddDestination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_input(cx) {
+            self.feedback = QuickAddFeedback::EmptySubmitWarning;
+            cx.notify();
+            return;
+        }
+
+        self.clear_transient_feedback(cx);
+        self.submit(cx);
+        self.clear_session();
+        self.remove_window(window);
+        (self.open_destination)(destination, cx);
+    }
+
+    fn open_panel_without_submit(
+        &mut self,
+        destination: QuickAddDestination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_transient_feedback(cx);
+        if self.has_input(cx) {
+            self.mark_session_dormant(cx);
+        } else {
+            self.clear_session();
+        }
+        self.close_window_preserving_session(window);
+        (self.open_destination)(destination, cx);
     }
 
     fn clear_transient_feedback(&mut self, cx: &mut Context<Self>) {
@@ -194,9 +339,9 @@ impl QuickAddWindow {
 
         match self.feedback {
             QuickAddFeedback::EscConfirmPending { .. } => self.close_window(window, cx),
-            QuickAddFeedback::Idle | QuickAddFeedback::EmptySubmitWarning => {
-                self.start_escape_confirm_timeout(cx);
-            }
+            QuickAddFeedback::Idle
+            | QuickAddFeedback::EmptySubmitWarning
+            | QuickAddFeedback::HotkeyDraftProtected => self.start_escape_confirm_timeout(cx),
         }
     }
 
@@ -215,6 +360,12 @@ impl QuickAddWindow {
                 rgb(0xffd591).into(),
                 "再次按 Esc 关闭输入",
             )),
+            QuickAddFeedback::HotkeyDraftProtected => Some((
+                rgb(0x0958d9).into(),
+                rgb(0xe6f4ff).into(),
+                rgb(0x91caff).into(),
+                "已有草稿，按 Esc 关闭或按 Cmd+2 / Cmd+3 查看对应面板",
+            )),
         }
     }
 
@@ -230,6 +381,20 @@ impl QuickAddWindow {
         )
     }
 
+    fn render_shortcut_hints(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .gap(px(12.0))
+            .text_xs()
+            .text_color(rgb(0x8c8c8c))
+            .child("Enter 保存")
+            .child("Cmd+Enter 打开对应面板")
+            .child("Cmd+2 查看任务")
+            .child("Cmd+3 查看记录")
+            .child("Tab 切换模式")
+            .child("Esc 关闭")
+    }
+
     fn submit_task(&mut self, cx: &mut Context<Self>) {
         let text = self.input_state.read(cx).text().to_string();
         if text.trim().is_empty() {
@@ -237,10 +402,8 @@ impl QuickAddWindow {
         }
 
         let (title, priority, tags, people) = parsing::parse_task_input(&text);
-        // 快速添加时，输入内容作为 title，content 初始为空
         let mut task = Record::new_task(title, String::new(), priority);
-        
-        // 添加标签和人物
+
         for tag in tags {
             task.tags.push(tag);
         }
@@ -253,9 +416,8 @@ impl QuickAddWindow {
             if let Err(e) = store.create_record(task).await {
                 eprintln!("[QuickAdd] Failed to create task: {}", e);
             }
-        }).detach();
-
-        cx.emit(DismissEvent);
+        })
+        .detach();
     }
 
     fn submit_record(&mut self, cx: &mut Context<Self>) {
@@ -266,8 +428,7 @@ impl QuickAddWindow {
 
         let (content, tags, people) = parsing::parse_record_input(&text);
         let mut record = Record::new_note(if content.is_empty() { text } else { content });
-        
-        // 添加标签和人物
+
         for tag in tags {
             record.tags.push(tag);
         }
@@ -280,9 +441,8 @@ impl QuickAddWindow {
             if let Err(e) = store.create_record(record).await {
                 eprintln!("[QuickAdd] Failed to create record: {}", e);
             }
-        }).detach();
-
-        cx.emit(DismissEvent);
+        })
+        .detach();
     }
 
     fn render_submit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -313,7 +473,11 @@ impl QuickAddWindow {
             }))
     }
 
-    fn render_mode_switch_button(&self, mode: InputMode, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_mode_switch_button(
+        &self,
+        mode: InputMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .id(format!("switch-to-{}", mode.label()))
             .flex()
@@ -366,8 +530,6 @@ impl QuickAddWindow {
     }
 }
 
-impl EventEmitter<DismissEvent> for QuickAddWindow {}
-
 impl Focusable for QuickAddWindow {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -376,8 +538,8 @@ impl Focusable for QuickAddWindow {
 
 impl Render for QuickAddWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 将焦点直接赋予给文本输入框
-        self.input_state.update(cx, |input, cx| input.focus(window, cx));
+        self.input_state
+            .update(cx, |input, cx| input.focus(window, cx));
 
         let feedback_style = self.feedback_style();
 
@@ -396,8 +558,39 @@ impl Render for QuickAddWindow {
                 this.clear_transient_feedback(cx);
                 this.toggle_mode(window, cx);
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key != "escape" {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                let key = event.keystroke.key.as_str();
+
+                if modifiers.platform {
+                    match key {
+                        "enter" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.try_submit_and_open(this.mode.destination(), window, cx);
+                            return;
+                        }
+                        "2" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.open_panel_without_submit(QuickAddDestination::Tasks, window, cx);
+                            return;
+                        }
+                        "3" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.open_panel_without_submit(
+                                QuickAddDestination::Records,
+                                window,
+                                cx,
+                            );
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if key != "escape" {
                     this.clear_transient_feedback(cx);
                 }
             }))
@@ -410,11 +603,9 @@ impl Render for QuickAddWindow {
                             .map(|(_, _, border_color, _)| border_color)
                             .unwrap_or_else(transparent_black),
                     )
-                    .bg(
-                        feedback_style
-                            .map(|(_, bg_color, _, _)| bg_color)
-                            .unwrap_or_else(transparent_white),
-                    )
+                    .bg(feedback_style
+                        .map(|(_, bg_color, _, _)| bg_color)
+                        .unwrap_or_else(transparent_white))
                     .p(px(2.0))
                     .child(Input::new(&self.input_state)),
             )
@@ -426,5 +617,6 @@ impl Render for QuickAddWindow {
                     .justify_between()
                     .child(self.render_mode_switcher(cx)),
             )
+            .child(self.render_shortcut_hints())
     }
 }
