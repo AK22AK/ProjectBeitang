@@ -1,10 +1,10 @@
 use crate::models::{Record, RecordType, TaskStatus};
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Duration, Local, Utc, Weekday};
-use gpui::*;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::{h_flex, v_flex};
+use gpui::*;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{h_flex, v_flex};
 use std::collections::HashSet;
 
 const PAGE_SIZE: usize = 50;
@@ -30,11 +30,14 @@ impl Timeline {
             is_loading: false,
             has_more: true,
             offset: 0,
-            _window_activation_subscription: cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    this.refresh_data(cx);
-                }
-            }),
+            _window_activation_subscription: cx.observe_window_activation(
+                window,
+                |this, window, cx| {
+                    if window.is_window_active() {
+                        this.refresh_data(cx);
+                    }
+                },
+            ),
         };
         panel.load_data(cx);
         panel.load_available_tags(cx);
@@ -67,10 +70,12 @@ impl Timeline {
                         panel.is_loading = false;
                         panel.has_more = has_more;
                         panel.offset += new_records.len();
-                        
+
                         // 合并记录并按时间倒序排序
                         panel.records.extend(new_records);
-                        panel.records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        panel
+                            .records
+                            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         cx.notify();
                     });
                 }
@@ -82,7 +87,8 @@ impl Timeline {
                     });
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn load_available_tags(&mut self, cx: &mut Context<Self>) {
@@ -105,7 +111,8 @@ impl Timeline {
                     eprintln!("[Timeline] Failed to load tags: {}", e);
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
@@ -170,7 +177,8 @@ impl Timeline {
                 Weekday::Fri => "周五",
                 Weekday::Sat => "周六",
                 Weekday::Sun => "周日",
-            }.to_string()
+            }
+            .to_string()
         } else if date.year() == today.year() {
             local.format("%-m月%-d日").to_string()
         } else {
@@ -222,11 +230,29 @@ impl Timeline {
                     .rounded(px(16.0))
                     .cursor_pointer()
                     .border_1()
-                    .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xd9d9d9) })
-                    .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
-                    .text_color(if is_selected { rgb(0x1890ff) } else { rgb(0x595959) })
+                    .border_color(if is_selected {
+                        rgb(0x1890ff)
+                    } else {
+                        rgb(0xd9d9d9)
+                    })
+                    .bg(if is_selected {
+                        rgb(0xe6f7ff)
+                    } else {
+                        rgb(0xffffff)
+                    })
+                    .text_color(if is_selected {
+                        rgb(0x1890ff)
+                    } else {
+                        rgb(0x595959)
+                    })
                     .text_sm()
-                    .hover(|s| s.bg(if is_selected { rgb(0xbae7ff) } else { rgb(0xf5f5f5) }))
+                    .hover(|s| {
+                        s.bg(if is_selected {
+                            rgb(0xbae7ff)
+                        } else {
+                            rgb(0xf5f5f5)
+                        })
+                    })
                     .child(tag.clone())
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                         this.toggle_tag(&tag_clone, cx);
@@ -244,11 +270,16 @@ impl Timeline {
                     .text_color(rgb(0x8c8c8c))
                     .text_sm()
                     .hover(|s| s.bg(rgb(0xf5f5f5)))
-                    .child("+固定")
+                    .child("+固定"),
             )
     }
 
-    fn render_timeline_item(&self, record: &Record, is_last: bool, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_timeline_item(
+        &self,
+        record: &Record,
+        is_last: bool,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let time_str = Self::format_time(record.created_at);
         let icon = Self::get_node_icon(record);
         let icon_color = Self::get_node_color(record);
@@ -267,7 +298,7 @@ impl Timeline {
                     .pr(px(12.0))
                     .text_sm()
                     .text_color(rgb(0x8c8c8c))
-                    .child(time_str)
+                    .child(time_str),
             )
             .child(
                 div()
@@ -280,7 +311,7 @@ impl Timeline {
                             .top(px(0.0))
                             .bottom(if is_last { px(0.0) } else { px(-1000.0) })
                             .w(px(2.0))
-                            .bg(rgb(0xe8e8e8))
+                            .bg(rgb(0xe8e8e8)),
                     )
                     .child(
                         div()
@@ -293,8 +324,8 @@ impl Timeline {
                             .justify_center()
                             .text_color(icon_color)
                             .text_sm()
-                            .child(icon)
-                    )
+                            .child(icon),
+                    ),
             )
             .child(
                 div()
@@ -315,7 +346,7 @@ impl Timeline {
                                     .bg(rgb(0xf0f0f0))
                                     .text_xs()
                                     .text_color(rgb(0x8c8c8c))
-                                    .child(record_type_label)
+                                    .child(record_type_label),
                             )
                             .children(status_label.map(|status| {
                                 div()
@@ -336,30 +367,22 @@ impl Timeline {
                                         _ => rgb(0x8c8c8c),
                                     })
                                     .child(status)
-                            }))
+                            })),
                     )
-                    .child(
-                        div()
-                            .text_base()
-                            .text_color(rgb(0x262626))
-                            .child(content)
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(6.0))
-                            .flex_wrap()
-                            .children(tags.into_iter().enumerate().map(|(idx, tag)| {
-                                div()
-                                    .id(("item-tag", idx))
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(0xf5f5f5))
-                                    .text_xs()
-                                    .text_color(rgb(0x595959))
-                                    .child(format!("#{}", tag))
-                            }))
-                    )
+                    .child(div().text_base().text_color(rgb(0x262626)).child(content))
+                    .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                        tags.into_iter().enumerate().map(|(idx, tag)| {
+                            div()
+                                .id(("item-tag", idx))
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0xf5f5f5))
+                                .text_xs()
+                                .text_color(rgb(0x595959))
+                                .child(format!("#{}", tag))
+                        }),
+                    )),
             )
     }
 }
@@ -378,72 +401,64 @@ impl Render for Timeline {
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x262626))
-                    .child(format!("时间线 ({} 条记录)", records.len()))
+                    .child(format!("时间线 ({} 条记录)", records.len())),
             )
+            .child(self.render_tag_filter(cx))
             .child(
-                self.render_tag_filter(cx)
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_y_scrollbar()
-                    .child(
-                        div()
-                            .id("timeline-list")
-                            .flex()
-                            .flex_col()
-                            .p(px(16.0))
-                            .children(records.iter().enumerate().map(|(idx, record)| {
-                                let is_last = idx == records.len() - 1;
-                                self.render_timeline_item(record, is_last, cx)
-                            }))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .py(px(16.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .when(is_loading, |el| {
-                                        el.child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0x8c8c8c))
-                                                .child("加载中...")
-                                        )
-                                    })
-                                    .when(!is_loading && has_more, |el| {
-                                        el.child(
-                                            div()
-                                                .cursor_pointer()
-                                                .px(px(16.0))
-                                                .py(px(8.0))
-                                                .rounded(px(6.0))
-                                                .bg(rgb(0xf5f5f5))
-                                                .hover(|s| s.bg(rgb(0xe8e8e8)))
-                                                .text_sm()
-                                                .text_color(rgb(0x595959))
-                                                .child("点击加载更多")
-                                        )
-                                    })
-                                    .when(!is_loading && !has_more && !records.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0xbfbfbf))
-                                                .child("— 没有更多记录了 —")
-                                        )
-                                    })
-                                    .when(records.is_empty() && !is_loading, |el| {
-                                        el.child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0xbfbfbf))
-                                                .child("暂无记录")
-                                        )
-                                    })
-                            )
-                    )
+                div().flex_1().overflow_y_scrollbar().child(
+                    div()
+                        .id("timeline-list")
+                        .flex()
+                        .flex_col()
+                        .p(px(16.0))
+                        .children(records.iter().enumerate().map(|(idx, record)| {
+                            let is_last = idx == records.len() - 1;
+                            self.render_timeline_item(record, is_last, cx)
+                        }))
+                        .child(
+                            div()
+                                .w_full()
+                                .py(px(16.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(is_loading, |el| {
+                                    el.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0x8c8c8c))
+                                            .child("加载中..."),
+                                    )
+                                })
+                                .when(!is_loading && has_more, |el| {
+                                    el.child(
+                                        div()
+                                            .cursor_pointer()
+                                            .px(px(16.0))
+                                            .py(px(8.0))
+                                            .rounded(px(6.0))
+                                            .bg(rgb(0xf5f5f5))
+                                            .hover(|s| s.bg(rgb(0xe8e8e8)))
+                                            .text_sm()
+                                            .text_color(rgb(0x595959))
+                                            .child("点击加载更多"),
+                                    )
+                                })
+                                .when(!is_loading && !has_more && !records.is_empty(), |el| {
+                                    el.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0xbfbfbf))
+                                            .child("— 没有更多记录了 —"),
+                                    )
+                                })
+                                .when(records.is_empty() && !is_loading, |el| {
+                                    el.child(
+                                        div().text_sm().text_color(rgb(0xbfbfbf)).child("暂无记录"),
+                                    )
+                                }),
+                        ),
+                ),
             )
     }
 }

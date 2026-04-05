@@ -1,13 +1,13 @@
 use crate::models::{Record, RecordType, TaskStatus};
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Duration, Local, Utc, Weekday};
-use gpui::*;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::h_flex;
-use gpui_component::v_flex;
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::v_flex;
 use std::collections::HashSet;
 use std::time::Duration as StdDuration;
 
@@ -57,10 +57,7 @@ pub struct SearchPanel {
 
 impl SearchPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("🔍 搜索内容...")
-        });
+        let input_state = cx.new(|cx| InputState::new(window, cx).placeholder("🔍 搜索内容..."));
 
         let _subscription = cx.subscribe_in(
             &input_state,
@@ -92,19 +89,18 @@ impl SearchPanel {
 
     fn load_available_tags(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        cx.spawn(async move |view, cx| {
-            match store.get_all_tags().await {
-                Ok(tags) => {
-                    let _ = view.update(cx, |panel, cx| {
-                        panel.available_tags = tags.into_iter().map(|t| t.name).collect();
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[SearchPanel] Failed to load tags: {}", e);
-                }
+        cx.spawn(async move |view, cx| match store.get_all_tags().await {
+            Ok(tags) => {
+                let _ = view.update(cx, |panel, cx| {
+                    panel.available_tags = tags.into_iter().map(|t| t.name).collect();
+                    cx.notify();
+                });
             }
-        }).detach();
+            Err(e) => {
+                eprintln!("[SearchPanel] Failed to load tags: {}", e);
+            }
+        })
+        .detach();
     }
 
     fn on_query_change(&mut self, query: String, cx: &mut Context<Self>) {
@@ -142,7 +138,8 @@ impl SearchPanel {
                     });
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 
     #[allow(dead_code)]
@@ -155,8 +152,8 @@ impl SearchPanel {
         let store = self.store.clone();
         let query = self.query.clone();
 
-        cx.spawn(async move |view, cx| {
-            match store.search_records(&query).await {
+        cx.spawn(
+            async move |view, cx| match store.search_records(&query).await {
                 Ok(records) => {
                     let _ = view.update(cx, |panel, cx| {
                         panel.results = records;
@@ -171,8 +168,9 @@ impl SearchPanel {
                         cx.notify();
                     });
                 }
-            }
-        }).detach();
+            },
+        )
+        .detach();
     }
 
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -184,7 +182,12 @@ impl SearchPanel {
         cx.notify();
     }
 
-    fn set_filter_type(&mut self, filter_type: SearchFilterType, _window: &mut Window, cx: &mut Context<Self>) {
+    fn set_filter_type(
+        &mut self,
+        filter_type: SearchFilterType,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.filter_type = filter_type;
         cx.notify();
     }
@@ -237,7 +240,8 @@ impl SearchPanel {
                 Weekday::Fri => "周五",
                 Weekday::Sat => "周六",
                 Weekday::Sun => "周日",
-            }.to_string()
+            }
+            .to_string()
         } else if date.year() == today.year() {
             local.format("%-m月%-d日").to_string()
         } else {
@@ -289,19 +293,25 @@ impl SearchPanel {
 
     fn highlight_match_text(&self, content: &str) -> impl IntoElement {
         if self.query.is_empty() || self.query.len() < 2 {
-            return div().text_base().text_color(rgb(0x262626)).child(content.to_string()).into_any_element();
+            return div()
+                .text_base()
+                .text_color(rgb(0x262626))
+                .child(content.to_string())
+                .into_any_element();
         }
 
         let query_lower = self.query.to_lowercase();
         let content_lower = content.to_lowercase();
-        
+
         let mut elements: Vec<AnyElement> = Vec::new();
         let mut last_end = 0;
-        
+
         for (idx, _) in content_lower.match_indices(&query_lower) {
             if idx > last_end {
                 elements.push(
-                    div().child(content[last_end..idx].to_string()).into_any_element()
+                    div()
+                        .child(content[last_end..idx].to_string())
+                        .into_any_element(),
                 );
             }
             let end_idx = idx + self.query.len();
@@ -310,19 +320,25 @@ impl SearchPanel {
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(0x1890ff))
                     .child(content[idx..end_idx].to_string())
-                    .into_any_element()
+                    .into_any_element(),
             );
             last_end = end_idx;
         }
-        
+
         if last_end < content.len() {
             elements.push(
-                div().child(content[last_end..].to_string()).into_any_element()
+                div()
+                    .child(content[last_end..].to_string())
+                    .into_any_element(),
             );
         }
 
         if elements.is_empty() {
-            return div().text_base().text_color(rgb(0x262626)).child(content.to_string()).into_any_element();
+            return div()
+                .text_base()
+                .text_color(rgb(0x262626))
+                .child(content.to_string())
+                .into_any_element();
         }
 
         h_flex().flex_wrap().children(elements).into_any_element()
@@ -333,18 +349,14 @@ impl SearchPanel {
             .w_full()
             .gap(px(8.0))
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .child(Input::new(&self.input_state))
-            )
+            .child(div().flex_1().child(Input::new(&self.input_state)))
             .when(!self.query.is_empty(), |el| {
                 el.child(
                     Button::new("clear-search")
                         .child("清除")
                         .on_click(cx.listener(|this, _event, window, cx| {
                             this.clear_search(window, cx);
-                        }))
+                        })),
                 )
             })
     }
@@ -357,33 +369,47 @@ impl SearchPanel {
             SearchFilterType::Idea,
         ];
 
-        h_flex()
-            .gap(px(4.0))
-            .child(
-                h_flex()
-                    .gap(px(4.0))
-                    .children(filters.into_iter().enumerate().map(|(idx, filter)| {
-                        let is_selected = self.filter_type == filter;
-                        let filter_clone = filter;
-                        
-                        div()
-                            .id(("filter", idx))
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .rounded(px(16.0))
-                            .cursor_pointer()
-                            .border_1()
-                            .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xd9d9d9) })
-                            .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
-                            .text_color(if is_selected { rgb(0x1890ff) } else { rgb(0x595959) })
-                            .text_sm()
-                            .hover(|s| s.bg(if is_selected { rgb(0xbae7ff) } else { rgb(0xf5f5f5) }))
-                            .child(filter.label())
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.set_filter_type(filter_clone, window, cx);
-                            }))
+        h_flex().gap(px(4.0)).child(h_flex().gap(px(4.0)).children(
+            filters.into_iter().enumerate().map(|(idx, filter)| {
+                let is_selected = self.filter_type == filter;
+                let filter_clone = filter;
+
+                div()
+                    .id(("filter", idx))
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .rounded(px(16.0))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if is_selected {
+                        rgb(0x1890ff)
+                    } else {
+                        rgb(0xd9d9d9)
+                    })
+                    .bg(if is_selected {
+                        rgb(0xe6f7ff)
+                    } else {
+                        rgb(0xffffff)
+                    })
+                    .text_color(if is_selected {
+                        rgb(0x1890ff)
+                    } else {
+                        rgb(0x595959)
+                    })
+                    .text_sm()
+                    .hover(|s| {
+                        s.bg(if is_selected {
+                            rgb(0xbae7ff)
+                        } else {
+                            rgb(0xf5f5f5)
+                        })
+                    })
+                    .child(filter.label())
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        this.set_filter_type(filter_clone, window, cx);
                     }))
-            )
+            }),
+        ))
     }
 
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -406,30 +432,52 @@ impl SearchPanel {
                                 .rounded(px(12.0))
                                 .cursor_pointer()
                                 .border_1()
-                                .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xd9d9d9) })
-                                .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
-                                .text_color(if is_selected { rgb(0x1890ff) } else { rgb(0x595959) })
+                                .border_color(if is_selected {
+                                    rgb(0x1890ff)
+                                } else {
+                                    rgb(0xd9d9d9)
+                                })
+                                .bg(if is_selected {
+                                    rgb(0xe6f7ff)
+                                } else {
+                                    rgb(0xffffff)
+                                })
+                                .text_color(if is_selected {
+                                    rgb(0x1890ff)
+                                } else {
+                                    rgb(0x595959)
+                                })
                                 .text_sm()
-                                .hover(|s| s.bg(if is_selected { rgb(0xbae7ff) } else { rgb(0xf5f5f5) }))
+                                .hover(|s| {
+                                    s.bg(if is_selected {
+                                        rgb(0xbae7ff)
+                                    } else {
+                                        rgb(0xf5f5f5)
+                                    })
+                                })
                                 .child(format!("#{}", tag))
-                                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                    this.toggle_tag(&tag_clone, cx);
-                                }))
+                                .on_click(cx.listener(
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        this.toggle_tag(&tag_clone, cx);
+                                    },
+                                ))
                         }))
                         .when(has_selected, |el| {
-                            el.child(
-                                Button::new("clear-search-tags")
-                                    .child("清除筛选")
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.clear_tag_filters(cx);
-                                    }))
-                            )
-                        })
+                            el.child(Button::new("clear-search-tags").child("清除筛选").on_click(
+                                cx.listener(|this, _event, _window, cx| {
+                                    this.clear_tag_filters(cx);
+                                }),
+                            ))
+                        }),
                 )
             })
     }
 
-    fn render_search_result_item(&self, record: &Record, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_search_result_item(
+        &self,
+        record: &Record,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let time_str = Self::format_time(record.created_at);
         let icon = Self::get_node_icon(record);
         let icon_color = Self::get_node_color(record);
@@ -446,14 +494,9 @@ impl SearchPanel {
                     .w(px(60.0))
                     .text_sm()
                     .text_color(rgb(0x8c8c8c))
-                    .child(time_str)
+                    .child(time_str),
             )
-            .child(
-                div()
-                    .text_color(icon_color)
-                    .text_sm()
-                    .child(icon)
-            )
+            .child(div().text_color(icon_color).text_sm().child(icon))
             .child(
                 div()
                     .flex_1()
@@ -461,37 +504,31 @@ impl SearchPanel {
                     .flex_col()
                     .gap(px(4.0))
                     .child(
-                        h_flex()
-                            .gap(px(8.0))
-                            .items_center()
-                            .child(
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(0xf0f0f0))
-                                    .text_xs()
-                                    .text_color(rgb(0x8c8c8c))
-                                    .child(record_type_label)
-                            )
+                        h_flex().gap(px(8.0)).items_center().child(
+                            div()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0xf0f0f0))
+                                .text_xs()
+                                .text_color(rgb(0x8c8c8c))
+                                .child(record_type_label),
+                        ),
                     )
                     .child(self.highlight_match_text(&content))
-                    .child(
-                        h_flex()
-                            .gap(px(6.0))
-                            .flex_wrap()
-                            .children(tags.into_iter().enumerate().map(|(idx, tag)| {
-                                div()
-                                    .id(("result-tag", idx))
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(0xf5f5f5))
-                                    .text_xs()
-                                    .text_color(rgb(0x595959))
-                                    .child(format!("#{}", tag))
-                            }))
-                    )
+                    .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                        tags.into_iter().enumerate().map(|(idx, tag)| {
+                            div()
+                                .id(("result-tag", idx))
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0xf5f5f5))
+                                .text_xs()
+                                .text_color(rgb(0x595959))
+                                .child(format!("#{}", tag))
+                        }),
+                    )),
             )
     }
 
@@ -501,7 +538,7 @@ impl SearchPanel {
 
         for record in results {
             let date_group = Self::format_date_group(record.created_at);
-            
+
             match &mut current_group {
                 Some((group_date, group_records)) if group_date == &date_group => {
                     group_records.push(record.clone());
@@ -532,28 +569,19 @@ impl SearchPanel {
         v_flex()
             .flex_1()
             .overflow_y_scrollbar()
-            .child(
+            .child(div().py(px(8.0)).child(if is_searching {
+                div().text_sm().text_color(rgb(0x8c8c8c)).child("搜索中...")
+            } else if has_query {
                 div()
-                    .py(px(8.0))
-                    .child(
-                        if is_searching {
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x8c8c8c))
-                                .child("搜索中...")
-                        } else if has_query {
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x595959))
-                                .child(format!("找到 {} 个结果：", result_count))
-                        } else {
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x8c8c8c))
-                                .child("输入关键词开始搜索")
-                        }
-                    )
-            )
+                    .text_sm()
+                    .text_color(rgb(0x595959))
+                    .child(format!("找到 {} 个结果：", result_count))
+            } else {
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .child("输入关键词开始搜索")
+            }))
             .child(
                 div()
                     .flex()
@@ -572,8 +600,8 @@ impl SearchPanel {
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(0x262626))
-                                            .child(date_group)
-                                    )
+                                            .child(date_group),
+                                    ),
                             )
                             .children(records.iter().enumerate().map(|(idx, record)| {
                                 div()
@@ -581,21 +609,24 @@ impl SearchPanel {
                                     .child(self.render_search_result_item(record, cx))
                             }))
                     }))
-                    .when(filtered_results.is_empty() && has_query && !is_searching, |el| {
-                        el.child(
-                            div()
-                                .py(px(32.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xbfbfbf))
-                                        .child("未找到匹配的结果")
-                                )
-                        )
-                    })
+                    .when(
+                        filtered_results.is_empty() && has_query && !is_searching,
+                        |el| {
+                            el.child(
+                                div()
+                                    .py(px(32.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0xbfbfbf))
+                                            .child("未找到匹配的结果"),
+                                    ),
+                            )
+                        },
+                    ),
             )
     }
 }
@@ -610,7 +641,7 @@ impl Render for SearchPanel {
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x262626))
-                    .child("搜索")
+                    .child("搜索"),
             )
             .child(self.render_search_input(cx))
             .child(self.render_type_filter(cx))

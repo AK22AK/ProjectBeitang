@@ -2,10 +2,10 @@ use crate::models::Record;
 use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
-use gpui::*;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui::*;
 use gpui_component::button::Button;
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
@@ -46,11 +46,14 @@ impl NotePanel {
             editing_note_id: None,
             edit_input_state: None,
             _edit_subscription: None,
-            _window_activation_subscription: cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    this.load_notes(cx);
-                }
-            }),
+            _window_activation_subscription: cx.observe_window_activation(
+                window,
+                |this, window, cx| {
+                    if window.is_window_active() {
+                        this.load_notes(cx);
+                    }
+                },
+            ),
             record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(window, cx)),
         };
 
@@ -68,7 +71,11 @@ impl NotePanel {
     }
 
     fn handle_sidebar_save(&mut self, payload: &SavePayload, cx: &mut Context<Self>) {
-        if let Some(note) = self.notes.iter_mut().find(|n| n.id.to_string() == payload.record_id) {
+        if let Some(note) = self
+            .notes
+            .iter_mut()
+            .find(|n| n.id.to_string() == payload.record_id)
+        {
             note.title = payload.title.clone();
             note.content = payload.content.clone();
             note.updated_at = chrono::Utc::now();
@@ -79,7 +86,8 @@ impl NotePanel {
                 if let Err(e) = store.update_record(updated_note).await {
                     eprintln!("[NotePanel] Failed to update note: {}", e);
                 }
-            }).detach();
+            })
+            .detach();
 
             cx.notify();
         }
@@ -94,10 +102,7 @@ impl NotePanel {
 
     fn start_edit(&mut self, note: Record, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_note_id = Some(note.id);
-        let edit_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("编辑笔记...")
-        });
+        let edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("编辑笔记..."));
         // 将内容中的换行符替换为空格，避免 gpui_component::input::Input 遇到换行符时 crash
         let content = note.content.replace('\n', " ");
         edit_input.update(cx, |state, cx| {
@@ -131,7 +136,8 @@ impl NotePanel {
                         if let Err(e) = store.update_record(updated_note).await {
                             eprintln!("[NotePanel] Failed to update note: {}", e);
                         }
-                    }).detach();
+                    })
+                    .detach();
                 }
             }
         }
@@ -151,7 +157,10 @@ impl NotePanel {
         cx.spawn(async move |view, cx| {
             let mut retries = 0;
             let notes = loop {
-                eprintln!("[NotePanel] Fetching notes from store... (attempt {})", retries + 1);
+                eprintln!(
+                    "[NotePanel] Fetching notes from store... (attempt {})",
+                    retries + 1
+                );
                 match store.get_notes().await {
                     Ok(notes) => break notes,
                     Err(e) => {
@@ -170,12 +179,16 @@ impl NotePanel {
             let update_result = view.update(cx, |panel, cx| {
                 panel.notes = notes;
                 cx.notify();
-                eprintln!("[NotePanel] Notes updated and notified, panel now has {} notes", panel.notes.len());
+                eprintln!(
+                    "[NotePanel] Notes updated and notified, panel now has {} notes",
+                    panel.notes.len()
+                );
             });
             if let Err(e) = update_result {
                 eprintln!("[NotePanel] Failed to update view: {:?}", e);
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn create_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -189,12 +202,18 @@ impl NotePanel {
         }
 
         let (content, tags, people) = parsing::parse_record_input(&text);
-        eprintln!("[NotePanel] Parsed content: '{}', tags: {:?}, people: {:?}", content, tags, people);
+        eprintln!(
+            "[NotePanel] Parsed content: '{}', tags: {:?}, people: {:?}",
+            content, tags, people
+        );
 
         let mut note = Record::new_note(if content.is_empty() { text } else { content });
         note.tags = tags;
         note.persons = people;
-        eprintln!("[NotePanel] Created note with id: {}, tags: {:?}, persons: {:?}", note.id, note.tags, note.persons);
+        eprintln!(
+            "[NotePanel] Created note with id: {}, tags: {:?}, persons: {:?}",
+            note.id, note.tags, note.persons
+        );
 
         // Clear input
         self.input_state.update(cx, |state, cx| {
@@ -221,21 +240,24 @@ impl NotePanel {
                 }
                 Err(e) => eprintln!("[NotePanel] Failed to create note: {}", e),
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        cx.spawn(async move |view, cx| {
-            match store.delete_record(note_id).await {
+        cx.spawn(
+            async move |view, cx| match store.delete_record(note_id).await {
                 Ok(_) => {
                     view.update(cx, |panel, cx| {
                         panel.load_notes(cx);
-                    }).ok();
+                    })
+                    .ok();
                 }
                 Err(e) => eprintln!("[NotePanel] Failed to delete note: {}", e),
-            }
-        }).detach();
+            },
+        )
+        .detach();
     }
 
     // 从 Record 获取显示标题和预览
@@ -244,14 +266,17 @@ impl NotePanel {
         // 标题：优先使用 title 字段
         let title = note.title.clone().unwrap_or_else(|| {
             // 如果没有 title，从 content 第一行提取
-            note.content.lines()
+            note.content
+                .lines()
                 .find(|line| !line.trim().is_empty())
                 .map(|line| line.trim().to_string())
                 .unwrap_or_else(|| "无标题".to_string())
         });
 
         // 预览：获取第二行非空内容作为预览
-        let preview = note.content.lines()
+        let preview = note
+            .content
+            .lines()
             .skip(1)
             .find(|line| !line.trim().is_empty())
             .map(|line| line.trim().to_string())
@@ -265,7 +290,11 @@ impl Render for NotePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         eprintln!("[NotePanel] Rendering {} notes", self.notes.len());
 
-        let sidebar_task_id = self.record_detail_sidebar.read(cx).current_record_id().map(|s| s.to_string());
+        let sidebar_task_id = self
+            .record_detail_sidebar
+            .read(cx)
+            .current_record_id()
+            .map(|s| s.to_string());
 
         div()
             .size_full()

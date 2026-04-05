@@ -27,3 +27,6 @@ hello_world_test
 
 # Claude IDE
 .claude/
+
+# Local agent instructions
+AGENTS.md

@@ -353,7 +353,7 @@ impl Render for RecordDetailSidebar {
                                                 let line_count = Self::estimate_line_count(&content);
                                                 let needs_scroll = line_count > 6 && !content_expanded;
                                                 let is_expanded = content_expanded;
-                                                
+
                                                 el.child(
                                                     div()
                                                         .on_mouse_down(

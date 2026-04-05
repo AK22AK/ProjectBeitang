@@ -9,10 +9,10 @@ impl Notifier {
 
         let mut n = notify_rust::Notification::new();
         n.summary(title)
-         .body(&body)
-         .appname("Beitang")
-         .timeout(notify_rust::Timeout::Milliseconds(10000));
-         
+            .body(&body)
+            .appname("Beitang")
+            .timeout(notify_rust::Timeout::Milliseconds(10000));
+
         #[cfg(target_os = "macos")]
         n.sound_name("Ping");
 

@@ -1,16 +1,16 @@
 use crate::db::Database;
 use crate::models::{Person, Record, Tag};
-use async_channel::{Receiver, Sender, unbounded};
+use async_channel::{unbounded, Receiver, Sender};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct DashboardData {
-    pub in_progress: Vec<Record>,      // 进行中任务
-    pub pending_tasks: Vec<Record>,    // 待办任务（按四象限排序）
-    pub recent_records: Vec<Record>,   // 最近记录（用于回顾）
-    pub total_pending: usize,          // 待办总数
-    pub total_in_progress: usize,      // 进行中总数
-    pub total_completed_today: usize,  // 今日完成数
+    pub in_progress: Vec<Record>,     // 进行中任务
+    pub pending_tasks: Vec<Record>,   // 待办任务（按四象限排序）
+    pub recent_records: Vec<Record>,  // 最近记录（用于回顾）
+    pub total_pending: usize,         // 待办总数
+    pub total_in_progress: usize,     // 进行中总数
+    pub total_completed_today: usize, // 今日完成数
 }
 
 #[derive(Clone)]
@@ -102,10 +102,7 @@ pub struct StoreRuntime {
 
 impl StoreRuntime {
     pub fn new(receiver: Receiver<StoreCommand>) -> Self {
-        Self {
-            receiver,
-            db: None,
-        }
+        Self { receiver, db: None }
     }
 
     pub async fn run(&mut self, db_path: PathBuf) {
@@ -125,35 +122,33 @@ impl StoreRuntime {
         let db_path_clone = db_path.clone();
         if let Some(db_clone) = Database::new(&db_path_clone).ok() {
             eprintln!("[Store] Background reminder thread started");
-            std::thread::spawn(move || {
-                loop {
-                    match db_clone.get_pending_reminders() {
-                        Ok(records) => {
-                            if !records.is_empty() {
-                                eprintln!("[Store] Found {} pending reminders", records.len());
-                            }
-                            for mut record in records {
-                                eprintln!("[Store] Processing reminder for task: {}", record.id);
-                                match crate::notifier::Notifier::send_reminder(&record) {
-                                    Ok(_) => {
-                                        eprintln!("[Store] Notification sent successfully");
-                                        record.notified_at = Some(chrono::Utc::now());
-                                        if let Err(e) = db_clone.create_record(&record) {
-                                            eprintln!("[Store] Failed to update notified_at: {}", e);
-                                        }
+            std::thread::spawn(move || loop {
+                match db_clone.get_pending_reminders() {
+                    Ok(records) => {
+                        if !records.is_empty() {
+                            eprintln!("[Store] Found {} pending reminders", records.len());
+                        }
+                        for mut record in records {
+                            eprintln!("[Store] Processing reminder for task: {}", record.id);
+                            match crate::notifier::Notifier::send_reminder(&record) {
+                                Ok(_) => {
+                                    eprintln!("[Store] Notification sent successfully");
+                                    record.notified_at = Some(chrono::Utc::now());
+                                    if let Err(e) = db_clone.create_record(&record) {
+                                        eprintln!("[Store] Failed to update notified_at: {}", e);
                                     }
-                                    Err(e) => {
-                                        eprintln!("[Store] Failed to send notification: {}", e);
-                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Store] Failed to send notification: {}", e);
                                 }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("[Store] get_pending_reminders failed: {}", e);
-                        }
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    Err(e) => {
+                        eprintln!("[Store] get_pending_reminders failed: {}", e);
+                    }
                 }
+                std::thread::sleep(std::time::Duration::from_secs(10));
             });
         } else {
             eprintln!("[Store] Failed to open background DB connection");
@@ -185,7 +180,11 @@ impl StoreRuntime {
                     let result = self.handle_delete_record(id).await;
                     let _ = respond_to.send(result).await;
                 }
-                StoreCommand::GetTimeline { limit, offset, respond_to } => {
+                StoreCommand::GetTimeline {
+                    limit,
+                    offset,
+                    respond_to,
+                } => {
                     let result = self.handle_get_timeline(limit, offset).await;
                     let _ = respond_to.send(result).await;
                 }
@@ -205,7 +204,11 @@ impl StoreRuntime {
                     let result = self.handle_complete_task(id).await;
                     let _ = respond_to.send(result).await;
                 }
-                StoreCommand::CancelTask { id, reason, respond_to } => {
+                StoreCommand::CancelTask {
+                    id,
+                    reason,
+                    respond_to,
+                } => {
                     let result = self.handle_cancel_task(id, reason).await;
                     let _ = respond_to.send(result).await;
                 }
@@ -217,7 +220,11 @@ impl StoreRuntime {
                     let result = self.handle_create_tag(name).await;
                     let _ = respond_to.send(result).await;
                 }
-                StoreCommand::AddTagToRecord { record_id, tag_id, respond_to } => {
+                StoreCommand::AddTagToRecord {
+                    record_id,
+                    tag_id,
+                    respond_to,
+                } => {
                     let result = self.handle_add_tag_to_record(record_id, tag_id).await;
                     let _ = respond_to.send(result).await;
                 }
@@ -229,7 +236,11 @@ impl StoreRuntime {
                     let result = self.handle_create_person(name).await;
                     let _ = respond_to.send(result).await;
                 }
-                StoreCommand::AddPersonToRecord { record_id, person_id, respond_to } => {
+                StoreCommand::AddPersonToRecord {
+                    record_id,
+                    person_id,
+                    respond_to,
+                } => {
                     let result = self.handle_add_person_to_record(record_id, person_id).await;
                     let _ = respond_to.send(result).await;
                 }
@@ -311,8 +322,15 @@ impl StoreRuntime {
         }
     }
 
-    async fn handle_get_timeline(&self, limit: usize, offset: usize) -> Result<Vec<Record>, String> {
-        eprintln!("[Store] handle_get_timeline called with limit={}, offset={}", limit, offset);
+    async fn handle_get_timeline(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Record>, String> {
+        eprintln!(
+            "[Store] handle_get_timeline called with limit={}, offset={}",
+            limit, offset
+        );
         match &self.db {
             Some(db) => match db.get_timeline(limit as i64, offset as i64) {
                 Ok(records) => {
@@ -323,13 +341,16 @@ impl StoreRuntime {
                     eprintln!("[Store] Timeline query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
-            }
+            },
             None => Err("Database not initialized".to_string()),
         }
     }
 
     async fn handle_search_records(&self, query: String) -> Result<Vec<Record>, String> {
-        eprintln!("[Store] handle_search_records called with query='{}'", query);
+        eprintln!(
+            "[Store] handle_search_records called with query='{}'",
+            query
+        );
         match &self.db {
             Some(db) => match db.search_records(&query) {
                 Ok(records) => {
@@ -340,7 +361,7 @@ impl StoreRuntime {
                     eprintln!("[Store] Search query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
-            }
+            },
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -354,13 +375,25 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
-                let in_progress: Vec<Record> = tasks.iter()
-                    .filter(|t| t.status.as_ref().map(|s| matches!(s, crate::models::TaskStatus::InProgress)).unwrap_or(false))
+                let in_progress: Vec<Record> = tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status
+                            .as_ref()
+                            .map(|s| matches!(s, crate::models::TaskStatus::InProgress))
+                            .unwrap_or(false)
+                    })
                     .cloned()
                     .collect();
 
-                let pending_tasks: Vec<Record> = tasks.iter()
-                    .filter(|t| t.status.as_ref().map(|s| matches!(s, crate::models::TaskStatus::Todo)).unwrap_or(false))
+                let pending_tasks: Vec<Record> = tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status
+                            .as_ref()
+                            .map(|s| matches!(s, crate::models::TaskStatus::Todo))
+                            .unwrap_or(false)
+                    })
                     .cloned()
                     .collect();
 
@@ -369,12 +402,15 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
-                let total_completed_today = tasks.iter()
+                let total_completed_today = tasks
+                    .iter()
                     .filter(|t| {
-                        t.completed_at.map(|dt| {
-                            let today = chrono::Local::now().date_naive();
-                            dt.with_timezone(&chrono::Local).date_naive() == today
-                        }).unwrap_or(false)
+                        t.completed_at
+                            .map(|dt| {
+                                let today = chrono::Local::now().date_naive();
+                                dt.with_timezone(&chrono::Local).date_naive() == today
+                            })
+                            .unwrap_or(false)
                     })
                     .count();
 
@@ -400,10 +436,11 @@ impl StoreRuntime {
                     Ok(None) => return Err("Task not found".to_string()),
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
-                
+
                 record.status = Some(crate::models::TaskStatus::InProgress);
                 record.updated_at = chrono::Utc::now();
-                db.create_record(&record).map_err(|e| format!("Database error: {}", e))
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
             }
             None => Err("Database not initialized".to_string()),
         }
@@ -419,7 +456,11 @@ impl StoreRuntime {
         }
     }
 
-    async fn handle_cancel_task(&self, id: uuid::Uuid, reason: Option<String>) -> Result<(), String> {
+    async fn handle_cancel_task(
+        &self,
+        id: uuid::Uuid,
+        reason: Option<String>,
+    ) -> Result<(), String> {
         eprintln!("[Store] handle_cancel_task called for id: {}", id);
         match &self.db {
             Some(db) => {
@@ -428,11 +469,12 @@ impl StoreRuntime {
                     Ok(None) => return Err("Task not found".to_string()),
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
-                
+
                 record.status = Some(crate::models::TaskStatus::Cancelled);
                 record.cancelled_reason = reason;
                 record.updated_at = chrono::Utc::now();
-                db.create_record(&record).map_err(|e| format!("Database error: {}", e))
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
             }
             None => Err("Database not initialized".to_string()),
         }
@@ -450,7 +492,7 @@ impl StoreRuntime {
                     eprintln!("[Store] Get tags query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
-            }
+            },
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -467,13 +509,20 @@ impl StoreRuntime {
                     eprintln!("[Store] Create tag failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
-            }
+            },
             None => Err("Database not initialized".to_string()),
         }
     }
 
-    async fn handle_add_tag_to_record(&self, record_id: uuid::Uuid, tag_id: i64) -> Result<(), String> {
-        eprintln!("[Store] handle_add_tag_to_record called for record_id: {}, tag_id: {}", record_id, tag_id);
+    async fn handle_add_tag_to_record(
+        &self,
+        record_id: uuid::Uuid,
+        tag_id: i64,
+    ) -> Result<(), String> {
+        eprintln!(
+            "[Store] handle_add_tag_to_record called for record_id: {}, tag_id: {}",
+            record_id, tag_id
+        );
         match &self.db {
             Some(db) => db
                 .add_tag_to_record(record_id, tag_id)
@@ -494,7 +543,7 @@ impl StoreRuntime {
                     eprintln!("[Store] Get persons query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
-            }
+            },
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -511,13 +560,20 @@ impl StoreRuntime {
                     eprintln!("[Store] Create person failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
-            }
+            },
             None => Err("Database not initialized".to_string()),
         }
     }
 
-    async fn handle_add_person_to_record(&self, record_id: uuid::Uuid, person_id: i64) -> Result<(), String> {
-        eprintln!("[Store] handle_add_person_to_record called for record_id: {}, person_id: {}", record_id, person_id);
+    async fn handle_add_person_to_record(
+        &self,
+        record_id: uuid::Uuid,
+        person_id: i64,
+    ) -> Result<(), String> {
+        eprintln!(
+            "[Store] handle_add_person_to_record called for record_id: {}, person_id: {}",
+            record_id, person_id
+        );
         match &self.db {
             Some(db) => db
                 .add_person_to_record(record_id, person_id)
@@ -546,7 +602,10 @@ impl Store {
             })
             .await;
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
-        eprintln!("[Store] get_tasks returning: {:?} records", result.as_ref().map(|v| v.len()));
+        eprintln!(
+            "[Store] get_tasks returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
         result
     }
 
@@ -582,7 +641,10 @@ impl Store {
             .send(StoreCommand::GetNotes { respond_to: tx })
             .await;
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
-        eprintln!("[Store] get_notes returning: {:?} records", result.as_ref().map(|v| v.len()));
+        eprintln!(
+            "[Store] get_notes returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
         result
     }
 
@@ -597,14 +659,24 @@ impl Store {
     }
 
     pub async fn get_timeline(&self, limit: usize, offset: usize) -> Result<Vec<Record>, String> {
-        eprintln!("[Store] get_timeline called with limit={}, offset={}", limit, offset);
+        eprintln!(
+            "[Store] get_timeline called with limit={}, offset={}",
+            limit, offset
+        );
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::GetTimeline { limit, offset, respond_to: tx })
+            .send(StoreCommand::GetTimeline {
+                limit,
+                offset,
+                respond_to: tx,
+            })
             .await;
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
-        eprintln!("[Store] get_timeline returning: {:?} records", result.as_ref().map(|v| v.len()));
+        eprintln!(
+            "[Store] get_timeline returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
         result
     }
 
@@ -613,10 +685,16 @@ impl Store {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::SearchRecords { query: query.to_string(), respond_to: tx })
+            .send(StoreCommand::SearchRecords {
+                query: query.to_string(),
+                respond_to: tx,
+            })
             .await;
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
-        eprintln!("[Store] search_records returning: {:?} records", result.as_ref().map(|v| v.len()));
+        eprintln!(
+            "[Store] search_records returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
         result
     }
 
@@ -627,7 +705,9 @@ impl Store {
             .sender
             .send(StoreCommand::GetDashboard { respond_to: tx })
             .await;
-        rx.recv().await.unwrap_or_else(|_| Err("Failed to get dashboard".to_string()))
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get dashboard".to_string()))
     }
 
     pub async fn start_task(&self, id: uuid::Uuid) -> Result<(), String> {
@@ -655,7 +735,11 @@ impl Store {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::CancelTask { id, reason, respond_to: tx })
+            .send(StoreCommand::CancelTask {
+                id,
+                reason,
+                respond_to: tx,
+            })
             .await;
         rx.recv().await.unwrap_or(Ok(()))
     }
@@ -668,7 +752,10 @@ impl Store {
             .send(StoreCommand::GetAllTags { respond_to: tx })
             .await;
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
-        eprintln!("[Store] get_all_tags returning: {:?} tags", result.as_ref().map(|v| v.len()));
+        eprintln!(
+            "[Store] get_all_tags returning: {:?} tags",
+            result.as_ref().map(|v| v.len())
+        );
         result
     }
 
@@ -677,17 +764,33 @@ impl Store {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::CreateTag { name: name.to_string(), respond_to: tx })
+            .send(StoreCommand::CreateTag {
+                name: name.to_string(),
+                respond_to: tx,
+            })
             .await;
-        rx.recv().await.unwrap_or_else(|_| Err("Failed to create tag".to_string()))
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to create tag".to_string()))
     }
 
-    pub async fn add_tag_to_record(&self, record_id: uuid::Uuid, tag_id: i64) -> Result<(), String> {
-        eprintln!("[Store] add_tag_to_record called for record_id: {}, tag_id: {}", record_id, tag_id);
+    pub async fn add_tag_to_record(
+        &self,
+        record_id: uuid::Uuid,
+        tag_id: i64,
+    ) -> Result<(), String> {
+        eprintln!(
+            "[Store] add_tag_to_record called for record_id: {}, tag_id: {}",
+            record_id, tag_id
+        );
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::AddTagToRecord { record_id, tag_id, respond_to: tx })
+            .send(StoreCommand::AddTagToRecord {
+                record_id,
+                tag_id,
+                respond_to: tx,
+            })
             .await;
         rx.recv().await.unwrap_or(Ok(()))
     }
@@ -700,7 +803,10 @@ impl Store {
             .send(StoreCommand::GetAllPersons { respond_to: tx })
             .await;
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
-        eprintln!("[Store] get_all_persons returning: {:?} persons", result.as_ref().map(|v| v.len()));
+        eprintln!(
+            "[Store] get_all_persons returning: {:?} persons",
+            result.as_ref().map(|v| v.len())
+        );
         result
     }
 
@@ -709,17 +815,33 @@ impl Store {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::CreatePerson { name: name.to_string(), respond_to: tx })
+            .send(StoreCommand::CreatePerson {
+                name: name.to_string(),
+                respond_to: tx,
+            })
             .await;
-        rx.recv().await.unwrap_or_else(|_| Err("Failed to create person".to_string()))
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to create person".to_string()))
     }
 
-    pub async fn add_person_to_record(&self, record_id: uuid::Uuid, person_id: i64) -> Result<(), String> {
-        eprintln!("[Store] add_person_to_record called for record_id: {}, person_id: {}", record_id, person_id);
+    pub async fn add_person_to_record(
+        &self,
+        record_id: uuid::Uuid,
+        person_id: i64,
+    ) -> Result<(), String> {
+        eprintln!(
+            "[Store] add_person_to_record called for record_id: {}, person_id: {}",
+            record_id, person_id
+        );
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
-            .send(StoreCommand::AddPersonToRecord { record_id, person_id, respond_to: tx })
+            .send(StoreCommand::AddPersonToRecord {
+                record_id,
+                person_id,
+                respond_to: tx,
+            })
             .await;
         rx.recv().await.unwrap_or(Ok(()))
     }
