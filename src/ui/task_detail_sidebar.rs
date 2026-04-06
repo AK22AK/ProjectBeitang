@@ -30,6 +30,7 @@ pub struct TaskDetailSidebar {
     content_input: Option<Entity<InputState>>,
     content_expanded: bool,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
+    on_delete: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
 }
 
@@ -76,6 +77,7 @@ impl TaskDetailSidebar {
             content_input: None,
             content_expanded: false,
             on_save: None,
+            on_delete: None,
             on_close: None,
         }
     }
@@ -85,6 +87,13 @@ impl TaskDetailSidebar {
         F: Fn(SavePayload, &mut Context<Self>) + Send + Sync + 'static,
     {
         self.on_save = Some(Box::new(callback));
+    }
+
+    pub fn on_delete<F>(&mut self, callback: F)
+    where
+        F: Fn(String, &mut Context<Self>) + Send + Sync + 'static,
+    {
+        self.on_delete = Some(Box::new(callback));
     }
 
     pub fn on_close<F>(&mut self, callback: F)
@@ -231,6 +240,10 @@ impl TaskDetailSidebar {
 
     /// 关闭侧边栏
     pub fn close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss(cx);
+    }
+
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.current_task_id = None;
         cx.notify();
     }
@@ -920,12 +933,41 @@ impl Render for TaskDetailSidebar {
                             .border_color(rgb(0xe8e8e8))
                             .cursor_default()
                             .child(
-                                Button::new("sidebar-save-detail")
-                                    .w_full()
-                                    .child("保存修改")
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.save_changes(window, cx);
-                                    })),
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div().flex_1().child(
+                                            Button::new("task-sidebar-delete-detail")
+                                                .w_full()
+                                                .child("删除")
+                                                .text_color(rgb(0xff4d4f))
+                                                .on_click(cx.listener(
+                                                    |this, _event, _window, cx| {
+                                                        if let Some(ref task_id) =
+                                                            this.current_task_id
+                                                        {
+                                                            if let Some(ref callback) =
+                                                                this.on_delete
+                                                            {
+                                                                callback(task_id.clone(), cx);
+                                                            }
+                                                        }
+                                                    },
+                                                )),
+                                        ),
+                                    )
+                                    .child(
+                                        div().flex_1().child(
+                                            Button::new("sidebar-save-detail")
+                                                .w_full()
+                                                .child("保存修改")
+                                                .on_click(cx.listener(
+                                                    |this, _event, window, cx| {
+                                                        this.save_changes(window, cx);
+                                                    },
+                                                )),
+                                        ),
+                                    ),
                             ),
                     ),
             )

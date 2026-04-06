@@ -132,6 +132,13 @@ impl PriorityFilter {
     }
 }
 
+#[derive(Clone)]
+struct PendingDeletion {
+    id: Uuid,
+    record_label: &'static str,
+    display_title: String,
+}
+
 pub struct TaskPanel {
     store: Store,
     tasks: Vec<Record>,
@@ -158,6 +165,7 @@ pub struct TaskPanel {
     selected_tags: HashSet<String>,
     available_tags: Vec<String>,
     tag_filter_mode: TagFilterMode,
+    pending_deletion: Option<PendingDeletion>,
     task_detail_sidebar: Entity<TaskDetailSidebar>,
 }
 
@@ -215,6 +223,7 @@ impl TaskPanel {
             selected_tags: HashSet::new(),
             available_tags: Vec::new(),
             tag_filter_mode: TagFilterMode::And,
+            pending_deletion: None,
             task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
         };
 
@@ -224,6 +233,16 @@ impl TaskPanel {
                 handle.update(cx, |panel, cx| {
                     panel.handle_sidebar_save(&payload, cx);
                 });
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_delete(move |task_id, cx| {
+                if let Ok(task_id) = Uuid::parse_str(&task_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.request_delete_task(task_id, cx);
+                    });
+                }
             });
         });
         let handle = cx.entity().clone();
@@ -380,6 +399,19 @@ impl TaskPanel {
             sidebar.show_task(task, window, cx);
         });
         self.sync_matrix_layout_mode(window, cx, true);
+    }
+
+    fn task_display_name(task: &Record) -> String {
+        task.title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| {
+                task.content
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(|line| line.trim().to_string())
+            })
+            .unwrap_or_else(|| "无标题任务".to_string())
     }
 
     fn handle_sidebar_close(&mut self, cx: &mut Context<Self>) {
@@ -827,13 +859,49 @@ impl TaskPanel {
         }
     }
 
-    fn delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+    fn request_delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(task) = self.tasks.iter().find(|t| t.id == task_id) {
+            self.context_menu_task_id = None;
+            self.context_menu_position = None;
+            self.pending_deletion = Some(PendingDeletion {
+                id: task_id,
+                record_label: "任务",
+                display_title: Self::task_display_name(task),
+            });
+            cx.notify();
+        }
+    }
+
+    fn cancel_delete_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.pending_deletion = None;
+        cx.notify();
+    }
+
+    fn confirm_delete_task(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_deletion.clone() else {
+            return;
+        };
+
+        self.perform_delete_task(pending.id, cx);
+    }
+
+    fn perform_delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
         let store = self.store.clone();
+        let task_id_string = task_id.to_string();
 
         cx.spawn(
             async move |view, cx| match store.delete_record(task_id).await {
                 Ok(_) => {
                     view.update(cx, |panel, cx| {
+                        panel.pending_deletion = None;
+                        if panel.task_detail_sidebar.read(cx).current_task_id()
+                            == Some(task_id_string.as_str())
+                        {
+                            panel.task_detail_sidebar.update(cx, |sidebar, cx| {
+                                sidebar.dismiss(cx);
+                            });
+                            panel.handle_sidebar_close(cx);
+                        }
                         panel.load_tasks(cx);
                     })
                     .ok();
@@ -842,6 +910,77 @@ impl TaskPanel {
             },
         )
         .detach();
+    }
+
+    fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pending = self.pending_deletion.as_ref()?;
+        let title = pending.display_title.clone();
+        let record_label = pending.record_label;
+
+        Some(
+            div()
+                .id("task-delete-confirm-overlay")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0xf5f5f5))
+                .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div()
+                        .w(px(360.0))
+                        .max_w(px(360.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .cursor_default()
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("删除{}", record_label)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x666666))
+                                .child(format!("确认删除“{}”？删除后无法恢复。", title)),
+                        )
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new("task-delete-confirm-cancel")
+                                        .child("取消")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.cancel_delete_confirmation(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("task-delete-confirm-submit")
+                                        .child("确认删除")
+                                        .text_color(rgb(0xff4d4f))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.confirm_delete_task(cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_custom_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1379,6 +1518,21 @@ impl TaskPanel {
                                 )
                             })
                     )
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .text_color(rgb(0x888888))
+                            .hover(|style| style.text_color(rgb(0xff4d4f)))
+                            .child("×")
+                            .id(("task-delete", idx))
+                            .on_click(cx.listener(
+                                move |this, _event: &ClickEvent, _window, cx| {
+                                    this.request_delete_task(task_id, cx);
+                                    cx.stop_propagation();
+                                },
+                            )),
+                    )
             )
     }
 
@@ -1723,6 +1877,25 @@ impl Render for TaskPanel {
             .flex()
             .flex_row()
             .relative()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.pending_deletion.is_none() {
+                    return;
+                }
+
+                match event.keystroke.key.as_str() {
+                    "enter" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.confirm_delete_task(cx);
+                    }
+                    "escape" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.cancel_delete_confirmation(cx);
+                    }
+                    _ => {}
+                }
+            }))
             .on_action(
                 cx.listener(|this, _action: &SetReminderAction, window, cx| {
                     if let Some(task_id) = this.context_menu_task_id {
@@ -1785,7 +1958,7 @@ impl Render for TaskPanel {
             .on_action(
                 cx.listener(|this, _action: &DeleteTaskAction, _window, cx| {
                     if let Some(task_id) = this.context_menu_task_id {
-                        this.delete_task(task_id, cx);
+                        this.request_delete_task(task_id, cx);
                     }
                 }),
             )
@@ -1978,5 +2151,6 @@ impl Render for TaskPanel {
                     .children(self.render_custom_context_menu(cx)),
             )
             .child(self.task_detail_sidebar.clone())
+            .children(self.render_delete_confirmation(cx))
     }
 }

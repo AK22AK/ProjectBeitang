@@ -9,6 +9,13 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
+#[derive(Clone)]
+struct PendingDeletion {
+    id: Uuid,
+    record_label: &'static str,
+    display_title: String,
+}
+
 pub struct NotePanel {
     store: Store,
     notes: Vec<Record>,
@@ -18,6 +25,7 @@ pub struct NotePanel {
     edit_input_state: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
     _window_activation_subscription: Subscription,
+    pending_deletion: Option<PendingDeletion>,
     record_detail_sidebar: Entity<RecordDetailSidebar>,
 }
 
@@ -54,6 +62,7 @@ impl NotePanel {
                     }
                 },
             ),
+            pending_deletion: None,
             record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(window, cx)),
         };
 
@@ -63,6 +72,16 @@ impl NotePanel {
                 handle.update(cx, |panel, cx| {
                     panel.handle_sidebar_save(&payload, cx);
                 });
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.record_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_delete(move |record_id, cx| {
+                if let Ok(record_id) = Uuid::parse_str(&record_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.request_delete_note(record_id, cx);
+                    });
+                }
             });
         });
 
@@ -245,11 +264,55 @@ impl NotePanel {
     }
 
     fn delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
+        self.perform_delete_note(note_id, false, cx);
+    }
+
+    fn request_delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(note) = self.notes.iter().find(|n| n.id == note_id) {
+            self.pending_deletion = Some(PendingDeletion {
+                id: note_id,
+                record_label: "记录",
+                display_title: Self::get_note_display(note).0,
+            });
+            cx.notify();
+        }
+    }
+
+    fn cancel_delete_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.pending_deletion = None;
+        cx.notify();
+    }
+
+    fn confirm_delete_note(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_deletion.clone() else {
+            return;
+        };
+
+        self.perform_delete_note(pending.id, true, cx);
+    }
+
+    fn perform_delete_note(
+        &mut self,
+        note_id: Uuid,
+        clear_confirmation: bool,
+        cx: &mut Context<Self>,
+    ) {
         let store = self.store.clone();
+        let note_id_string = note_id.to_string();
         cx.spawn(
             async move |view, cx| match store.delete_record(note_id).await {
                 Ok(_) => {
                     view.update(cx, |panel, cx| {
+                        if clear_confirmation {
+                            panel.pending_deletion = None;
+                        }
+                        if panel.record_detail_sidebar.read(cx).current_record_id()
+                            == Some(note_id_string.as_str())
+                        {
+                            panel.record_detail_sidebar.update(cx, |sidebar, cx| {
+                                sidebar.dismiss(cx);
+                            });
+                        }
                         panel.load_notes(cx);
                     })
                     .ok();
@@ -284,6 +347,84 @@ impl NotePanel {
 
         (title, preview)
     }
+
+    fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pending = self.pending_deletion.as_ref()?;
+        let title = pending.display_title.clone();
+        let record_label = pending.record_label;
+
+        Some(
+            div()
+                .id("note-delete-confirm-overlay")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0xf5f5f5))
+                .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div()
+                        .w(px(360.0))
+                        .max_w(px(360.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .cursor_default()
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("删除{}", record_label)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x666666))
+                                .child(format!("确认删除“{}”？删除后无法恢复。", title)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x999999))
+                                .child("按 Enter 确认，按 Esc 取消"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new("note-delete-confirm-cancel")
+                                        .child("取消")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.cancel_delete_confirmation(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("note-delete-confirm-submit")
+                                        .child("确认删除")
+                                        .text_color(rgb(0xff4d4f))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.confirm_delete_note(cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for NotePanel {
@@ -301,6 +442,25 @@ impl Render for NotePanel {
             .flex()
             .flex_row()
             .relative()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.pending_deletion.is_none() {
+                    return;
+                }
+
+                match event.keystroke.key.as_str() {
+                    "enter" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.confirm_delete_note(cx);
+                    }
+                    "escape" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.cancel_delete_confirmation(cx);
+                    }
+                    _ => {}
+                }
+            }))
             .child(
                 div()
                     .id("note-panel-main")
@@ -526,5 +686,6 @@ impl Render for NotePanel {
                     )
             )
             .child(self.record_detail_sidebar.clone())
+            .children(self.render_delete_confirmation(cx))
     }
 }
