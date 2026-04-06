@@ -1383,6 +1383,7 @@ impl TaskPanel {
         div()
             .id(("task-card", idx))
             .w_full()
+            .min_w(px(0.0))
             .p(px(if compact { 8.0 } else { 12.0 }))
             .rounded(px(6.0))
             .bg(if is_selected {
@@ -1410,6 +1411,7 @@ impl TaskPanel {
             .child(
                 h_flex()
                     .w_full()
+                    .min_w(px(0.0))
                     .gap(px(8.0))
                     .items_start()
                     .child(
@@ -1423,9 +1425,12 @@ impl TaskPanel {
                             }))
                     )
                     .child(
-                        v_flex()
+                        h_flex()
                             .flex_1()
-                            .gap(px(if compact { 3.0 } else { 6.0 }))
+                            .min_w(px(0.0))
+                            .gap(px(8.0))
+                            .items_start()
+                            .overflow_hidden()
                             .child({
                                 let is_editing = self.editing_task_id == Some(task_id);
                                 let title_element = if is_editing {
@@ -1500,8 +1505,11 @@ impl TaskPanel {
 
                                     div()
                                         .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
                                         .child(
                                             Input::new(&input_state)
+                                                .flex_1()
                                                 .appearance(false)
                                                 .focus_bordered(false)
                                                 .text_size(px(14.0))
@@ -1515,6 +1523,8 @@ impl TaskPanel {
                                 } else {
                                     div()
                                         .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(if is_completed {
@@ -1528,11 +1538,16 @@ impl TaskPanel {
 
                                 v_flex()
                                     .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
                                     .gap(px(4.0))
                                     .child(
                                         h_flex()
+                                            .w_full()
+                                            .min_w(px(0.0))
                                             .gap(px(4.0))
                                             .items_center()
+                                            .overflow_hidden()
                                             .when(!priority_marker.is_empty(), |el| {
                                                 el.child(
                                                     div()
@@ -1547,6 +1562,7 @@ impl TaskPanel {
                                     .when(has_content_preview && !compact, |el| {
                                         el.child(
                                             div()
+                                                .min_w(px(0.0))
                                                 .text_sm()
                                                 .text_color(rgb(0x888888))
                                                 .line_height(relative(1.35))
@@ -1558,6 +1574,7 @@ impl TaskPanel {
                                 el.child(
                                     div()
                                         .flex()
+                                        .min_w(px(0.0))
                                         .gap(px(8.0))
                                         .flex_wrap()
                                         .text_xs()
@@ -1577,6 +1594,7 @@ impl TaskPanel {
                             .when(!task.tags.is_empty(), |el| {
                                 el.child(
                                     h_flex()
+                                        .min_w(px(0.0))
                                         .gap(px(6.0))
                                         .flex_wrap()
                                         .children(task.tags.iter().enumerate().map(|(idx, tag)| {
@@ -1595,6 +1613,7 @@ impl TaskPanel {
                             .when(!task.persons.is_empty(), |el| {
                                 el.child(
                                     h_flex()
+                                        .min_w(px(0.0))
                                         .gap(px(6.0))
                                         .flex_wrap()
                                         .children(task.persons.iter().enumerate().map(|(idx, person)| {
@@ -1610,21 +1629,27 @@ impl TaskPanel {
                                         }))
                                 )
                             })
-                    )
-                    .child(
-                        div()
-                            .cursor_pointer()
-                            .px(px(4.0))
-                            .text_color(rgb(0x888888))
-                            .hover(|style| style.text_color(rgb(0xff4d4f)))
-                            .child("×")
-                            .id(("task-delete", idx))
-                            .on_click(cx.listener(
-                                move |this, _event: &ClickEvent, _window, cx| {
-                                    this.request_delete_task(task_id, cx);
-                                    cx.stop_propagation();
-                                },
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .justify_end()
+                                    .child(
+                                        div()
+                                            .cursor_pointer()
+                                            .px(px(4.0))
+                                            .text_color(rgb(0x888888))
+                                            .hover(|style| style.text_color(rgb(0xff4d4f)))
+                                            .child("×")
+                                            .id(("task-delete", idx))
+                                            .on_click(cx.listener(
+                                                move |this, _event: &ClickEvent, _window, cx| {
+                                                    this.request_delete_task(task_id, cx);
+                                                    cx.stop_propagation();
+                                                },
+                                            )),
+                                    ),
+                            ),
                     )
             )
     }
@@ -1887,6 +1912,7 @@ impl TaskPanel {
         div()
             .id("task-list")
             .size_full()
+            .min_w(px(0.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -2064,6 +2090,7 @@ impl Render for TaskPanel {
                 div()
                     .id("task-panel-main")
                     .flex_1()
+                    .min_w(px(0.0))
                     .flex()
                     .flex_col()
                     .gap(px(16.0))
@@ -2092,11 +2119,15 @@ impl Render for TaskPanel {
                     )
                     .child(
                         div()
+                            .w_full()
                             .flex()
+                            .items_center()
                             .gap(px(8.0))
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
                                     .on_key_down(cx.listener(
                                         |this, event: &KeyDownEvent, window, cx| {
                                             if event.keystroke.key == "enter" {
@@ -2104,7 +2135,7 @@ impl Render for TaskPanel {
                                             }
                                         },
                                     ))
-                                    .child(Input::new(&self.input_state)),
+                                    .child(Input::new(&self.input_state).flex_1()),
                             )
                             .child(Button::new("add-btn").child("添加").on_click(cx.listener(
                                 |this, _event: &ClickEvent, window, cx| {
@@ -2238,6 +2269,7 @@ impl Render for TaskPanel {
                         div()
                             .id("task-view-container")
                             .flex_1()
+                            .min_w(px(0.0))
                             .overflow_hidden()
                             .child(match self.current_view {
                                 TaskView::List => {
