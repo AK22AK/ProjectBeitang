@@ -1,3 +1,6 @@
+use beitang::app_shortcuts::{
+    app_shortcut_entries, main_panel_shortcuts, SEARCH_KEYSTROKE, SETTINGS_KEYSTROKE,
+};
 use beitang::config::ShortcutConfig;
 use beitang::store::{create_store, Store};
 use beitang::ui::dashboard::Dashboard;
@@ -24,9 +27,12 @@ const MAIN_SIDEBAR_WIDTH: Pixels = px(200.0);
 const SETTINGS_NAV_BREAKPOINT: Pixels = px(600.0);
 const SETTINGS_SIDEBAR_NAV_WIDTH: Pixels = px(180.0);
 
+actions!(app_menu, [OpenSearch, OpenSettings, QuitApp]);
+
 #[derive(Clone)]
 struct MainWindowController {
     handle: Option<AnyWindowHandle>,
+    window_id: Option<WindowId>,
     current_panel: Panel,
 }
 
@@ -34,8 +40,22 @@ impl Default for MainWindowController {
     fn default() -> Self {
         Self {
             handle: None,
+            window_id: None,
             current_panel: Panel::Dashboard,
         }
+    }
+}
+
+impl MainWindowController {
+    fn track(&mut self, handle: AnyWindowHandle, panel: Panel) {
+        self.handle = Some(handle);
+        self.window_id = Some(handle.window_id());
+        self.current_panel = panel;
+    }
+
+    fn clear_handle(&mut self) {
+        self.handle = None;
+        self.window_id = None;
     }
 }
 
@@ -66,7 +86,7 @@ impl SettingsSection {
     fn description(self) -> &'static str {
         match self {
             Self::General => "应用级偏好、显示方式等通用设置将在这里集中管理。",
-            Self::Shortcuts => "当前先展示全局快捷键，后续再开放自定义编辑。",
+            Self::Shortcuts => "这里区分展示应用内快捷键和全局快捷键，避免混淆触发范围。",
             Self::About => "版本信息、更新说明和相关说明将在这里统一展示。",
         }
     }
@@ -86,6 +106,73 @@ enum SettingsLayoutMode {
     TopTabs,
 }
 
+fn install_app_shortcuts_and_menus(
+    cx: &mut App,
+    main_window: Rc<RefCell<MainWindowController>>,
+    store: Store,
+) {
+    cx.bind_keys([
+        KeyBinding::new(SEARCH_KEYSTROKE, OpenSearch, None),
+        KeyBinding::new(SETTINGS_KEYSTROKE, OpenSettings, None),
+    ]);
+
+    let main_window_for_search = main_window.clone();
+    let store_for_search = store.clone();
+    cx.on_action(move |_: &OpenSearch, cx| {
+        let main_window = main_window_for_search.clone();
+        let store = store_for_search.clone();
+        // Defer to avoid updating the active window while the action is being dispatched from it.
+        cx.defer(move |cx| {
+            ensure_main_window(cx, &main_window, &store, Some(Panel::Search));
+        });
+    });
+
+    let main_window_for_settings = main_window.clone();
+    let store_for_settings = store.clone();
+    cx.on_action(move |_: &OpenSettings, cx| {
+        let main_window = main_window_for_settings.clone();
+        let store = store_for_settings.clone();
+        // Defer to avoid updating the active window while the action is being dispatched from it.
+        cx.defer(move |cx| {
+            ensure_main_window(cx, &main_window, &store, Some(Panel::Settings));
+        });
+    });
+
+    cx.on_action(|_: &QuitApp, cx| cx.quit());
+
+    cx.set_menus(vec![
+        Menu {
+            name: "Beitang".into(),
+            items: vec![
+                MenuItem::os_submenu("服务", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("设置...", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("退出 Beitang", QuitApp),
+            ],
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("撤销", gpui_component::input::Undo, OsAction::Undo),
+                MenuItem::os_action("重做", gpui_component::input::Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("剪切", gpui_component::input::Cut, OsAction::Cut),
+                MenuItem::os_action("复制", gpui_component::input::Copy, OsAction::Copy),
+                MenuItem::os_action("粘贴", gpui_component::input::Paste, OsAction::Paste),
+                MenuItem::separator(),
+                MenuItem::os_action(
+                    "全选",
+                    gpui_component::input::SelectAll,
+                    OsAction::SelectAll,
+                ),
+                MenuItem::separator(),
+                MenuItem::action("搜索", OpenSearch),
+            ],
+        },
+    ]);
+}
+
 fn main() {
     let app = application().with_assets(Assets);
 
@@ -98,7 +185,7 @@ fn main() {
     let main_window_for_reopen = main_window.clone();
     let store_for_reopen = store.clone();
     app.on_reopen(move |cx| {
-        activate_main_window(cx, &main_window_for_reopen, &store_for_reopen, None);
+        ensure_main_window(cx, &main_window_for_reopen, &store_for_reopen, None);
     });
 
     let main_window_for_run = main_window.clone();
@@ -107,6 +194,12 @@ fn main() {
     app.run(move |cx| {
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
+        install_app_shortcuts_and_menus(cx, main_window_for_run.clone(), store_for_run.clone());
+        let main_window_for_closed = main_window_for_run.clone();
+        cx.on_window_closed(move |cx| {
+            sync_main_window_controller(cx, &main_window_for_closed);
+        })
+        .detach();
 
         cx.spawn(|_cx: &mut AsyncApp| async move {
             let data_dir = dirs::data_dir()
@@ -119,7 +212,7 @@ fn main() {
         })
         .detach();
 
-        activate_main_window(
+        ensure_main_window(
             cx,
             &main_window_for_run,
             &store_for_run,
@@ -172,21 +265,21 @@ fn main() {
                                                     quick_add_for_hotkey.clone(),
                                                 );
                                             } else if event.id == open_main.id() {
-                                                activate_main_window(
+                                                ensure_main_window(
                                                     cx,
                                                     &main_window_for_hotkey,
                                                     &store_for_hotkey,
                                                     None,
                                                 );
                                             } else if event.id == open_tasks.id() {
-                                                activate_main_window(
+                                                ensure_main_window(
                                                     cx,
                                                     &main_window_for_hotkey,
                                                     &store_for_hotkey,
                                                     Some(Panel::Tasks),
                                                 );
                                             } else if event.id == open_records.id() {
-                                                activate_main_window(
+                                                ensure_main_window(
                                                     cx,
                                                     &main_window_for_hotkey,
                                                     &store_for_hotkey,
@@ -264,13 +357,13 @@ fn open_quick_add_window(
         let main_window = main_window.clone();
         Arc::new(move |destination, cx| match destination {
             QuickAddDestination::Main => {
-                activate_main_window(cx, &main_window, &store, None);
+                ensure_main_window(cx, &main_window, &store, None);
             }
             QuickAddDestination::Tasks => {
-                activate_main_window(cx, &main_window, &store, Some(Panel::Tasks));
+                ensure_main_window(cx, &main_window, &store, Some(Panel::Tasks));
             }
             QuickAddDestination::Records => {
-                activate_main_window(cx, &main_window, &store, Some(Panel::Records));
+                ensure_main_window(cx, &main_window, &store, Some(Panel::Records));
             }
         })
     };
@@ -352,32 +445,101 @@ fn show_quick_add_hotkey_protection(
     }
 }
 
-fn activate_main_window(
+fn live_window_handles(cx: &App) -> Vec<AnyWindowHandle> {
+    cx.window_stack().unwrap_or_else(|| cx.windows())
+}
+
+fn sync_main_window_controller(cx: &mut App, controller: &Rc<RefCell<MainWindowController>>) {
+    let tracked_window_id = controller.borrow().window_id;
+    let Some(tracked_window_id) = tracked_window_id else {
+        return;
+    };
+
+    if let Some(handle) = live_window_handles(cx)
+        .into_iter()
+        .find(|handle| handle.window_id() == tracked_window_id)
+    {
+        controller.borrow_mut().handle = Some(handle);
+        return;
+    }
+
+    controller.borrow_mut().clear_handle();
+}
+
+fn is_main_window_handle(cx: &mut App, handle: AnyWindowHandle) -> bool {
+    handle
+        .update(cx, |root_view, _window, cx| {
+            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                root.update(cx, |root, _cx| {
+                    root.view().clone().downcast::<MainView>().is_ok()
+                })
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn resolve_main_window_handle(
+    cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
+) -> Option<AnyWindowHandle> {
+    sync_main_window_controller(cx, controller);
+
+    if let Some(handle) = controller.borrow().handle {
+        return Some(handle);
+    }
+
+    let current_panel = controller.borrow().current_panel;
+    for handle in live_window_handles(cx) {
+        if is_main_window_handle(cx, handle) {
+            controller.borrow_mut().track(handle, current_panel);
+            return Some(handle);
+        }
+    }
+
+    None
+}
+
+fn switch_existing_main_window(
+    cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
+    panel: Panel,
+) -> bool {
+    let Some(handle) = resolve_main_window_handle(cx, controller) else {
+        return false;
+    };
+
+    if handle
+        .update(cx, |root_view, window, cx| {
+            update_main_window(root_view, window, cx, panel)
+        })
+        .ok()
+        == Some(true)
+    {
+        controller.borrow_mut().track(handle, panel);
+        return true;
+    }
+
+    controller.borrow_mut().clear_handle();
+    false
+}
+
+fn ensure_main_window(
     cx: &mut App,
     controller: &Rc<RefCell<MainWindowController>>,
     store: &Store,
     target_panel: Option<Panel>,
 ) {
     let desired_panel = target_panel.unwrap_or_else(|| controller.borrow().current_panel);
-    let existing_handle = controller.borrow().handle;
 
-    if let Some(handle) = existing_handle {
-        if handle
-            .update(cx, |root_view, window, cx| {
-                update_main_window(root_view, window, cx, desired_panel);
-            })
-            .is_ok()
-        {
-            controller.borrow_mut().current_panel = desired_panel;
-            return;
-        }
+    if switch_existing_main_window(cx, controller, desired_panel) {
+        return;
     }
 
     match open_main_window(cx, store.clone(), controller.clone(), desired_panel) {
         Ok(handle) => {
-            let mut state = controller.borrow_mut();
-            state.handle = Some(handle);
-            state.current_panel = desired_panel;
+            controller.borrow_mut().track(handle, desired_panel);
         }
         Err(err) => {
             eprintln!("[MainWindow] Failed to open main window: {}", err);
@@ -385,15 +547,20 @@ fn activate_main_window(
     }
 }
 
-fn update_main_window(root_view: AnyView, window: &mut Window, cx: &mut App, panel: Panel) {
+fn update_main_window(root_view: AnyView, window: &mut Window, cx: &mut App, panel: Panel) -> bool {
+    let mut updated = false;
     if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
         root.update(cx, |root, cx| {
             if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
+                updated = true;
                 main_view.update(cx, |this, cx| this.switch_to_panel(panel, window, cx));
             }
         });
     }
-    window.activate_window();
+    if updated {
+        window.activate_window();
+    }
+    updated
 }
 
 fn open_main_window(
@@ -607,9 +774,13 @@ impl MainView {
     }
 
     fn render_shortcuts_settings(&self) -> impl IntoElement {
-        let shortcut_entries = self
+        let global_shortcut_entries = self
             .shortcut_config
             .entries()
+            .into_iter()
+            .map(|(label, shortcut)| (label.to_string(), shortcut.to_string()))
+            .collect::<Vec<_>>();
+        let app_shortcut_entries = app_shortcut_entries()
             .into_iter()
             .map(|(label, shortcut)| (label.to_string(), shortcut.to_string()))
             .collect::<Vec<_>>();
@@ -630,7 +801,49 @@ impl MainView {
                     .text_sm()
                     .text_color(rgb(0x8c8c8c))
                     .line_height(relative(1.5))
-                    .child("查看当前可用的全局快捷键。后续版本会在这里补充自定义编辑能力。"),
+                    .child("应用内快捷键由 macOS 菜单统一管理，全局快捷键继续用于跨应用唤起。"),
+            )
+            .child(self.render_shortcut_group(
+                "应用内快捷键",
+                "仅在 Beitang 前台时生效，并显示在系统菜单中。",
+                app_shortcut_entries,
+            ))
+            .child(self.render_shortcut_group(
+                "全局快捷键",
+                "即使应用未聚焦也可触发，后续版本会在这里补充自定义编辑能力。",
+                global_shortcut_entries,
+            ))
+    }
+
+    fn render_shortcut_group(
+        &self,
+        title: &'static str,
+        description: &'static str,
+        shortcut_entries: Vec<(String, String)>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x262626))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x8c8c8c))
+                            .line_height(relative(1.5))
+                            .child(description),
+                    ),
             )
             .child(div().flex().flex_col().gap(px(10.0)).children(
                 shortcut_entries.into_iter().map(|(label, shortcut)| {
@@ -785,14 +998,16 @@ impl Render for MainView {
                     return;
                 }
 
-                match event.keystroke.key.as_str() {
-                    "0" => window.activate_window(),
-                    "1" => this.switch_to_panel(Panel::Dashboard, window, cx),
-                    "2" => this.switch_to_panel(Panel::Tasks, window, cx),
-                    "3" => this.switch_to_panel(Panel::Records, window, cx),
-                    "4" => this.switch_to_panel(Panel::Timeline, window, cx),
-                    "5" => this.switch_to_panel(Panel::Search, window, cx),
-                    _ => {}
+                if event.keystroke.key == "0" {
+                    window.activate_window();
+                    return;
+                }
+
+                if let Some((_, panel)) = main_panel_shortcuts()
+                    .into_iter()
+                    .find(|(key, _)| *key == event.keystroke.key.as_str())
+                {
+                    this.switch_to_panel(panel, window, cx);
                 }
             }))
             .child(

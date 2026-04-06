@@ -1,6 +1,8 @@
+use beitang::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
 use beitang::config::{parse_hotkey, ShortcutConfig};
 use beitang::models::{Priority, Record};
 use beitang::shortcut_manager::ShortcutEvent;
+use beitang::ui::sidebar::Panel;
 
 #[test]
 fn test_default_shortcut_config() {
@@ -31,6 +33,40 @@ fn test_parse_hotkey_rejects_invalid_shortcuts() {
     assert!(parse_hotkey("Cmd+Shift").is_err());
     assert!(parse_hotkey("Cmd+Shift+T+Y").is_err());
     assert!(parse_hotkey("Cmd+Space").is_err());
+}
+
+#[test]
+fn test_app_shortcut_entries_are_not_in_global_shortcut_config() {
+    let config_labels = ShortcutConfig::default()
+        .entries()
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect::<Vec<_>>();
+
+    assert!(!config_labels.contains(&"搜索"));
+    assert!(!config_labels.contains(&"设置"));
+    assert_eq!(
+        app_shortcut_entries(),
+        [("搜索", "Cmd+K"), ("设置", "Cmd+,")]
+    );
+}
+
+#[test]
+fn test_main_panel_shortcuts_exclude_bottom_sidebar_panels() {
+    assert_eq!(
+        main_panel_shortcuts(),
+        [
+            ("1", Panel::Dashboard),
+            ("2", Panel::Tasks),
+            ("3", Panel::Records),
+            ("4", Panel::Timeline),
+            ("5", Panel::AI),
+        ]
+    );
+
+    assert!(main_panel_shortcuts()
+        .into_iter()
+        .all(|(_, panel)| !matches!(panel, Panel::Search | Panel::Settings)));
 }
 
 #[test]
