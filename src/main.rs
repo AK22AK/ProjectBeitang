@@ -337,7 +337,7 @@ fn update_main_window(root_view: AnyView, window: &mut Window, cx: &mut App, pan
     if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
         root.update(cx, |root, cx| {
             if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
-                main_view.update(cx, |this, cx| this.switch_to_panel(panel, cx));
+                main_view.update(cx, |this, cx| this.switch_to_panel(panel, window, cx));
             }
         });
     }
@@ -412,7 +412,30 @@ impl MainView {
         }
     }
 
-    pub fn switch_to_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
+    fn focus_active_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        match panel {
+            Panel::Search => {
+                self.search_panel.update(cx, |panel, cx| {
+                    panel.focus_input(window, cx);
+                });
+            }
+            Panel::Tasks => {
+                self.task_panel.update(cx, |panel, cx| {
+                    panel.focus_primary_input(window, cx);
+                });
+            }
+            Panel::Records => {
+                self.notes_panel.update(cx, |panel, cx| {
+                    panel.focus_primary_input(window, cx);
+                });
+            }
+            _ => {
+                self.focus_handle.focus(window, cx);
+            }
+        }
+    }
+
+    pub fn switch_to_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
         if self.current_panel != panel {
             eprintln!(
                 "[MainView] Switching panel from {:?} to {:?}",
@@ -422,6 +445,8 @@ impl MainView {
             self.window_state.borrow_mut().current_panel = panel;
             cx.notify();
         }
+
+        self.focus_active_panel(panel, window, cx);
     }
 
     fn render_settings_panel(&self) -> impl IntoElement {
@@ -494,9 +519,9 @@ impl Render for MainView {
         let on_panel_change = cx.listener(
             |this: &mut MainView,
              panel: &Panel,
-             _window: &mut Window,
+             window: &mut Window,
              cx: &mut Context<MainView>| {
-                this.switch_to_panel(*panel, cx);
+                this.switch_to_panel(*panel, window, cx);
             },
         );
 
@@ -512,11 +537,11 @@ impl Render for MainView {
 
                 match event.keystroke.key.as_str() {
                     "0" => window.activate_window(),
-                    "1" => this.switch_to_panel(Panel::Dashboard, cx),
-                    "2" => this.switch_to_panel(Panel::Tasks, cx),
-                    "3" => this.switch_to_panel(Panel::Records, cx),
-                    "4" => this.switch_to_panel(Panel::Timeline, cx),
-                    "5" => this.switch_to_panel(Panel::Search, cx),
+                    "1" => this.switch_to_panel(Panel::Dashboard, window, cx),
+                    "2" => this.switch_to_panel(Panel::Tasks, window, cx),
+                    "3" => this.switch_to_panel(Panel::Records, window, cx),
+                    "4" => this.switch_to_panel(Panel::Timeline, window, cx),
+                    "5" => this.switch_to_panel(Panel::Search, window, cx),
                     _ => {}
                 }
             }))
@@ -540,7 +565,32 @@ impl Render for MainView {
                         Panel::Records => self.notes_panel.clone().into_any_element(),
                         Panel::Timeline => self.timeline_panel.clone().into_any_element(),
                         Panel::Search => self.search_panel.clone().into_any_element(),
-                        Panel::AI => div().child("AI 面板开发中...").into_any_element(),
+                        Panel::AI => div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0x262626))
+                                            .child("AI 面板开发中..."),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0x8c8c8c))
+                                            .child("当前版本先保留占位态，后续再补充完整交互。"),
+                                    ),
+                            )
+                            .into_any_element(),
                         Panel::Settings => self.render_settings_panel().into_any_element(),
                     }),
             )

@@ -53,6 +53,7 @@ pub struct SearchPanel {
     focus_handle: FocusHandle,
     _search_subscription: Subscription,
     is_searching: bool,
+    search_generation: usize,
 }
 
 impl SearchPanel {
@@ -81,10 +82,18 @@ impl SearchPanel {
             focus_handle,
             _search_subscription: _subscription,
             is_searching: false,
+            search_generation: 0,
         };
 
         panel.load_available_tags(cx);
         panel
+    }
+
+    pub fn focus_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+        self.input_state.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
     }
 
     fn load_available_tags(&mut self, cx: &mut Context<Self>) {
@@ -105,9 +114,12 @@ impl SearchPanel {
 
     fn on_query_change(&mut self, query: String, cx: &mut Context<Self>) {
         self.query = query;
+        self.search_generation += 1;
+        let generation = self.search_generation;
 
         if self.query.len() < 2 {
             self.results.clear();
+            self.is_searching = false;
             cx.notify();
             return;
         }
@@ -125,6 +137,9 @@ impl SearchPanel {
             match store.search_records(&search_query).await {
                 Ok(records) => {
                     let _ = view.update(cx, |panel, cx| {
+                        if panel.search_generation != generation || panel.query != search_query {
+                            return;
+                        }
                         panel.results = records;
                         panel.is_searching = false;
                         cx.notify();
@@ -133,6 +148,9 @@ impl SearchPanel {
                 Err(e) => {
                     eprintln!("[SearchPanel] Search failed: {}", e);
                     let _ = view.update(cx, |panel, cx| {
+                        if panel.search_generation != generation || panel.query != search_query {
+                            return;
+                        }
                         panel.is_searching = false;
                         cx.notify();
                     });
@@ -176,8 +194,11 @@ impl SearchPanel {
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.query.clear();
         self.results.clear();
+        self.is_searching = false;
+        self.search_generation += 1;
         self.input_state.update(cx, |state, cx| {
             state.set_value("", window, cx);
+            state.focus(window, cx);
         });
         cx.notify();
     }
@@ -635,7 +656,8 @@ impl Render for SearchPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
-            .gap(px(16.0))
+            .p(px(24.0))
+            .gap(px(18.0))
             .child(
                 div()
                     .text_xl()

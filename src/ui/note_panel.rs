@@ -9,6 +9,9 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
+const NOTE_TITLE_LIMIT: usize = 24;
+const NOTE_PREVIEW_LIMIT: usize = 44;
+
 #[derive(Clone)]
 struct PendingDeletion {
     id: Uuid,
@@ -90,6 +93,21 @@ impl NotePanel {
 
         panel.load_notes(cx);
         panel
+    }
+
+    pub fn focus_primary_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_deletion.is_some()
+            || self.editing_note_id.is_some()
+            || self.record_detail_sidebar.read(cx).current_record_id().is_some()
+        {
+            self.focus_handle.focus(window, cx);
+            return;
+        }
+
+        self.focus_handle.focus(window, cx);
+        self.input_state.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
     }
 
     fn handle_sidebar_save(&mut self, payload: &SavePayload, cx: &mut Context<Self>) {
@@ -325,17 +343,18 @@ impl NotePanel {
     // 从 Record 获取显示标题和预览
     // 优先使用 title 字段，如果没有则从 content 提取
     fn get_note_display(note: &Record) -> (String, String) {
-        // 标题：优先使用 title 字段
-        let title = note.title.clone().unwrap_or_else(|| {
-            // 如果没有 title，从 content 第一行提取
-            note.content
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .map(|line| line.trim().to_string())
-                .unwrap_or_else(|| "无标题".to_string())
-        });
+        let title = note
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| {
+                note.content
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(|line| line.trim().to_string())
+                    .unwrap_or_else(|| "无标题".to_string())
+            });
 
-        // 预览：获取第二行非空内容作为预览
         let preview = note
             .content
             .lines()
@@ -344,7 +363,23 @@ impl NotePanel {
             .map(|line| line.trim().to_string())
             .unwrap_or_default();
 
-        (title, preview)
+        (
+            Self::truncate_text(&title, NOTE_TITLE_LIMIT),
+            Self::truncate_text(&preview, NOTE_PREVIEW_LIMIT),
+        )
+    }
+
+    fn normalize_text(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn truncate_text(text: &str, limit: usize) -> String {
+        let normalized = Self::normalize_text(text);
+        if normalized.chars().count() <= limit {
+            normalized
+        } else {
+            format!("{}...", normalized.chars().take(limit).collect::<String>())
+        }
     }
 
     fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -584,13 +619,11 @@ impl Render for NotePanel {
                                             .items_center()
                                             .child(
                                                 div()
+                                                    .flex_1()
+                                                    .overflow_hidden()
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(rgb(0x000000))
                                                     .child(title)
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
                                             )
                                             .child(
                                                 div()
@@ -630,15 +663,16 @@ impl Render for NotePanel {
                                     )
                                     .child(
                                         div()
+                                            .text_sm()
+                                            .text_color(rgb(0x444444))
+                                            .line_height(relative(1.35))
+                                            .child(if preview.is_empty() { "...".to_string() } else { preview })
+                                    )
+                                    .child(
+                                        div()
                                             .flex()
-                                            .justify_between()
+                                            .justify_end()
                                             .items_center()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(0x444444))
-                                                    .child(if preview.is_empty() { "...".to_string() } else { preview })
-                                            )
                                             .child(
                                                 div()
                                                     .text_xs()

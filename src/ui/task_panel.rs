@@ -31,6 +31,8 @@ const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(360.0);
 const TASK_PANEL_HORIZONTAL_PADDING: Pixels = px(32.0);
 const MATRIX_COLUMN_GAP: Pixels = px(8.0);
 const MIN_VISIBLE_QUADRANT_WIDTH: Pixels = px(280.0);
+const TASK_CARD_TITLE_LIMIT: usize = 24;
+const TASK_CARD_PREVIEW_LIMIT: usize = 44;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskView {
@@ -262,6 +264,22 @@ impl TaskPanel {
         panel
     }
 
+    pub fn focus_primary_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_deletion.is_some()
+            || self.reminder_task_id.is_some()
+            || self.sidebar_visible(cx)
+            || self.editing_task_id.is_some()
+        {
+            self.focus_handle.focus(window, cx);
+            return;
+        }
+
+        self.focus_handle.focus(window, cx);
+        self.input_state.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
+    }
+
     fn handle_sidebar_save(
         &mut self,
         payload: &crate::ui::task_detail_sidebar::SavePayload,
@@ -404,8 +422,22 @@ impl TaskPanel {
         self.sync_matrix_layout_mode(window, cx, true);
     }
 
+    fn normalize_text(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn truncate_text(text: &str, limit: usize) -> String {
+        let normalized = Self::normalize_text(text);
+        if normalized.chars().count() <= limit {
+            normalized
+        } else {
+            format!("{}...", normalized.chars().take(limit).collect::<String>())
+        }
+    }
+
     fn task_display_name(task: &Record) -> String {
-        task.title
+        let base = task
+            .title
             .clone()
             .filter(|title| !title.trim().is_empty())
             .or_else(|| {
@@ -414,7 +446,27 @@ impl TaskPanel {
                     .find(|line| !line.trim().is_empty())
                     .map(|line| line.trim().to_string())
             })
-            .unwrap_or_else(|| "无标题任务".to_string())
+            .unwrap_or_else(|| "无标题任务".to_string());
+        Self::truncate_text(&base, TASK_CARD_TITLE_LIMIT)
+    }
+
+    fn task_preview(task: &Record) -> String {
+        let normalized_content = Self::normalize_text(&task.content);
+        if normalized_content.is_empty() {
+            return String::new();
+        }
+
+        let normalized_title = task
+            .title
+            .as_deref()
+            .map(Self::normalize_text)
+            .unwrap_or_default();
+
+        if !normalized_title.is_empty() && normalized_content == normalized_title {
+            return String::new();
+        }
+
+        Self::truncate_text(&normalized_content, TASK_CARD_PREVIEW_LIMIT)
     }
 
     fn handle_sidebar_close(&mut self, cx: &mut Context<Self>) {
@@ -1197,10 +1249,9 @@ impl TaskPanel {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
+        v_flex()
             .w_full()
-            .justify_between()
-            .items_center()
+            .gap(px(8.0))
             .child(self.render_view_switcher(cx))
             .child(self.render_priority_filter(cx))
     }
@@ -1325,21 +1376,9 @@ impl TaskPanel {
         };
 
         // 任务显示标题，如有详细内容则显示预览
-        let display_title = task
-            .title
-            .clone()
-            .unwrap_or_else(|| "无标题任务".to_string());
-        let has_content_preview = !task.content.trim().is_empty();
-        let content_preview = if has_content_preview {
-            let preview: String = task.content.chars().take(60).collect();
-            if task.content.chars().count() > 60 {
-                format!("{}...", preview)
-            } else {
-                preview
-            }
-        } else {
-            String::new()
-        };
+        let display_title = Self::task_display_name(task);
+        let content_preview = Self::task_preview(task);
+        let has_content_preview = !content_preview.is_empty();
 
         div()
             .id(("task-card", idx))
@@ -1386,57 +1425,110 @@ impl TaskPanel {
                     .child(
                         v_flex()
                             .flex_1()
-                            .gap(px(if compact { 2.0 } else { 4.0 }))
+                            .gap(px(if compact { 3.0 } else { 6.0 }))
                             .child({
-                                let task_id_for_edit = task_id;
-                                let task_title = display_title.clone();
-                                let input_state = self.task_input_states
-                                    .get(&task_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        let state = cx.new(|cx| {
-                                            let mut s = InputState::new(window, cx);
-                                            s.set_value(&task_title, window, cx);
-                                            s
+                                let is_editing = self.editing_task_id == Some(task_id);
+                                let title_element = if is_editing {
+                                    let task_id_for_edit = task_id;
+                                    let task_title = display_title.clone();
+                                    let input_state = self
+                                        .task_input_states
+                                        .get(&task_id)
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            let state = cx.new(|cx| {
+                                                let mut s = InputState::new(window, cx);
+                                                s.set_value(&task_title, window, cx);
+                                                s
+                                            });
+
+                                            cx.subscribe_in(
+                                                &state,
+                                                window,
+                                                move |this, _state, event: &InputEvent, _window, cx| {
+                                                    match event {
+                                                        InputEvent::Blur | InputEvent::PressEnter { .. } => {
+                                                            let new_title = this
+                                                                .task_input_states
+                                                                .get(&task_id_for_edit)
+                                                                .map(|s| s.read(cx).text().to_string())
+                                                                .unwrap_or_default();
+
+                                                            if let Some(task) = this
+                                                                .tasks
+                                                                .iter_mut()
+                                                                .find(|t| t.id == task_id_for_edit)
+                                                            {
+                                                                let current_title = task
+                                                                    .title
+                                                                    .clone()
+                                                                    .unwrap_or_default();
+                                                                if current_title != new_title
+                                                                    && !new_title.trim().is_empty()
+                                                                {
+                                                                    task.title = Some(new_title);
+                                                                    task.updated_at = chrono::Utc::now();
+                                                                    let updated_task = task.clone();
+                                                                    let store = this.store.clone();
+                                                                    cx.spawn(async move |_view, _cx| {
+                                                                        if let Err(e) = store
+                                                                            .update_record(updated_task)
+                                                                            .await
+                                                                        {
+                                                                            eprintln!(
+                                                                                "[TaskPanel] Failed to update task: {}",
+                                                                                e
+                                                                            );
+                                                                        }
+                                                                    })
+                                                                    .detach();
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                },
+                                            )
+                                            .detach();
+
+                                            state
                                         });
 
-                                        cx.subscribe_in(&state, window, move |this, _state, event: &InputEvent, _window, cx| {
-                                            match event {
-                                                InputEvent::Blur | InputEvent::PressEnter { .. } => {
-                                                    let new_title = this.task_input_states
-                                                        .get(&task_id_for_edit)
-                                                        .map(|s| s.read(cx).text().to_string())
-                                                        .unwrap_or_default();
+                                    if !self.task_input_states.contains_key(&task_id) {
+                                        self.task_input_states.insert(task_id, input_state.clone());
+                                    }
 
-                                                    if let Some(task) = this.tasks.iter_mut().find(|t| t.id == task_id_for_edit) {
-                                                        let current_title = task.title.clone().unwrap_or_default();
-                                                        if current_title != new_title && !new_title.trim().is_empty() {
-                                                            task.title = Some(new_title);
-                                                            task.updated_at = chrono::Utc::now();
-                                                            let updated_task = task.clone();
-                                                            let store = this.store.clone();
-                                                            cx.spawn(async move |_view, _cx| {
-                                                                if let Err(e) = store.update_record(updated_task).await {
-                                                                    eprintln!("[TaskPanel] Failed to update task: {}", e);
-                                                                }
-                                                            }).detach();
-                                                        }
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                        }).detach();
-
-                                        state
-                                    });
-
-                                if !self.task_input_states.contains_key(&task_id) {
-                                    self.task_input_states.insert(task_id, input_state.clone());
-                                }
+                                    div()
+                                        .flex_1()
+                                        .child(
+                                            Input::new(&input_state)
+                                                .appearance(false)
+                                                .focus_bordered(false)
+                                                .text_size(px(14.0))
+                                                .text_color(if is_completed {
+                                                    rgb(0x999999)
+                                                } else {
+                                                    rgb(0x333333)
+                                                }),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex_1()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(if is_completed {
+                                            rgb(0x999999)
+                                        } else {
+                                            rgb(0x333333)
+                                        })
+                                        .child(display_title.clone())
+                                        .into_any_element()
+                                };
 
                                 v_flex()
                                     .flex_1()
-                                    .gap(px(2.0))
+                                    .gap(px(4.0))
                                     .child(
                                         h_flex()
                                             .gap(px(4.0))
@@ -1450,32 +1542,24 @@ impl TaskPanel {
                                                         .child(priority_marker)
                                                 )
                                             })
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .child({
-                                                        Input::new(&input_state)
-                                                            .appearance(false)
-                                                            .focus_bordered(false)
-                                                            .text_size(px(14.0))
-                                                            .text_color(if is_completed { rgb(0x999999) } else { rgb(0x333333) })
-                                                            .disabled(true)
-                                                    })
-                                            )
+                                            .child(title_element)
                                     )
                                     .when(has_content_preview && !compact, |el| {
                                         el.child(
                                             div()
                                                 .text_sm()
                                                 .text_color(rgb(0x888888))
+                                                .line_height(relative(1.35))
                                                 .child(content_preview)
                                         )
                                     })
                             })
                             .when(!compact, |el| {
                                 el.child(
-                                    h_flex()
+                                    div()
+                                        .flex()
                                         .gap(px(8.0))
+                                        .flex_wrap()
                                         .text_xs()
                                         .text_color(rgb(0xbbbbbb))
                                         .children(task.due_date.map(|t| {

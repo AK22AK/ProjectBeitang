@@ -4,6 +4,11 @@ use chrono::{Datelike, Duration, Local};
 use gpui::*;
 use gpui_component::h_flex;
 
+const DASHBOARD_PENDING_TITLE_LIMIT: usize = 30;
+const DASHBOARD_IN_PROGRESS_LIMIT: usize = 28;
+const DASHBOARD_RECENT_LIMIT: usize = 30;
+const DASHBOARD_STATUS_WIDTH: Pixels = px(92.0);
+
 pub struct Dashboard {
     store: Store,
     dashboard_data: Option<DashboardData>,
@@ -127,6 +132,35 @@ impl Dashboard {
             Some(Priority::Medium) => rgb(0xffaa00),
             Some(Priority::Low) | None => rgb(0x52c41a),
         }
+    }
+
+    fn normalize_text(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn truncate_text(text: &str, limit: usize) -> String {
+        let normalized = Self::normalize_text(text);
+        if normalized.chars().count() <= limit {
+            normalized
+        } else {
+            format!("{}...", normalized.chars().take(limit).collect::<String>())
+        }
+    }
+
+    fn display_text(record: &Record, limit: usize) -> String {
+        let base = record
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| {
+                record
+                    .content
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(|line| line.trim().to_string())
+            })
+            .unwrap_or_else(|| "无标题".to_string());
+        Self::truncate_text(&base, limit)
     }
 
     fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
@@ -278,10 +312,15 @@ impl Render for Dashboard {
                                                     .flex_1()
                                                     .text_base()
                                                     .font_weight(FontWeight::MEDIUM)
-                                                    .child(task.content.clone()),
+                                                    .child(Self::display_text(
+                                                        task,
+                                                        DASHBOARD_IN_PROGRESS_LIMIT,
+                                                    )),
                                             )
                                             .child(
                                                 div()
+                                                    .w(px(80.0))
+                                                    .text_right()
                                                     .text_sm()
                                                     .text_color(rgb(0x1890ff))
                                                     .child(Self::format_duration(start_time)),
@@ -321,6 +360,67 @@ impl Render for Dashboard {
                             let priority_mark = Self::priority_mark(priority);
                             let is_in_progress = task.status == Some(TaskStatus::InProgress);
 
+                            let status_element = if is_in_progress {
+                                div()
+                                    .w(DASHBOARD_STATUS_WIDTH)
+                                    .flex()
+                                    .justify_end()
+                                    .child(
+                                        div()
+                                            .min_w(px(82.0))
+                                            .text_center()
+                                            .text_xs()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .bg(rgb(0xe6f7ff))
+                                            .text_color(rgb(0x1890ff))
+                                            .rounded(px(4.0))
+                                            .child("进行中"),
+                                    )
+                                    .into_any_element()
+                            } else if let Some(due) = task.due_date {
+                                let due_local = due.with_timezone(&Local);
+                                let now = Local::now();
+                                let today = now.date_naive();
+                                let due_date = due_local.date_naive();
+
+                                let ddl_text = if due_date == today {
+                                    "DDL今天".to_string()
+                                } else if due_date == today + Duration::days(1) {
+                                    "DDL明天".to_string()
+                                } else {
+                                    format!("DDL{}/{}", due_local.month(), due_local.day())
+                                };
+
+                                div()
+                                    .w(DASHBOARD_STATUS_WIDTH)
+                                    .flex()
+                                    .justify_end()
+                                    .child(
+                                        div()
+                                            .min_w(px(82.0))
+                                            .text_center()
+                                            .text_xs()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .bg(if due_date <= today {
+                                                rgb(0xfff2f0)
+                                            } else {
+                                                rgb(0xf6ffed)
+                                            })
+                                            .text_color(if due_date <= today {
+                                                rgb(0xff4d4f)
+                                            } else {
+                                                rgb(0x52c41a)
+                                            })
+                                            .rounded(px(4.0))
+                                            .child(ddl_text),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div().w(DASHBOARD_STATUS_WIDTH).into_any_element()
+                            };
+
                             elements.push(
                                 div()
                                     .id(("pending", idx))
@@ -336,62 +436,32 @@ impl Render for Dashboard {
                                     .hover(|s| s.bg(rgb(0xf0f5ff)))
                                     .cursor_pointer()
                                     .child(
-                                        div()
-                                            .w(px(20.0))
-                                            .text_sm()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(Self::priority_color(priority))
-                                            .child(priority_mark),
+                                        h_flex()
+                                            .flex_1()
+                                            .gap(px(8.0))
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .w(px(20.0))
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(Self::priority_color(priority))
+                                                    .child(priority_mark),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(0x262626))
+                                                    .child(Self::display_text(
+                                                        task,
+                                                        DASHBOARD_PENDING_TITLE_LIMIT,
+                                                    )),
+                                            ),
                                     )
-                                    .child(div().flex_1().text_sm().child(task.content.clone()))
-                                    .children(if is_in_progress {
-                                        Some(
-                                            div()
-                                                .text_xs()
-                                                .px(px(6.0))
-                                                .py(px(2.0))
-                                                .bg(rgb(0xe6f7ff))
-                                                .text_color(rgb(0x1890ff))
-                                                .rounded(px(4.0))
-                                                .child("进行中"),
-                                        )
-                                    } else {
-                                        task.due_date.map(|due| {
-                                            let due_local = due.with_timezone(&Local);
-                                            let now = Local::now();
-                                            let today = now.date_naive();
-                                            let due_date = due_local.date_naive();
-
-                                            let ddl_text = if due_date == today {
-                                                "DDL今天".to_string()
-                                            } else if due_date == today + Duration::days(1) {
-                                                "DDL明天".to_string()
-                                            } else {
-                                                format!(
-                                                    "DDL{}/{}",
-                                                    due_local.month(),
-                                                    due_local.day()
-                                                )
-                                            };
-
-                                            div()
-                                                .text_xs()
-                                                .px(px(6.0))
-                                                .py(px(2.0))
-                                                .bg(if due_date <= today {
-                                                    rgb(0xfff2f0)
-                                                } else {
-                                                    rgb(0xf6ffed)
-                                                })
-                                                .text_color(if due_date <= today {
-                                                    rgb(0xff4d4f)
-                                                } else {
-                                                    rgb(0x52c41a)
-                                                })
-                                                .rounded(px(4.0))
-                                                .child(ddl_text)
-                                        })
-                                    })
+                                    .child(status_element)
                                     .into_any_element(),
                             );
                         }
@@ -459,15 +529,20 @@ impl Render for Dashboard {
                                             })
                                             .child(icon),
                                     )
-                                    .child(div().flex_1().text_sm().child(
-                                        if record.content.len() > 30 {
-                                            format!("{}...", &record.content[..30])
-                                        } else {
-                                            record.content.clone()
-                                        },
-                                    ))
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .text_sm()
+                                            .child(Self::display_text(
+                                                record,
+                                                DASHBOARD_RECENT_LIMIT,
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(88.0))
+                                            .text_right()
                                             .text_xs()
                                             .text_color(rgb(0x999999))
                                             .child(Self::format_relative_time(record.created_at)),

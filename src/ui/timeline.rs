@@ -8,6 +8,7 @@ use gpui_component::{h_flex, v_flex};
 use std::collections::HashSet;
 
 const PAGE_SIZE: usize = 50;
+const TIMELINE_CONTENT_LIMIT: usize = 52;
 
 pub struct Timeline {
     store: Store,
@@ -207,6 +208,28 @@ impl Timeline {
         }
     }
 
+    fn normalize_text(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn truncate_text(text: &str, limit: usize) -> String {
+        let normalized = Self::normalize_text(text);
+        if normalized.chars().count() <= limit {
+            normalized
+        } else {
+            format!("{}...", normalized.chars().take(limit).collect::<String>())
+        }
+    }
+
+    fn record_summary(record: &Record) -> String {
+        let text = record
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| record.content.clone());
+        Self::truncate_text(&text, TIMELINE_CONTENT_LIMIT)
+    }
+
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tags = self.available_tags.clone();
         let selected = self.selected_tags.clone();
@@ -285,7 +308,7 @@ impl Timeline {
         let icon_color = Self::get_node_color(record);
         let record_type_label = Self::get_record_type_label(record);
         let status_label = Self::get_status_label(record);
-        let content = record.content.clone();
+        let content = Self::record_summary(record);
         let tags = record.tags.clone();
 
         h_flex()
@@ -369,7 +392,13 @@ impl Timeline {
                                     .child(status)
                             })),
                     )
-                    .child(div().text_base().text_color(rgb(0x262626)).child(content))
+                    .child(
+                        div()
+                            .text_base()
+                            .text_color(rgb(0x262626))
+                            .line_height(relative(1.35))
+                            .child(content),
+                    )
                     .child(h_flex().gap(px(6.0)).flex_wrap().children(
                         tags.into_iter().enumerate().map(|(idx, tag)| {
                             div()
