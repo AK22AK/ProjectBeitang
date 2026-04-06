@@ -8,6 +8,7 @@ use gpui_component::h_flex;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::v_flex;
+use std::collections::BTreeSet;
 use std::time::Duration as StdDuration;
 
 const SEARCH_DEBOUNCE_MS: u64 = 300;
@@ -18,6 +19,28 @@ const SEARCH_BODY_PREVIEW_LIMIT: usize = 96;
 enum BrowseFilter {
     Tag(String),
     Person(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AdvancedFilterMode {
+    And,
+    Or,
+}
+
+impl AdvancedFilterMode {
+    fn label(&self) -> &'static str {
+        match self {
+            AdvancedFilterMode::And => "AND",
+            AdvancedFilterMode::Or => "OR",
+        }
+    }
+
+    fn toggle(&self) -> Self {
+        match self {
+            AdvancedFilterMode::And => AdvancedFilterMode::Or,
+            AdvancedFilterMode::Or => AdvancedFilterMode::And,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,6 +77,10 @@ pub struct SearchPanel {
     results: Vec<Record>,
     filter_type: SearchFilterType,
     browse_filter: Option<BrowseFilter>,
+    advanced_filter_enabled: bool,
+    selected_tags: BTreeSet<String>,
+    selected_persons: BTreeSet<String>,
+    filter_mode: AdvancedFilterMode,
     #[allow(dead_code)]
     available_tags: Vec<String>,
     #[allow(dead_code)]
@@ -86,6 +113,10 @@ impl SearchPanel {
             results: Vec::new(),
             filter_type: SearchFilterType::All,
             browse_filter: None,
+            advanced_filter_enabled: false,
+            selected_tags: BTreeSet::new(),
+            selected_persons: BTreeSet::new(),
+            filter_mode: AdvancedFilterMode::And,
             available_tags: Vec::new(),
             available_persons: Vec::new(),
             input_state,
@@ -163,23 +194,60 @@ impl SearchPanel {
     }
 
     fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
-        self.browse_filter = Self::next_browse_filter(
-            self.browse_filter.as_ref(),
-            BrowseFilter::Tag(tag.to_string()),
-        );
+        if self.advanced_filter_enabled {
+            Self::toggle_multi_select(&mut self.selected_tags, tag);
+        } else {
+            self.browse_filter = Self::next_browse_filter(
+                self.browse_filter.as_ref(),
+                BrowseFilter::Tag(tag.to_string()),
+            );
+        }
         self.refresh_results(cx);
     }
 
     fn toggle_person(&mut self, person: &str, cx: &mut Context<Self>) {
-        self.browse_filter = Self::next_browse_filter(
-            self.browse_filter.as_ref(),
-            BrowseFilter::Person(person.to_string()),
-        );
+        if self.advanced_filter_enabled {
+            Self::toggle_multi_select(&mut self.selected_persons, person);
+        } else {
+            self.browse_filter = Self::next_browse_filter(
+                self.browse_filter.as_ref(),
+                BrowseFilter::Person(person.to_string()),
+            );
+        }
         self.refresh_results(cx);
     }
 
     fn clear_tag_filters(&mut self, cx: &mut Context<Self>) {
         self.browse_filter = None;
+        self.selected_tags.clear();
+        self.selected_persons.clear();
+        self.refresh_results(cx);
+    }
+
+    fn set_advanced_filter_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled == self.advanced_filter_enabled {
+            return;
+        }
+
+        let (browse_filter, selected_tags, selected_persons, filter_mode) =
+            Self::apply_advanced_filter_toggle(
+                self.browse_filter.as_ref(),
+                enabled,
+                &self.selected_tags,
+                &self.selected_persons,
+                self.filter_mode,
+            );
+
+        self.advanced_filter_enabled = enabled;
+        self.browse_filter = browse_filter;
+        self.selected_tags = selected_tags;
+        self.selected_persons = selected_persons;
+        self.filter_mode = filter_mode;
+        self.refresh_results(cx);
+    }
+
+    fn toggle_advanced_filter_mode(&mut self, cx: &mut Context<Self>) {
+        self.filter_mode = self.filter_mode.toggle();
         self.refresh_results(cx);
     }
 
@@ -188,16 +256,19 @@ impl SearchPanel {
             .iter()
             .filter(|r| self.filter_type.matches(&r.record_type))
             .filter(|r| {
-                self.browse_filter
-                    .as_ref()
-                    .map(|browse_filter| match browse_filter {
-                        BrowseFilter::Tag(tag) => r.tags.iter().any(|record_tag| record_tag == tag),
-                        BrowseFilter::Person(person) => r
-                            .persons
-                            .iter()
-                            .any(|record_person| record_person == person),
-                    })
-                    .unwrap_or(true)
+                if self.advanced_filter_enabled {
+                    Self::matches_advanced_filter(
+                        r,
+                        &self.selected_tags,
+                        &self.selected_persons,
+                        self.filter_mode,
+                    )
+                } else {
+                    self.browse_filter
+                        .as_ref()
+                        .map(|browse_filter| Self::matches_single_browse_filter(r, browse_filter))
+                        .unwrap_or(true)
+                }
             })
             .cloned()
             .collect()
@@ -225,8 +296,17 @@ impl SearchPanel {
         let generation = self.search_generation;
         let query = self.query.trim().to_string();
         let browse_filter = self.browse_filter.clone();
+        let advanced_filter_enabled = self.advanced_filter_enabled;
+        let has_advanced_filters = self.has_advanced_filters();
 
-        if query.is_empty() && browse_filter.is_none() {
+        if query.is_empty() && !advanced_filter_enabled && browse_filter.is_none() {
+            self.results.clear();
+            self.is_searching = false;
+            cx.notify();
+            return;
+        }
+
+        if query.is_empty() && advanced_filter_enabled && !has_advanced_filters {
             self.results.clear();
             self.is_searching = false;
             cx.notify();
@@ -264,6 +344,33 @@ impl SearchPanel {
                             cx.notify();
                         });
                     }
+                }
+            })
+            .detach();
+            return;
+        }
+
+        if advanced_filter_enabled {
+            cx.spawn(async move |view, cx| match store.get_all_records().await {
+                Ok(records) => {
+                    let _ = view.update(cx, |panel, cx| {
+                        if panel.search_generation != generation {
+                            return;
+                        }
+                        panel.results = records;
+                        panel.is_searching = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[SearchPanel] Advanced filter records load failed: {}", e);
+                    let _ = view.update(cx, |panel, cx| {
+                        if panel.search_generation != generation {
+                            return;
+                        }
+                        panel.is_searching = false;
+                        cx.notify();
+                    });
                 }
             })
             .detach();
@@ -327,6 +434,106 @@ impl SearchPanel {
                     .detach();
                 }
             }
+        }
+    }
+
+    fn toggle_multi_select(values: &mut BTreeSet<String>, value: &str) {
+        if !values.remove(value) {
+            values.insert(value.to_string());
+        }
+    }
+
+    fn matches_single_browse_filter(record: &Record, browse_filter: &BrowseFilter) -> bool {
+        match browse_filter {
+            BrowseFilter::Tag(tag) => record.tags.iter().any(|record_tag| record_tag == tag),
+            BrowseFilter::Person(person) => record
+                .persons
+                .iter()
+                .any(|record_person| record_person == person),
+        }
+    }
+
+    fn matches_advanced_filter(
+        record: &Record,
+        selected_tags: &BTreeSet<String>,
+        selected_persons: &BTreeSet<String>,
+        filter_mode: AdvancedFilterMode,
+    ) -> bool {
+        if selected_tags.is_empty() && selected_persons.is_empty() {
+            return true;
+        }
+
+        match filter_mode {
+            AdvancedFilterMode::And => {
+                selected_tags
+                    .iter()
+                    .all(|tag| record.tags.iter().any(|record_tag| record_tag == tag))
+                    && selected_persons.iter().all(|person| {
+                        record
+                            .persons
+                            .iter()
+                            .any(|record_person| record_person == person)
+                    })
+            }
+            AdvancedFilterMode::Or => {
+                selected_tags
+                    .iter()
+                    .any(|tag| record.tags.iter().any(|record_tag| record_tag == tag))
+                    || selected_persons.iter().any(|person| {
+                        record
+                            .persons
+                            .iter()
+                            .any(|record_person| record_person == person)
+                    })
+            }
+        }
+    }
+
+    fn apply_advanced_filter_toggle(
+        browse_filter: Option<&BrowseFilter>,
+        enabled: bool,
+        selected_tags: &BTreeSet<String>,
+        selected_persons: &BTreeSet<String>,
+        filter_mode: AdvancedFilterMode,
+    ) -> (
+        Option<BrowseFilter>,
+        BTreeSet<String>,
+        BTreeSet<String>,
+        AdvancedFilterMode,
+    ) {
+        if enabled {
+            let mut next_tags = selected_tags.clone();
+            let mut next_persons = selected_persons.clone();
+            if let Some(browse_filter) = browse_filter {
+                match browse_filter {
+                    BrowseFilter::Tag(tag) => {
+                        next_tags.insert(tag.clone());
+                    }
+                    BrowseFilter::Person(person) => {
+                        next_persons.insert(person.clone());
+                    }
+                }
+            }
+            (None, next_tags, next_persons, filter_mode)
+        } else {
+            (
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                AdvancedFilterMode::And,
+            )
+        }
+    }
+
+    fn has_advanced_filters(&self) -> bool {
+        !self.selected_tags.is_empty() || !self.selected_persons.is_empty()
+    }
+
+    fn has_active_browse_filters(&self) -> bool {
+        if self.advanced_filter_enabled {
+            self.has_advanced_filters()
+        } else {
+            self.browse_filter.is_some()
         }
     }
 
@@ -621,112 +828,172 @@ impl SearchPanel {
     }
 
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_selected = self.browse_filter.is_some();
+        let has_selected = self.has_active_browse_filters();
+        let show_filter_row =
+            !self.available_tags.is_empty() || !self.available_persons.is_empty() || has_selected;
 
-        v_flex().gap(px(8.0)).when(
-            !self.available_tags.is_empty() || !self.available_persons.is_empty() || has_selected,
-            |el| {
-                el.child(
-                    h_flex()
-                        .gap(px(4.0))
-                        .flex_wrap()
-                        .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
-                            let is_selected = self.browse_filter.as_ref()
-                                == Some(&BrowseFilter::Tag(tag.clone()));
-                            let tag_clone = tag.clone();
-                            div()
-                                .id(("search-tag-filter", idx))
-                                .px(px(10.0))
-                                .py(px(4.0))
-                                .rounded(px(12.0))
-                                .cursor_pointer()
-                                .border_1()
-                                .border_color(if is_selected {
-                                    rgb(0x1890ff)
+        v_flex().gap(px(8.0)).when(show_filter_row, |el| {
+            el.child(
+                h_flex()
+                    .gap(px(4.0))
+                    .flex_wrap()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("advanced-filter-toggle")
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded(px(12.0))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if self.advanced_filter_enabled {
+                                rgb(0x1890ff)
+                            } else {
+                                rgb(0xd9d9d9)
+                            })
+                            .bg(if self.advanced_filter_enabled {
+                                rgb(0xe6f7ff)
+                            } else {
+                                rgb(0xffffff)
+                            })
+                            .text_color(if self.advanced_filter_enabled {
+                                rgb(0x1890ff)
+                            } else {
+                                rgb(0x595959)
+                            })
+                            .text_sm()
+                            .hover(|s| {
+                                s.bg(if self.advanced_filter_enabled {
+                                    rgb(0xbae7ff)
                                 } else {
-                                    rgb(0xd9d9d9)
+                                    rgb(0xf5f5f5)
                                 })
-                                .bg(if is_selected {
-                                    rgb(0xe6f7ff)
+                            })
+                            .child(format!(
+                                "{} 高级筛选",
+                                if self.advanced_filter_enabled {
+                                    "☑"
                                 } else {
-                                    rgb(0xffffff)
-                                })
-                                .text_color(if is_selected {
-                                    rgb(0x1890ff)
-                                } else {
-                                    rgb(0x595959)
-                                })
-                                .text_sm()
-                                .hover(|s| {
-                                    s.bg(if is_selected {
-                                        rgb(0xbae7ff)
-                                    } else {
-                                        rgb(0xf5f5f5)
-                                    })
-                                })
-                                .child(format!("#{}", tag))
-                                .on_click(cx.listener(
-                                    move |this, _event: &ClickEvent, _window, cx| {
-                                        this.toggle_tag(&tag_clone, cx);
-                                    },
-                                ))
-                        }))
-                        .children(
-                            self.available_persons
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, person)| {
-                                    let is_selected = self.browse_filter.as_ref()
-                                        == Some(&BrowseFilter::Person(person.clone()));
-                                    let person_clone = person.clone();
-                                    div()
-                                        .id(("search-person-filter", idx))
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .rounded(px(12.0))
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(if is_selected {
-                                            rgb(0x1890ff)
-                                        } else {
-                                            rgb(0xd9d9d9)
-                                        })
-                                        .bg(if is_selected {
-                                            rgb(0xe6f7ff)
-                                        } else {
-                                            rgb(0xffffff)
-                                        })
-                                        .text_color(if is_selected {
-                                            rgb(0x1890ff)
-                                        } else {
-                                            rgb(0x595959)
-                                        })
-                                        .text_sm()
-                                        .hover(|s| {
-                                            s.bg(if is_selected {
-                                                rgb(0xbae7ff)
-                                            } else {
-                                                rgb(0xf5f5f5)
-                                            })
-                                        })
-                                        .child(format!("@{}", person))
-                                        .on_click(cx.listener(
-                                            move |this, _event: &ClickEvent, _window, cx| {
-                                                this.toggle_person(&person_clone, cx);
-                                            },
-                                        ))
-                                }),
-                        )
-                        .when(has_selected, |el| {
-                            el.child(Button::new("clear-search-tags").child("清除筛选").on_click(
-                                cx.listener(|this, _event, _window, cx| {
-                                    this.clear_tag_filters(cx);
-                                }),
+                                    "☐"
+                                }
                             ))
-                        }),
-                )
-            },
-        )
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.set_advanced_filter_enabled(!this.advanced_filter_enabled, cx);
+                            })),
+                    )
+                    .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
+                        let is_selected = if self.advanced_filter_enabled {
+                            self.selected_tags.contains(tag)
+                        } else {
+                            self.browse_filter.as_ref() == Some(&BrowseFilter::Tag(tag.clone()))
+                        };
+                        let tag_clone = tag.clone();
+                        div()
+                            .id(("search-tag-filter", idx))
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded(px(12.0))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if is_selected {
+                                rgb(0x1890ff)
+                            } else {
+                                rgb(0xd9d9d9)
+                            })
+                            .bg(if is_selected {
+                                rgb(0xe6f7ff)
+                            } else {
+                                rgb(0xffffff)
+                            })
+                            .text_color(if is_selected {
+                                rgb(0x1890ff)
+                            } else {
+                                rgb(0x595959)
+                            })
+                            .text_sm()
+                            .hover(|s| {
+                                s.bg(if is_selected {
+                                    rgb(0xbae7ff)
+                                } else {
+                                    rgb(0xf5f5f5)
+                                })
+                            })
+                            .child(format!("#{}", tag))
+                            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                this.toggle_tag(&tag_clone, cx);
+                            }))
+                    }))
+                    .children(
+                        self.available_persons
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, person)| {
+                                let is_selected = if self.advanced_filter_enabled {
+                                    self.selected_persons.contains(person)
+                                } else {
+                                    self.browse_filter.as_ref()
+                                        == Some(&BrowseFilter::Person(person.clone()))
+                                };
+                                let person_clone = person.clone();
+                                div()
+                                    .id(("search-person-filter", idx))
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(12.0))
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if is_selected {
+                                        rgb(0x1890ff)
+                                    } else {
+                                        rgb(0xd9d9d9)
+                                    })
+                                    .bg(if is_selected {
+                                        rgb(0xe6f7ff)
+                                    } else {
+                                        rgb(0xffffff)
+                                    })
+                                    .text_color(if is_selected {
+                                        rgb(0x1890ff)
+                                    } else {
+                                        rgb(0x595959)
+                                    })
+                                    .text_sm()
+                                    .hover(|s| {
+                                        s.bg(if is_selected {
+                                            rgb(0xbae7ff)
+                                        } else {
+                                            rgb(0xf5f5f5)
+                                        })
+                                    })
+                                    .child(format!("@{}", person))
+                                    .on_click(cx.listener(
+                                        move |this, _event: &ClickEvent, _window, cx| {
+                                            this.toggle_person(&person_clone, cx);
+                                        },
+                                    ))
+                            }),
+                    )
+                    .when(
+                        self.advanced_filter_enabled && self.has_advanced_filters(),
+                        |el| {
+                            el.child(
+                                Button::new("search-toggle-mode")
+                                    .child(self.filter_mode.label().to_string())
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.toggle_advanced_filter_mode(cx);
+                                    })),
+                            )
+                        },
+                    )
+                    .when(has_selected, |el| {
+                        el.child(Button::new("clear-search-tags").child("清除筛选").on_click(
+                            cx.listener(|this, _event, _window, cx| {
+                                this.clear_tag_filters(cx);
+                            }),
+                        ))
+                    }),
+            )
+        })
     }
 
     fn render_search_result_item(
@@ -837,7 +1104,7 @@ impl SearchPanel {
         let grouped_results = self.group_results_by_date(&filtered_results);
         let is_searching = self.is_searching;
         let has_query = !self.query.trim().is_empty();
-        let browse_active = !has_query && self.browse_filter.is_some();
+        let browse_active = !has_query && self.has_active_browse_filters();
         let browse_filter = self.browse_filter.clone();
 
         v_flex()
@@ -857,6 +1124,11 @@ impl SearchPanel {
                     .text_sm()
                     .text_color(rgb(0x595959))
                     .child(format!("找到 {} 个结果：", result_count))
+            } else if self.advanced_filter_enabled && self.has_advanced_filters() {
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x595959))
+                    .child(format!("高级筛选下共 {} 个结果：", result_count))
             } else if let Some(browse_filter) = browse_filter.as_ref() {
                 div()
                     .text_sm()
@@ -955,7 +1227,9 @@ impl Focusable for SearchPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowseFilter, SearchPanel};
+    use super::{AdvancedFilterMode, BrowseFilter, SearchPanel};
+    use crate::models::{Priority, Record};
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_next_browse_filter_supports_single_select_toggle() {
@@ -984,5 +1258,90 @@ mod tests {
             ),
             Some(BrowseFilter::Person("张三".to_string()))
         );
+    }
+
+    #[test]
+    fn test_matches_advanced_filter_in_and_mode() {
+        let mut record = Record::new_task(
+            "搜索高级筛选".to_string(),
+            "测试内容".to_string(),
+            Priority::Medium,
+        );
+        record.tags = vec!["开发".to_string(), "测试".to_string()];
+        record.persons = vec!["张三".to_string()];
+
+        let selected_tags = BTreeSet::from(["开发".to_string(), "测试".to_string()]);
+        let selected_persons = BTreeSet::from(["张三".to_string()]);
+        assert!(SearchPanel::matches_advanced_filter(
+            &record,
+            &selected_tags,
+            &selected_persons,
+            AdvancedFilterMode::And,
+        ));
+
+        let missing_persons = BTreeSet::from(["李四".to_string()]);
+        assert!(!SearchPanel::matches_advanced_filter(
+            &record,
+            &selected_tags,
+            &missing_persons,
+            AdvancedFilterMode::And,
+        ));
+    }
+
+    #[test]
+    fn test_matches_advanced_filter_in_or_mode() {
+        let mut record = Record::new_task(
+            "搜索高级筛选".to_string(),
+            "测试内容".to_string(),
+            Priority::Medium,
+        );
+        record.tags = vec!["开发".to_string()];
+        record.persons = vec!["张三".to_string()];
+
+        let selected_tags = BTreeSet::from(["测试".to_string()]);
+        let selected_persons = BTreeSet::from(["张三".to_string()]);
+        assert!(SearchPanel::matches_advanced_filter(
+            &record,
+            &selected_tags,
+            &selected_persons,
+            AdvancedFilterMode::Or,
+        ));
+
+        let unmatched_persons = BTreeSet::from(["李四".to_string()]);
+        assert!(!SearchPanel::matches_advanced_filter(
+            &record,
+            &selected_tags,
+            &unmatched_persons,
+            AdvancedFilterMode::Or,
+        ));
+    }
+
+    #[test]
+    fn test_apply_advanced_filter_toggle_promotes_single_filter_and_clears_on_disable() {
+        let (browse_filter, selected_tags, selected_persons, filter_mode) =
+            SearchPanel::apply_advanced_filter_toggle(
+                Some(&BrowseFilter::Tag("开发".to_string())),
+                true,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                AdvancedFilterMode::Or,
+            );
+        assert_eq!(browse_filter, None);
+        assert_eq!(selected_tags, BTreeSet::from(["开发".to_string()]));
+        assert!(selected_persons.is_empty());
+        assert_eq!(filter_mode, AdvancedFilterMode::Or);
+
+        let (browse_filter, selected_tags, selected_persons, filter_mode) =
+            SearchPanel::apply_advanced_filter_toggle(
+                None,
+                false,
+                &selected_tags,
+                &selected_persons,
+                filter_mode,
+            );
+        assert_eq!(browse_filter, None);
+        assert!(selected_tags.is_empty());
+        assert!(selected_persons.is_empty());
+        assert_eq!(filter_mode, AdvancedFilterMode::And);
     }
 }

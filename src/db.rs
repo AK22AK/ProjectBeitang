@@ -586,6 +586,29 @@ impl Database {
         Ok(result)
     }
 
+    pub fn get_all_records(&self) -> Result<Vec<Record>> {
+        eprintln!("[DB] get_all_records called");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, content, priority, status, created_at, updated_at,
+                    completed_at, scheduled_for, due_date, notified_at,
+                    cancelled_reason, record_type
+             FROM records
+             ORDER BY updated_at DESC",
+        )?;
+
+        let records = stmt.query_map([], |row| self.row_to_record(row))?;
+
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+
+        eprintln!("[DB] get_all_records returning {} records", result.len());
+        Ok(result)
+    }
+
     pub fn get_pending_reminders(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type

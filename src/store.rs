@@ -49,6 +49,9 @@ pub enum StoreCommand {
         query: String,
         respond_to: Sender<Result<Vec<Record>, String>>,
     },
+    GetAllRecords {
+        respond_to: Sender<Result<Vec<Record>, String>>,
+    },
     GetRecordsByTag {
         tag: String,
         respond_to: Sender<Result<Vec<Record>, String>>,
@@ -198,6 +201,10 @@ impl StoreRuntime {
                 }
                 StoreCommand::SearchRecords { query, respond_to } => {
                     let result = self.handle_search_records(query).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetAllRecords { respond_to } => {
+                    let result = self.handle_get_all_records().await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetRecordsByTag { tag, respond_to } => {
@@ -375,6 +382,23 @@ impl StoreRuntime {
                 }
                 Err(e) => {
                     eprintln!("[Store] Search query failed: {}", e);
+                    Err(format!("Database error: {}", e))
+                }
+            },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_all_records(&self) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] handle_get_all_records called");
+        match &self.db {
+            Some(db) => match db.get_all_records() {
+                Ok(records) => {
+                    eprintln!("[Store] Found {} total records", records.len());
+                    Ok(records)
+                }
+                Err(e) => {
+                    eprintln!("[Store] All records query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
             },
@@ -749,6 +773,21 @@ impl Store {
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
         eprintln!(
             "[Store] search_records returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
+        result
+    }
+
+    pub async fn get_all_records(&self) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] get_all_records called");
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetAllRecords { respond_to: tx })
+            .await;
+        let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
+        eprintln!(
+            "[Store] get_all_records returning: {:?} records",
             result.as_ref().map(|v| v.len())
         );
         result
