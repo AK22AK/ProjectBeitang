@@ -2132,12 +2132,6 @@ impl Render for TaskPanel {
                                 },
                             ))),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x888888))
-                            .child("输入格式: !! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物"),
-                    )
                     .child(self.render_toolbar(cx))
                     .child(self.render_tag_filter(cx))
                     .when(self.reminder_task_id.is_some(), |el| {
