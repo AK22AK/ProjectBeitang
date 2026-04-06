@@ -12,12 +12,17 @@ use beitang::ui::task_panel::TaskPanel;
 use beitang::ui::timeline::Timeline;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::*;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::ActiveTheme;
 use gpui_component_assets::Assets;
 use gpui_platform::application;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+
+const MAIN_SIDEBAR_WIDTH: Pixels = px(200.0);
+const SETTINGS_NAV_BREAKPOINT: Pixels = px(600.0);
+const SETTINGS_SIDEBAR_NAV_WIDTH: Pixels = px(180.0);
 
 #[derive(Clone)]
 struct MainWindowController {
@@ -32,6 +37,53 @@ impl Default for MainWindowController {
             current_panel: Panel::Dashboard,
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsSection {
+    General,
+    Shortcuts,
+    About,
+}
+
+impl SettingsSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "通用",
+            Self::Shortcuts => "快捷键",
+            Self::About => "关于",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::General => "通用",
+            Self::Shortcuts => "快捷键",
+            Self::About => "关于",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::General => "应用级偏好、显示方式等通用设置将在这里集中管理。",
+            Self::Shortcuts => "当前先展示全局快捷键，后续再开放自定义编辑。",
+            Self::About => "版本信息、更新说明和相关说明将在这里统一展示。",
+        }
+    }
+
+    fn is_implemented(self) -> bool {
+        matches!(self, Self::Shortcuts)
+    }
+
+    fn all() -> [Self; 3] {
+        [Self::General, Self::Shortcuts, Self::About]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsLayoutMode {
+    Sidebar,
+    TopTabs,
 }
 
 fn main() {
@@ -370,6 +422,7 @@ fn open_main_window(
 
 pub struct MainView {
     current_panel: Panel,
+    current_settings_section: SettingsSection,
     dashboard_panel: Entity<Dashboard>,
     search_panel: Entity<SearchPanel>,
     task_panel: Entity<TaskPanel>,
@@ -401,6 +454,7 @@ impl MainView {
 
         Self {
             current_panel: initial_panel,
+            current_settings_section: SettingsSection::General,
             dashboard_panel,
             search_panel,
             task_panel,
@@ -436,6 +490,10 @@ impl MainView {
     }
 
     pub fn switch_to_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        if panel == Panel::Settings && self.current_panel != Panel::Settings {
+            self.current_settings_section = SettingsSection::General;
+        }
+
         if self.current_panel != panel {
             eprintln!(
                 "[MainView] Switching panel from {:?} to {:?}",
@@ -449,7 +507,106 @@ impl MainView {
         self.focus_active_panel(panel, window, cx);
     }
 
-    fn render_settings_panel(&self) -> impl IntoElement {
+    fn settings_content_width(window: &Window) -> Pixels {
+        std::cmp::max(window.viewport_size().width - MAIN_SIDEBAR_WIDTH, px(0.0))
+    }
+
+    fn current_settings_layout_mode(&self, window: &Window) -> SettingsLayoutMode {
+        if Self::settings_content_width(window) >= SETTINGS_NAV_BREAKPOINT {
+            SettingsLayoutMode::Sidebar
+        } else {
+            SettingsLayoutMode::TopTabs
+        }
+    }
+
+    fn render_settings_nav_item(
+        &self,
+        section: SettingsSection,
+        is_active: bool,
+        layout_mode: SettingsLayoutMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let px_x = match layout_mode {
+            SettingsLayoutMode::Sidebar => px(12.0),
+            SettingsLayoutMode::TopTabs => px(14.0),
+        };
+        let py_y = match layout_mode {
+            SettingsLayoutMode::Sidebar => px(10.0),
+            SettingsLayoutMode::TopTabs => px(8.0),
+        };
+
+        div()
+            .id(("settings-section", section as usize))
+            .cursor_pointer()
+            .px(px_x)
+            .py(py_y)
+            .rounded(px(10.0))
+            .bg(if is_active {
+                rgb(0xf5f5f0)
+            } else {
+                rgb(0xffffff)
+            })
+            .hover(|style| {
+                style.bg(if is_active {
+                    rgb(0xf5f5f0)
+                } else {
+                    rgb(0xf7f7f7)
+                })
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(if is_active {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(if is_active {
+                        rgb(0x262626)
+                    } else {
+                        rgb(0x595959)
+                    })
+                    .child(section.label()),
+            )
+            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.current_settings_section = section;
+                cx.notify();
+            }))
+    }
+
+    fn render_settings_placeholder(&self, section: SettingsSection) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x262626))
+                    .child(section.title()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .line_height(relative(1.5))
+                    .child(section.description()),
+            )
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(999.0))
+                    .bg(rgb(0xf5f5f5))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0x8c8c8c))
+                    .child("开发中"),
+            )
+    }
+
+    fn render_shortcuts_settings(&self) -> impl IntoElement {
         let shortcut_entries = self
             .shortcut_config
             .entries()
@@ -458,14 +615,12 @@ impl MainView {
             .collect::<Vec<_>>();
 
         div()
-            .size_full()
-            .p(px(24.0))
             .flex()
             .flex_col()
-            .gap(px(18.0))
+            .gap(px(16.0))
             .child(
                 div()
-                    .text_xl()
+                    .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x262626))
                     .child("快捷键"),
@@ -474,7 +629,8 @@ impl MainView {
                 div()
                     .text_sm()
                     .text_color(rgb(0x8c8c8c))
-                    .child("本轮先展示当前全局快捷键，后续再开放自定义编辑。"),
+                    .line_height(relative(1.5))
+                    .child("查看当前可用的全局快捷键。后续版本会在这里补充自定义编辑能力。"),
             )
             .child(div().flex().flex_col().gap(px(10.0)).children(
                 shortcut_entries.into_iter().map(|(label, shortcut)| {
@@ -505,6 +661,100 @@ impl MainView {
                 }),
             ))
     }
+
+    fn render_settings_content(&self) -> impl IntoElement {
+        if self.current_settings_section.is_implemented() {
+            self.render_shortcuts_settings().into_any_element()
+        } else {
+            self.render_settings_placeholder(self.current_settings_section)
+                .into_any_element()
+        }
+    }
+
+    fn render_settings_panel(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout_mode = self.current_settings_layout_mode(window);
+        let sections = SettingsSection::all();
+        let current_section = self.current_settings_section;
+
+        div()
+            .size_full()
+            .p(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x262626))
+                    .child("设置"),
+            )
+            .child(match layout_mode {
+                SettingsLayoutMode::Sidebar => div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .w(SETTINGS_SIDEBAR_NAV_WIDTH)
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .children(sections.into_iter().map(|section| {
+                                self.render_settings_nav_item(
+                                    section,
+                                    current_section == section,
+                                    layout_mode,
+                                    cx,
+                                )
+                                .into_any_element()
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .size_full()
+                                    .pr(px(16.0))
+                                    .overflow_y_scrollbar()
+                                    .child(self.render_settings_content()),
+                            ),
+                    )
+                    .into_any_element(),
+                SettingsLayoutMode::TopTabs => div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .child(div().flex().gap(px(8.0)).children(sections.into_iter().map(
+                        |section| {
+                            self.render_settings_nav_item(
+                                section,
+                                current_section == section,
+                                layout_mode,
+                                cx,
+                            )
+                            .into_any_element()
+                        },
+                    )))
+                    .child(
+                        div().flex_1().min_h_0().overflow_hidden().child(
+                            div()
+                                .size_full()
+                                .pr(px(16.0))
+                                .overflow_y_scrollbar()
+                                .child(self.render_settings_content()),
+                        ),
+                    )
+                    .into_any_element(),
+            })
+    }
 }
 
 impl Focusable for MainView {
@@ -514,7 +764,7 @@ impl Focusable for MainView {
 }
 
 impl Render for MainView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_panel = self.current_panel;
         let on_panel_change = cx.listener(
             |this: &mut MainView,
@@ -591,7 +841,9 @@ impl Render for MainView {
                                     ),
                             )
                             .into_any_element(),
-                        Panel::Settings => self.render_settings_panel().into_any_element(),
+                        Panel::Settings => {
+                            self.render_settings_panel(window, cx).into_any_element()
+                        }
                     }),
             )
     }

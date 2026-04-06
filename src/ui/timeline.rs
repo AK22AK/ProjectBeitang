@@ -425,6 +425,7 @@ impl Render for Timeline {
         v_flex()
             .size_full()
             .gap(px(16.0))
+            .p(px(16.0))
             .child(
                 div()
                     .text_xl()
@@ -434,12 +435,14 @@ impl Render for Timeline {
             )
             .child(self.render_tag_filter(cx))
             .child(
-                div().flex_1().overflow_y_scrollbar().child(
+                div().flex_1().overflow_hidden().child(
                     div()
                         .id("timeline-list")
+                        .size_full()
                         .flex()
                         .flex_col()
-                        .p(px(16.0))
+                        .pr(px(16.0))
+                        .overflow_y_scrollbar()
                         .children(records.iter().enumerate().map(|(idx, record)| {
                             let is_last = idx == records.len() - 1;
                             self.render_timeline_item(record, is_last, cx)
