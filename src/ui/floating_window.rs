@@ -427,7 +427,7 @@ impl QuickAddWindow {
         }
 
         let (content, tags, people) = parsing::parse_record_input(&text);
-        let mut record = Record::new_note(if content.is_empty() { text } else { content });
+        let mut record = Record::new_note(content);
 
         for tag in tags {
             record.tags.push(tag);

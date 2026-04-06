@@ -623,10 +623,15 @@ impl TaskPanel {
                 let (title, priority, tags, people) = parsing::parse_task_input(&new_title);
 
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+                    let current_inline = parsing::parse_record_fields(task.title.as_deref(), "");
+                    let next_tags =
+                        parsing::reconcile_metadata(&task.tags, &current_inline.tags, &tags);
+                    let next_persons =
+                        parsing::reconcile_metadata(&task.persons, &current_inline.people, &people);
                     task.title = Some(title);
                     task.priority = Some(priority);
-                    task.tags = tags;
-                    task.persons = people;
+                    task.tags = next_tags;
+                    task.persons = next_persons;
                     task.updated_at = chrono::Utc::now();
                     let updated_task = task.clone();
                     let store = self.store.clone();

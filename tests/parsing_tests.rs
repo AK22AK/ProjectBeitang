@@ -1,7 +1,7 @@
 use beitang::models::Priority;
 use beitang::ui::parsing::{
-    compose_content_with_metadata, parse_person_list, parse_priority, parse_record_fields,
-    parse_record_input, parse_tag_list, parse_tags_and_people, parse_task_input,
+    parse_person_list, parse_priority, parse_record_fields, parse_record_input, parse_tag_list,
+    parse_tags_and_people, parse_task_input, reconcile_metadata,
 };
 
 #[test]
@@ -135,7 +135,7 @@ fn test_parse_empty_tag_or_person() {
 #[test]
 fn test_parse_task_input_full() {
     let result = parse_task_input("!! High priority task #work @john #urgent");
-    assert_eq!(result.0, "High priority task");
+    assert_eq!(result.0, "High priority task #work @john #urgent");
     assert_eq!(result.1, Priority::High);
     assert_eq!(result.2, vec!["work", "urgent"]);
     assert_eq!(result.3, vec!["john"]);
@@ -153,7 +153,7 @@ fn test_parse_task_input_no_tags() {
 #[test]
 fn test_parse_task_input_only_tags() {
     let result = parse_task_input("!! #work @john");
-    assert_eq!(result.0, "");
+    assert_eq!(result.0, "#work @john");
     assert_eq!(result.1, Priority::High);
     assert_eq!(result.2, vec!["work"]);
     assert_eq!(result.3, vec!["john"]);
@@ -162,7 +162,7 @@ fn test_parse_task_input_only_tags() {
 #[test]
 fn test_parse_record_input() {
     let result = parse_record_input("Meeting notes #work @john #important");
-    assert_eq!(result.0, "Meeting notes");
+    assert_eq!(result.0, "Meeting notes #work @john #important");
     assert_eq!(result.1, vec!["work", "important"]);
     assert_eq!(result.2, vec!["john"]);
 }
@@ -170,7 +170,7 @@ fn test_parse_record_input() {
 #[test]
 fn test_parse_record_input_preserves_line_breaks() {
     let result = parse_record_input("第一行内容\n#工作 @张三\n第二行内容");
-    assert_eq!(result.0, "第一行内容\n\n第二行内容");
+    assert_eq!(result.0, "第一行内容\n#工作 @张三\n第二行内容");
     assert_eq!(result.1, vec!["工作"]);
     assert_eq!(result.2, vec!["张三"]);
 }
@@ -182,21 +182,24 @@ fn test_parse_record_fields_merges_and_dedups_metadata() {
         "正文内容\n#开发 @李四\n补充说明 @张三 #测试",
     );
 
-    assert_eq!(result.title, Some("标题".to_string()));
-    assert_eq!(result.content, "正文内容\n\n补充说明");
+    assert_eq!(result.title, Some("标题 #开发 @张三".to_string()));
+    assert_eq!(
+        result.content,
+        "正文内容\n#开发 @李四\n补充说明 @张三 #测试"
+    );
     assert_eq!(result.tags, vec!["开发", "测试"]);
     assert_eq!(result.people, vec!["张三", "李四"]);
 }
 
 #[test]
-fn test_compose_content_with_metadata_appends_tokens_on_new_line() {
-    let result = compose_content_with_metadata(
-        "正文内容",
-        &["开发".to_string(), "测试".to_string()],
-        &["张三".to_string()],
+fn test_reconcile_metadata_preserves_non_inline_entries() {
+    let result = reconcile_metadata(
+        &["旧标签".to_string(), "正文标签".to_string()],
+        &["正文标签".to_string()],
+        &["新标签".to_string()],
     );
 
-    assert_eq!(result, "正文内容\n#开发 #测试 @张三");
+    assert_eq!(result, vec!["旧标签", "新标签"]);
 }
 
 #[test]

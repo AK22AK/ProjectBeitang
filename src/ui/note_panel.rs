@@ -195,7 +195,7 @@ impl NotePanel {
             content, tags, people
         );
 
-        let mut note = Record::new_note(if content.is_empty() { text } else { content });
+        let mut note = Record::new_note(content);
         note.tags = tags;
         note.persons = people;
         eprintln!(

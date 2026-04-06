@@ -11,43 +11,48 @@ pub struct ParsedRecordFields {
 
 /// 解析任务输入，返回 (内容, 优先级, 标签列表, 人物列表)
 pub fn parse_task_input(input: &str) -> (String, Priority, Vec<String>, Vec<String>) {
-    let (content_without_tags, tags, people) = parse_tags_and_people(input);
-    let (content, priority) = parse_priority(&content_without_tags);
+    let (content, priority) = parse_priority(input);
+    let (tags, people) = extract_tags_and_people(&content);
     (content, priority, tags, people)
 }
 
 /// 解析记录输入，返回 (内容, 标签列表, 人物列表)
 pub fn parse_record_input(input: &str) -> (String, Vec<String>, Vec<String>) {
-    parse_tags_and_people(input)
+    let content = input.trim().to_string();
+    let (tags, people) = extract_tags_and_people(&content);
+    (content, tags, people)
 }
 
 pub fn parse_record_fields(title: Option<&str>, content: &str) -> ParsedRecordFields {
-    let (clean_title, title_tags, title_people) = parse_tags_and_people(title.unwrap_or_default());
-    let (clean_content, content_tags, content_people) = parse_tags_and_people(content);
+    let normalized_title = normalize_optional_text(title.unwrap_or_default());
+    let normalized_content = content.trim().to_string();
+    let (title_tags, title_people) = normalized_title
+        .as_deref()
+        .map(extract_tags_and_people)
+        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+    let (content_tags, content_people) = extract_tags_and_people(&normalized_content);
 
     ParsedRecordFields {
-        title: normalize_optional_text(&clean_title),
-        content: clean_content,
+        title: normalized_title,
+        content: normalized_content,
         tags: dedup_preserving_order(title_tags.into_iter().chain(content_tags)),
         people: dedup_preserving_order(title_people.into_iter().chain(content_people)),
     }
 }
 
-pub fn compose_content_with_metadata(content: &str, tags: &[String], people: &[String]) -> String {
-    let metadata = tags
+pub fn reconcile_metadata(
+    existing: &[String],
+    previous_inline: &[String],
+    new_inline: &[String],
+) -> Vec<String> {
+    let previous_inline_set: HashSet<&str> =
+        previous_inline.iter().map(|value| value.as_str()).collect();
+    let preserved = existing
         .iter()
-        .map(|tag| format!("#{tag}"))
-        .chain(people.iter().map(|person| format!("@{person}")))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .filter(|value| !previous_inline_set.contains(value.as_str()))
+        .cloned();
 
-    let trimmed_content = content.trim();
-    match (trimmed_content.is_empty(), metadata.is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => metadata,
-        (false, true) => trimmed_content.to_string(),
-        (false, false) => format!("{trimmed_content}\n{metadata}"),
-    }
+    dedup_preserving_order(preserved.chain(new_inline.iter().cloned()))
 }
 
 /// 解析优先级，返回 (去除优先级的内容, 优先级)
@@ -108,6 +113,25 @@ pub fn parse_tags_and_people(input: &str) -> (String, Vec<String>, Vec<String>) 
 
     let content = trim_empty_edge_lines(cleaned_lines).join("\n");
     (content.trim().to_string(), tags, people)
+}
+
+pub fn extract_tags_and_people(input: &str) -> (Vec<String>, Vec<String>) {
+    let mut tags = Vec::new();
+    let mut people = Vec::new();
+
+    for word in input.split_whitespace() {
+        if let Some(tag) = word.strip_prefix('#') {
+            if !tag.is_empty() {
+                tags.push(tag.to_string());
+            }
+        } else if let Some(person) = word.strip_prefix('@') {
+            if !person.is_empty() {
+                people.push(person.to_string());
+            }
+        }
+    }
+
+    (dedup_preserving_order(tags), dedup_preserving_order(people))
 }
 
 /// 批量解析多个标签（从逗号或空白分隔的字符串）
@@ -307,7 +331,7 @@ mod tests {
     #[test]
     fn test_parse_task_input_full() {
         let result = parse_task_input("!! High priority task #work @john #urgent");
-        assert_eq!(result.0, "High priority task");
+        assert_eq!(result.0, "High priority task #work @john #urgent");
         assert_eq!(result.1, Priority::High);
         assert_eq!(result.2, vec!["work", "urgent"]);
         assert_eq!(result.3, vec!["john"]);
@@ -325,7 +349,7 @@ mod tests {
     #[test]
     fn test_parse_task_input_only_tags() {
         let result = parse_task_input("!! #work @john");
-        assert_eq!(result.0, "");
+        assert_eq!(result.0, "#work @john");
         assert_eq!(result.1, Priority::High);
         assert_eq!(result.2, vec!["work"]);
         assert_eq!(result.3, vec!["john"]);
@@ -336,7 +360,7 @@ mod tests {
     #[test]
     fn test_parse_record_input() {
         let result = parse_record_input("Meeting notes #work @john #important");
-        assert_eq!(result.0, "Meeting notes");
+        assert_eq!(result.0, "Meeting notes #work @john #important");
         assert_eq!(result.1, vec!["work", "important"]);
         assert_eq!(result.2, vec!["john"]);
     }

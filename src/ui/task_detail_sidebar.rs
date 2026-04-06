@@ -23,6 +23,8 @@ pub struct TaskDetailSidebar {
     cancel_reason: Option<String>,
     tags: Vec<String>,
     persons: Vec<String>,
+    inline_tags: Vec<String>,
+    inline_persons: Vec<String>,
     date_picker: Option<Entity<DatePickerState>>,
     time_input: Option<Entity<InputState>>,
     reminder_date_picker: Option<Entity<DatePickerState>>,
@@ -70,6 +72,8 @@ impl TaskDetailSidebar {
             cancel_reason: None,
             tags: Vec::new(),
             persons: Vec::new(),
+            inline_tags: Vec::new(),
+            inline_persons: Vec::new(),
             date_picker: None,
             time_input: None,
             reminder_date_picker: None,
@@ -124,6 +128,9 @@ impl TaskDetailSidebar {
         self.cancel_reason = task.cancelled_reason.clone();
         self.tags = task.tags.clone();
         self.persons = task.persons.clone();
+        let inline_fields = parsing::parse_record_fields(task.title.as_deref(), &task.content);
+        self.inline_tags = inline_fields.tags;
+        self.inline_persons = inline_fields.people;
 
         // 初始化或更新截止日期选择器状态
         let (init_date, init_time_str) = if let Some(due) = self.due_date {
@@ -223,8 +230,7 @@ impl TaskDetailSidebar {
         }
 
         // 初始化或更新内容输入框（多行文本区域）
-        let content_value =
-            parsing::compose_content_with_metadata(&task.content, &task.tags, &task.persons);
+        let content_value = task.content.clone();
         if let Some(ref input) = self.content_input {
             input.update(cx, |state, cx| {
                 state.set_value(&content_value, window, cx);
@@ -332,7 +338,7 @@ impl TaskDetailSidebar {
         self.reminder_time_input = Some(reminder_time_input);
     }
 
-    fn save_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let (Some(ref task_id), Some(ref priority), Some(ref status)) =
             (&self.current_task_id, &self.priority, &self.status)
         {
@@ -355,28 +361,20 @@ impl TaskDetailSidebar {
                 .map(|input| input.read(cx).value().to_string())
                 .unwrap_or_else(|| self.task_content.clone());
             let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
-            let normalized_content = parsing::compose_content_with_metadata(
-                &parsed_fields.content,
-                &parsed_fields.tags,
+            let next_tags =
+                parsing::reconcile_metadata(&self.tags, &self.inline_tags, &parsed_fields.tags);
+            let next_persons = parsing::reconcile_metadata(
+                &self.persons,
+                &self.inline_persons,
                 &parsed_fields.people,
             );
-            let normalized_title = parsed_fields.title.clone().unwrap_or_default();
+
             self.task_title = parsed_fields.title.clone();
             self.task_content = parsed_fields.content.clone();
-            self.tags = parsed_fields.tags.clone();
-            self.persons = parsed_fields.people.clone();
-
-            if let Some(ref input) = self.title_input {
-                input.update(cx, |state, cx| {
-                    state.set_value(&normalized_title, window, cx);
-                });
-            }
-
-            if let Some(ref input) = self.content_input {
-                input.update(cx, |state, cx| {
-                    state.set_value(&normalized_content, window, cx);
-                });
-            }
+            self.tags = next_tags.clone();
+            self.persons = next_persons.clone();
+            self.inline_tags = parsed_fields.tags.clone();
+            self.inline_persons = parsed_fields.people.clone();
 
             let due_date = self.date_picker.as_ref().and_then(|dp| {
                 let date_range = dp.read(cx).date();
@@ -415,8 +413,8 @@ impl TaskDetailSidebar {
                 due_date,
                 scheduled_for,
                 cancel_reason: self.cancel_reason.clone(),
-                tags: self.tags.clone(),
-                persons: self.persons.clone(),
+                tags: next_tags,
+                persons: next_persons,
             };
 
             if let Some(ref callback) = self.on_save {

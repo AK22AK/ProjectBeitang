@@ -19,6 +19,8 @@ pub struct RecordDetailSidebar {
     updated_at: Option<DateTime<Utc>>,
     tags: Vec<String>,
     persons: Vec<String>,
+    inline_tags: Vec<String>,
+    inline_persons: Vec<String>,
     title_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
     content_expanded: bool,
@@ -54,6 +56,8 @@ impl RecordDetailSidebar {
             updated_at: None,
             tags: Vec::new(),
             persons: Vec::new(),
+            inline_tags: Vec::new(),
+            inline_persons: Vec::new(),
             title_input: None,
             content_input: None,
             content_expanded: false,
@@ -101,6 +105,9 @@ impl RecordDetailSidebar {
         self.updated_at = Some(record.updated_at);
         self.tags = record.tags.clone();
         self.persons = record.persons.clone();
+        let inline_fields = parsing::parse_record_fields(record.title.as_deref(), &record.content);
+        self.inline_tags = inline_fields.tags;
+        self.inline_persons = inline_fields.people;
 
         // 初始化或更新标题输入框
         let title_value = record.title.clone().unwrap_or_default();
@@ -118,8 +125,7 @@ impl RecordDetailSidebar {
         }
 
         // 初始化或更新内容输入框（多行文本区域）
-        let content_value =
-            parsing::compose_content_with_metadata(&record.content, &record.tags, &record.persons);
+        let content_value = record.content.clone();
         if let Some(ref input) = self.content_input {
             input.update(cx, |state, cx| {
                 state.set_value(&content_value, window, cx);
@@ -189,7 +195,7 @@ impl RecordDetailSidebar {
         estimated_lines.max(1)
     }
 
-    fn save_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ref record_id) = self.current_record_id {
             let raw_title = self
                 .title_input
@@ -210,35 +216,26 @@ impl RecordDetailSidebar {
                 .map(|input| input.read(cx).value().to_string())
                 .unwrap_or_else(|| self.record_content.clone());
             let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
-            let normalized_content = parsing::compose_content_with_metadata(
-                &parsed_fields.content,
-                &parsed_fields.tags,
+            let next_tags =
+                parsing::reconcile_metadata(&self.tags, &self.inline_tags, &parsed_fields.tags);
+            let next_persons = parsing::reconcile_metadata(
+                &self.persons,
+                &self.inline_persons,
                 &parsed_fields.people,
             );
-            let normalized_title = parsed_fields.title.clone().unwrap_or_default();
             self.record_title = parsed_fields.title.clone();
             self.record_content = parsed_fields.content.clone();
-            self.tags = parsed_fields.tags.clone();
-            self.persons = parsed_fields.people.clone();
-
-            if let Some(ref input) = self.title_input {
-                input.update(cx, |state, cx| {
-                    state.set_value(&normalized_title, window, cx);
-                });
-            }
-
-            if let Some(ref input) = self.content_input {
-                input.update(cx, |state, cx| {
-                    state.set_value(&normalized_content, window, cx);
-                });
-            }
+            self.tags = next_tags.clone();
+            self.persons = next_persons.clone();
+            self.inline_tags = parsed_fields.tags.clone();
+            self.inline_persons = parsed_fields.people.clone();
 
             let payload = SavePayload {
                 record_id: record_id.clone(),
                 title: parsed_fields.title,
                 content: parsed_fields.content,
-                tags: self.tags.clone(),
-                persons: self.persons.clone(),
+                tags: next_tags,
+                persons: next_persons,
             };
 
             if let Some(ref callback) = self.on_save {
