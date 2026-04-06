@@ -10,7 +10,7 @@ use beitang::ui::floating_window::{
 };
 use beitang::ui::note_panel::NotePanel;
 use beitang::ui::search::SearchPanel;
-use beitang::ui::sidebar::{Panel, Sidebar};
+use beitang::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, Sidebar};
 use beitang::ui::task_panel::TaskPanel;
 use beitang::ui::timeline::Timeline;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -23,7 +23,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const MAIN_SIDEBAR_WIDTH: Pixels = px(200.0);
 const SETTINGS_NAV_BREAKPOINT: Pixels = px(600.0);
 const SETTINGS_SIDEBAR_NAV_WIDTH: Pixels = px(180.0);
 
@@ -675,7 +674,9 @@ impl MainView {
     }
 
     fn settings_content_width(window: &Window) -> Pixels {
-        std::cmp::max(window.viewport_size().width - MAIN_SIDEBAR_WIDTH, px(0.0))
+        let viewport_width = window.viewport_size().width;
+        let sidebar_width = main_sidebar_width(main_sidebar_layout_mode(viewport_width));
+        std::cmp::max(viewport_width - sidebar_width, px(0.0))
     }
 
     fn current_settings_layout_mode(&self, window: &Window) -> SettingsLayoutMode {
@@ -979,6 +980,7 @@ impl Focusable for MainView {
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_panel = self.current_panel;
+        let sidebar_layout_mode = main_sidebar_layout_mode(window.viewport_size().width);
         let on_panel_change = cx.listener(
             |this: &mut MainView,
              panel: &Panel,
@@ -1014,7 +1016,8 @@ impl Render for MainView {
                 Sidebar::new(move |panel, window, app| {
                     on_panel_change(&panel, window, app);
                 })
-                .with_panel(current_panel),
+                .with_panel(current_panel)
+                .with_layout_mode(sidebar_layout_mode),
             )
             .child(
                 div()

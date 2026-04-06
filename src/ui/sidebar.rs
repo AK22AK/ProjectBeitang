@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::IconName;
+use gpui_component::{tooltip::Tooltip, IconName};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -14,9 +14,35 @@ pub enum Panel {
     Settings,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidebarLayoutMode {
+    Expanded,
+    Compact,
+}
+
+pub const MAIN_SIDEBAR_EXPANDED_WIDTH: Pixels = px(200.0);
+pub const MAIN_SIDEBAR_COMPACT_WIDTH: Pixels = px(64.0);
+pub const MAIN_SIDEBAR_BREAKPOINT: Pixels = px(840.0);
+
+pub fn main_sidebar_layout_mode(window_width: Pixels) -> SidebarLayoutMode {
+    if window_width >= MAIN_SIDEBAR_BREAKPOINT {
+        SidebarLayoutMode::Expanded
+    } else {
+        SidebarLayoutMode::Compact
+    }
+}
+
+pub fn main_sidebar_width(layout_mode: SidebarLayoutMode) -> Pixels {
+    match layout_mode {
+        SidebarLayoutMode::Expanded => MAIN_SIDEBAR_EXPANDED_WIDTH,
+        SidebarLayoutMode::Compact => MAIN_SIDEBAR_COMPACT_WIDTH,
+    }
+}
+
 #[derive(IntoElement)]
 pub struct Sidebar {
     current_panel: Panel,
+    layout_mode: SidebarLayoutMode,
     on_panel_select: Arc<dyn Fn(Panel, &mut Window, &mut App)>,
 }
 
@@ -27,6 +53,7 @@ impl Sidebar {
     {
         Self {
             current_panel: Panel::Tasks,
+            layout_mode: SidebarLayoutMode::Expanded,
             on_panel_select: Arc::new(on_select),
         }
     }
@@ -35,11 +62,54 @@ impl Sidebar {
         self.current_panel = panel;
         self
     }
+
+    pub fn with_layout_mode(mut self, layout_mode: SidebarLayoutMode) -> Self {
+        self.layout_mode = layout_mode;
+        self
+    }
+}
+
+fn render_sidebar_item(
+    panel: Panel,
+    label: &'static str,
+    icon: IconName,
+    current_panel: Panel,
+    layout_mode: SidebarLayoutMode,
+    id: usize,
+    on_click: Arc<dyn Fn(Panel, &mut Window, &mut App)>,
+) -> impl IntoElement {
+    let is_active = current_panel == panel;
+    let is_compact = layout_mode == SidebarLayoutMode::Compact;
+
+    div()
+        .id(id)
+        .w_full()
+        .px(px(if is_compact { 0.0 } else { 12.0 }))
+        .py(px(8.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .when(is_active, |this| this.bg(rgb(0xd0d0d0)))
+        .hover(|style| style.bg(rgb(0xe0e0e0)))
+        .flex()
+        .items_center()
+        .when(is_compact, |this| this.justify_center())
+        .when(!is_compact, |this| this.gap(px(8.0)))
+        .when(is_compact, |this| {
+            this.tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+        })
+        .child(
+            gpui_component::Icon::new(icon)
+                .size(px(18.0))
+                .text_color(rgb(0x555555)),
+        )
+        .when(!is_compact, |this| this.child(label))
+        .on_click(move |_event, window, cx| on_click(panel, window, cx))
 }
 
 impl RenderOnce for Sidebar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let current_panel = self.current_panel;
+        let layout_mode = self.layout_mode;
         let on_panel_select = self.on_panel_select.clone();
 
         let main_items: Vec<(Panel, &'static str, IconName)> = vec![
@@ -58,7 +128,7 @@ impl RenderOnce for Sidebar {
         let on_panel_select_for_main = on_panel_select.clone();
 
         div()
-            .w(px(200.0))
+            .w(main_sidebar_width(layout_mode))
             .h_full()
             .flex()
             .flex_col()
@@ -71,27 +141,15 @@ impl RenderOnce for Sidebar {
                         .into_iter()
                         .enumerate()
                         .map(move |(idx, (panel, label, icon))| {
-                            let is_active = current_panel == panel;
-                            let on_click = on_panel_select_for_main.clone();
-
-                            div()
-                                .px(px(12.0))
-                                .py(px(8.0))
-                                .rounded(px(6.0))
-                                .cursor_pointer()
-                                .when(is_active, |this| this.bg(rgb(0xd0d0d0)))
-                                .hover(|style| style.bg(rgb(0xe0e0e0)))
-                                .flex()
-                                .gap(px(8.0))
-                                .items_center()
-                                .child(
-                                    gpui_component::Icon::new(icon)
-                                        .size(px(18.0))
-                                        .text_color(rgb(0x555555)),
-                                )
-                                .child(label)
-                                .id(idx)
-                                .on_click(move |_event, window, cx| on_click(panel, window, cx))
+                            render_sidebar_item(
+                                panel,
+                                label,
+                                icon,
+                                current_panel,
+                                layout_mode,
+                                idx,
+                                on_panel_select_for_main.clone(),
+                            )
                         }),
                 ),
             )
@@ -101,27 +159,15 @@ impl RenderOnce for Sidebar {
                         .into_iter()
                         .enumerate()
                         .map(move |(idx, (panel, label, icon))| {
-                            let is_active = current_panel == panel;
-                            let on_click = on_panel_select.clone();
-
-                            div()
-                                .px(px(12.0))
-                                .py(px(8.0))
-                                .rounded(px(6.0))
-                                .cursor_pointer()
-                                .when(is_active, |this| this.bg(rgb(0xd0d0d0)))
-                                .hover(|style| style.bg(rgb(0xe0e0e0)))
-                                .flex()
-                                .gap(px(8.0))
-                                .items_center()
-                                .child(
-                                    gpui_component::Icon::new(icon)
-                                        .size(px(18.0))
-                                        .text_color(rgb(0x555555)),
-                                )
-                                .child(label)
-                                .id(idx + 100)
-                                .on_click(move |_event, window, cx| on_click(panel, window, cx))
+                            render_sidebar_item(
+                                panel,
+                                label,
+                                icon,
+                                current_panel,
+                                layout_mode,
+                                idx + 100,
+                                on_panel_select.clone(),
+                            )
                         }),
                 ),
             )

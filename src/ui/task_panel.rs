@@ -1,6 +1,7 @@
 use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
 use crate::ui::parsing;
+use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
 use crate::ui::task_detail_sidebar::TaskDetailSidebar;
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::prelude::FluentBuilder as _;
@@ -26,7 +27,6 @@ actions!(
     ]
 );
 
-const MAIN_SIDEBAR_WIDTH: Pixels = px(200.0);
 const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(360.0);
 const TASK_PANEL_HORIZONTAL_PADDING: Pixels = px(32.0);
 const MATRIX_COLUMN_GAP: Pixels = px(8.0);
@@ -504,8 +504,9 @@ impl TaskPanel {
     }
 
     fn selected_quadrant_visible_width(&self, quadrant: Quadrant, window: &Window) -> Pixels {
-        let task_panel_width =
-            std::cmp::max(window.viewport_size().width - MAIN_SIDEBAR_WIDTH, px(0.0));
+        let viewport_width = window.viewport_size().width;
+        let sidebar_width = main_sidebar_width(main_sidebar_layout_mode(viewport_width));
+        let task_panel_width = std::cmp::max(viewport_width - sidebar_width, px(0.0));
         let matrix_content_width =
             std::cmp::max(task_panel_width - TASK_PANEL_HORIZONTAL_PADDING, px(0.0));
         let column_width = std::cmp::max((matrix_content_width - MATRIX_COLUMN_GAP) * 0.5, px(0.0));

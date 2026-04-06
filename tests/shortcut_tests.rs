@@ -2,7 +2,10 @@ use beitang::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
 use beitang::config::{parse_hotkey, ShortcutConfig};
 use beitang::models::{Priority, Record};
 use beitang::shortcut_manager::ShortcutEvent;
-use beitang::ui::sidebar::Panel;
+use beitang::ui::sidebar::{
+    main_sidebar_layout_mode, main_sidebar_width, Panel, SidebarLayoutMode,
+};
+use gpui::px;
 
 #[test]
 fn test_default_shortcut_config() {
@@ -67,6 +70,24 @@ fn test_main_panel_shortcuts_exclude_bottom_sidebar_panels() {
     assert!(main_panel_shortcuts()
         .into_iter()
         .all(|(_, panel)| !matches!(panel, Panel::Search | Panel::Settings)));
+}
+
+#[test]
+fn test_main_sidebar_layout_mode_breakpoint() {
+    assert_eq!(
+        main_sidebar_layout_mode(px(840.0)),
+        SidebarLayoutMode::Expanded
+    );
+    assert_eq!(
+        main_sidebar_layout_mode(px(839.0)),
+        SidebarLayoutMode::Compact
+    );
+}
+
+#[test]
+fn test_main_sidebar_width_by_layout_mode() {
+    assert_eq!(main_sidebar_width(SidebarLayoutMode::Expanded), px(200.0));
+    assert_eq!(main_sidebar_width(SidebarLayoutMode::Compact), px(64.0));
 }
 
 #[test]
