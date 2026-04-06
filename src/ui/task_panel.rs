@@ -142,6 +142,7 @@ struct PendingDeletion {
 pub struct TaskPanel {
     store: Store,
     tasks: Vec<Record>,
+    focus_handle: FocusHandle,
     input_state: Entity<InputState>,
     _subscription: Subscription,
     editing_task_id: Option<uuid::Uuid>,
@@ -171,6 +172,7 @@ pub struct TaskPanel {
 
 impl TaskPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("!! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物")
@@ -200,6 +202,7 @@ impl TaskPanel {
         let mut panel = Self {
             store,
             tasks: Vec::new(),
+            focus_handle,
             input_state,
             _subscription,
             editing_task_id: None,
@@ -957,6 +960,12 @@ impl TaskPanel {
                                 .text_sm()
                                 .text_color(rgb(0x666666))
                                 .child(format!("确认删除“{}”？删除后无法恢复。", title)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x999999))
+                                .child("按 Enter 确认，按 Esc 取消"),
                         )
                         .child(
                             h_flex()
@@ -1863,6 +1872,10 @@ impl TaskPanel {
 impl Render for TaskPanel {
     #[allow(unused_variables)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_deletion.is_some() {
+            self.focus_handle.focus(window, cx);
+        }
+
         let (pending_count, completed_count): (usize, usize) =
             self.tasks.iter().fold((0, 0), |(p, c), task| {
                 if task.completed_at.is_some() {
@@ -1877,6 +1890,7 @@ impl Render for TaskPanel {
             .flex()
             .flex_row()
             .relative()
+            .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.pending_deletion.is_none() {
                     return;
@@ -2152,5 +2166,11 @@ impl Render for TaskPanel {
             )
             .child(self.task_detail_sidebar.clone())
             .children(self.render_delete_confirmation(cx))
+    }
+}
+
+impl Focusable for TaskPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }

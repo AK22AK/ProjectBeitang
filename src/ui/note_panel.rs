@@ -19,6 +19,7 @@ struct PendingDeletion {
 pub struct NotePanel {
     store: Store,
     notes: Vec<Record>,
+    focus_handle: FocusHandle,
     input_state: Entity<InputState>,
     _subscription: Subscription,
     editing_note_id: Option<uuid::Uuid>,
@@ -31,6 +32,7 @@ pub struct NotePanel {
 
 impl NotePanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入笔记内容，第一行自动作为标题，Enter 保存 | #标签 @人物")
@@ -49,6 +51,7 @@ impl NotePanel {
         let mut panel = Self {
             store: store.clone(),
             notes: Vec::new(),
+            focus_handle,
             input_state,
             _subscription,
             editing_note_id: None,
@@ -263,10 +266,6 @@ impl NotePanel {
         .detach();
     }
 
-    fn delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
-        self.perform_delete_note(note_id, false, cx);
-    }
-
     fn request_delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
         if let Some(note) = self.notes.iter().find(|n| n.id == note_id) {
             self.pending_deletion = Some(PendingDeletion {
@@ -428,7 +427,11 @@ impl NotePanel {
 }
 
 impl Render for NotePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_deletion.is_some() {
+            self.focus_handle.focus(window, cx);
+        }
+
         eprintln!("[NotePanel] Rendering {} notes", self.notes.len());
 
         let sidebar_task_id = self
@@ -442,6 +445,7 @@ impl Render for NotePanel {
             .flex()
             .flex_row()
             .relative()
+            .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.pending_deletion.is_none() {
                     return;
@@ -618,7 +622,7 @@ impl Render for NotePanel {
                                                             .child("×")
                                                             .id(("delete", idx))
                                                             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                                                this.delete_note(note_id, cx);
+                                                                this.request_delete_note(note_id, cx);
                                                                 cx.stop_propagation();
                                                             }))
                                                     )
@@ -687,5 +691,11 @@ impl Render for NotePanel {
             )
             .child(self.record_detail_sidebar.clone())
             .children(self.render_delete_confirmation(cx))
+    }
+}
+
+impl Focusable for NotePanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
