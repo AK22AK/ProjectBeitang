@@ -8,7 +8,6 @@ use gpui_component::h_flex;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::v_flex;
-use std::collections::HashSet;
 use std::time::Duration as StdDuration;
 
 const SEARCH_DEBOUNCE_MS: u64 = 300;
@@ -48,7 +47,7 @@ pub struct SearchPanel {
     query: String,
     results: Vec<Record>,
     filter_type: SearchFilterType,
-    selected_tags: HashSet<String>,
+    selected_tag: Option<String>,
     #[allow(dead_code)]
     available_tags: Vec<String>,
     input_state: Entity<InputState>,
@@ -78,7 +77,7 @@ impl SearchPanel {
             query: String::new(),
             results: Vec::new(),
             filter_type: SearchFilterType::All,
-            selected_tags: HashSet::new(),
+            selected_tag: None,
             available_tags: Vec::new(),
             input_state,
             focus_handle,
@@ -89,6 +88,13 @@ impl SearchPanel {
 
         panel.load_available_tags(cx);
         panel
+    }
+
+    fn next_selected_tag(current_tag: Option<&str>, clicked_tag: &str) -> Option<String> {
+        match current_tag {
+            Some(tag) if tag == clicked_tag => None,
+            _ => Some(clicked_tag.to_string()),
+        }
     }
 
     pub fn focus_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -116,93 +122,21 @@ impl SearchPanel {
 
     fn on_query_change(&mut self, query: String, cx: &mut Context<Self>) {
         self.query = query;
-        self.search_generation += 1;
-        let generation = self.search_generation;
-
-        if self.query.trim().is_empty() {
-            self.results.clear();
-            self.is_searching = false;
-            cx.notify();
-            return;
-        }
-
-        let store = self.store.clone();
-        let search_query = self.query.clone();
-        self.is_searching = true;
-        cx.notify();
-
-        cx.spawn(async move |view, cx| {
-            cx.background_executor()
-                .timer(StdDuration::from_millis(SEARCH_DEBOUNCE_MS))
-                .await;
-
-            match store.search_records(&search_query).await {
-                Ok(records) => {
-                    let _ = view.update(cx, |panel, cx| {
-                        if panel.search_generation != generation || panel.query != search_query {
-                            return;
-                        }
-                        panel.results = records;
-                        panel.is_searching = false;
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[SearchPanel] Search failed: {}", e);
-                    let _ = view.update(cx, |panel, cx| {
-                        if panel.search_generation != generation || panel.query != search_query {
-                            return;
-                        }
-                        panel.is_searching = false;
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+        self.refresh_results(cx);
     }
 
     #[allow(dead_code)]
     fn perform_search(&mut self, cx: &mut Context<Self>) {
-        if self.query.trim().is_empty() {
-            return;
-        }
-
-        self.is_searching = true;
-        let store = self.store.clone();
-        let query = self.query.clone();
-
-        cx.spawn(
-            async move |view, cx| match store.search_records(&query).await {
-                Ok(records) => {
-                    let _ = view.update(cx, |panel, cx| {
-                        panel.results = records;
-                        panel.is_searching = false;
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[SearchPanel] Search failed: {}", e);
-                    let _ = view.update(cx, |panel, cx| {
-                        panel.is_searching = false;
-                        cx.notify();
-                    });
-                }
-            },
-        )
-        .detach();
+        self.refresh_results(cx);
     }
 
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.query.clear();
-        self.results.clear();
-        self.is_searching = false;
-        self.search_generation += 1;
         self.input_state.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
         });
-        cx.notify();
+        self.refresh_results(cx);
     }
 
     fn set_filter_type(
@@ -216,17 +150,13 @@ impl SearchPanel {
     }
 
     fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
-        if self.selected_tags.contains(tag) {
-            self.selected_tags.remove(tag);
-        } else {
-            self.selected_tags.insert(tag.to_string());
-        }
-        cx.notify();
+        self.selected_tag = Self::next_selected_tag(self.selected_tag.as_deref(), tag);
+        self.refresh_results(cx);
     }
 
     fn clear_tag_filters(&mut self, cx: &mut Context<Self>) {
-        self.selected_tags.clear();
-        cx.notify();
+        self.selected_tag = None;
+        self.refresh_results(cx);
     }
 
     fn get_filtered_results(&self) -> Vec<Record> {
@@ -234,13 +164,92 @@ impl SearchPanel {
             .iter()
             .filter(|r| self.filter_type.matches(&r.record_type))
             .filter(|r| {
-                if self.selected_tags.is_empty() {
-                    return true;
-                }
-                r.tags.iter().any(|tag| self.selected_tags.contains(tag))
+                self.selected_tag
+                    .as_ref()
+                    .map(|selected_tag| r.tags.iter().any(|tag| tag == selected_tag))
+                    .unwrap_or(true)
             })
             .cloned()
             .collect()
+    }
+
+    fn refresh_results(&mut self, cx: &mut Context<Self>) {
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        let query = self.query.trim().to_string();
+        let selected_tag = self.selected_tag.clone();
+
+        if query.is_empty() && selected_tag.is_none() {
+            self.results.clear();
+            self.is_searching = false;
+            cx.notify();
+            return;
+        }
+
+        let store = self.store.clone();
+        self.is_searching = true;
+        cx.notify();
+
+        if !query.is_empty() {
+            cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(StdDuration::from_millis(SEARCH_DEBOUNCE_MS))
+                    .await;
+
+                match store.search_records(&query).await {
+                    Ok(records) => {
+                        let _ = view.update(cx, |panel, cx| {
+                            if panel.search_generation != generation {
+                                return;
+                            }
+                            panel.results = records;
+                            panel.is_searching = false;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[SearchPanel] Search failed: {}", e);
+                        let _ = view.update(cx, |panel, cx| {
+                            if panel.search_generation != generation {
+                                return;
+                            }
+                            panel.is_searching = false;
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .detach();
+            return;
+        }
+
+        if let Some(tag) = selected_tag {
+            cx.spawn(
+                async move |view, cx| match store.get_records_by_tag(&tag).await {
+                    Ok(records) => {
+                        let _ = view.update(cx, |panel, cx| {
+                            if panel.search_generation != generation {
+                                return;
+                            }
+                            panel.results = records;
+                            panel.is_searching = false;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[SearchPanel] Tagged records load failed: {}", e);
+                        let _ = view.update(cx, |panel, cx| {
+                            if panel.search_generation != generation {
+                                return;
+                            }
+                            panel.is_searching = false;
+                            cx.notify();
+                        });
+                    }
+                },
+            )
+            .detach();
+        }
     }
 
     fn format_date_group(dt: DateTime<Utc>) -> String {
@@ -534,7 +543,7 @@ impl SearchPanel {
     }
 
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_selected = !self.selected_tags.is_empty();
+        let has_selected = self.selected_tag.is_some();
 
         v_flex()
             .gap(px(8.0))
@@ -544,7 +553,7 @@ impl SearchPanel {
                         .gap(px(4.0))
                         .flex_wrap()
                         .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
-                            let is_selected = self.selected_tags.contains(tag);
+                            let is_selected = self.selected_tag.as_deref() == Some(tag.as_str());
                             let tag_clone = tag.clone();
                             div()
                                 .id(("search-tag-filter", idx))
@@ -702,17 +711,31 @@ impl SearchPanel {
         let grouped_results = self.group_results_by_date(&filtered_results);
         let is_searching = self.is_searching;
         let has_query = !self.query.trim().is_empty();
+        let tag_browse_active = !has_query && self.selected_tag.is_some();
+        let selected_tag = self.selected_tag.clone();
 
         v_flex()
             .flex_1()
             .overflow_y_scrollbar()
             .child(div().py(px(8.0)).child(if is_searching {
-                div().text_sm().text_color(rgb(0x8c8c8c)).child("搜索中...")
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .child(if has_query {
+                        "搜索中..."
+                    } else {
+                        "加载中..."
+                    })
             } else if has_query {
                 div()
                     .text_sm()
                     .text_color(rgb(0x595959))
                     .child(format!("找到 {} 个结果：", result_count))
+            } else if let Some(tag) = selected_tag.as_ref() {
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x595959))
+                    .child(format!("#{} 下共 {} 个结果：", tag, result_count))
             } else {
                 div()
                     .text_sm()
@@ -747,7 +770,9 @@ impl SearchPanel {
                             }))
                     }))
                     .when(
-                        filtered_results.is_empty() && has_query && !is_searching,
+                        filtered_results.is_empty()
+                            && (has_query || tag_browse_active)
+                            && !is_searching,
                         |el| {
                             el.child(
                                 div()
@@ -755,12 +780,13 @@ impl SearchPanel {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0xbfbfbf))
-                                            .child("未找到匹配的结果"),
-                                    ),
+                                    .child(div().text_sm().text_color(rgb(0xbfbfbf)).child(
+                                        if has_query {
+                                            "未找到匹配的结果"
+                                        } else {
+                                            "该标签下暂无内容"
+                                        },
+                                    )),
                             )
                         },
                     ),
@@ -791,5 +817,23 @@ impl Render for SearchPanel {
 impl Focusable for SearchPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchPanel;
+
+    #[test]
+    fn test_next_selected_tag_supports_single_select_toggle() {
+        assert_eq!(
+            SearchPanel::next_selected_tag(None, "开发"),
+            Some("开发".to_string())
+        );
+        assert_eq!(SearchPanel::next_selected_tag(Some("开发"), "开发"), None);
+        assert_eq!(
+            SearchPanel::next_selected_tag(Some("开发"), "测试"),
+            Some("测试".to_string())
+        );
     }
 }

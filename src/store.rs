@@ -49,6 +49,10 @@ pub enum StoreCommand {
         query: String,
         respond_to: Sender<Result<Vec<Record>, String>>,
     },
+    GetRecordsByTag {
+        tag: String,
+        respond_to: Sender<Result<Vec<Record>, String>>,
+    },
     // 看板数据
     GetDashboard {
         respond_to: Sender<Result<DashboardData, String>>,
@@ -190,6 +194,10 @@ impl StoreRuntime {
                 }
                 StoreCommand::SearchRecords { query, respond_to } => {
                     let result = self.handle_search_records(query).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetRecordsByTag { tag, respond_to } => {
+                    let result = self.handle_get_records_by_tag(tag).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetDashboard { respond_to } => {
@@ -359,6 +367,26 @@ impl StoreRuntime {
                 }
                 Err(e) => {
                     eprintln!("[Store] Search query failed: {}", e);
+                    Err(format!("Database error: {}", e))
+                }
+            },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_records_by_tag(&self, tag: String) -> Result<Vec<Record>, String> {
+        eprintln!(
+            "[Store] handle_get_records_by_tag called with tag='{}'",
+            tag
+        );
+        match &self.db {
+            Some(db) => match db.get_records_by_tag(&tag) {
+                Ok(records) => {
+                    eprintln!("[Store] Found {} tagged records", records.len());
+                    Ok(records)
+                }
+                Err(e) => {
+                    eprintln!("[Store] Tagged records query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
             },
@@ -693,6 +721,24 @@ impl Store {
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
         eprintln!(
             "[Store] search_records returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
+        result
+    }
+
+    pub async fn get_records_by_tag(&self, tag: &str) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] get_records_by_tag called with tag='{}'", tag);
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetRecordsByTag {
+                tag: tag.to_string(),
+                respond_to: tx,
+            })
+            .await;
+        let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
+        eprintln!(
+            "[Store] get_records_by_tag returning: {:?} records",
             result.as_ref().map(|v| v.len())
         );
         result

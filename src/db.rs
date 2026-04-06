@@ -531,6 +531,32 @@ impl Database {
         Ok(result)
     }
 
+    pub fn get_records_by_tag(&self, tag: &str) -> Result<Vec<Record>> {
+        eprintln!("[DB] get_records_by_tag called with tag='{}'", tag);
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
+                    r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
+                    r.cancelled_reason, r.record_type
+             FROM records r
+             JOIN record_tags rt ON r.id = rt.record_id
+             JOIN tags t ON t.id = rt.tag_id
+             WHERE t.name = ?1
+             ORDER BY r.updated_at DESC",
+        )?;
+
+        let records = stmt.query_map([tag], |row| self.row_to_record(row))?;
+
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+
+        eprintln!("[DB] get_records_by_tag returning {} records", result.len());
+        Ok(result)
+    }
+
     pub fn get_pending_reminders(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type

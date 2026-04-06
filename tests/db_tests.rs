@@ -1,5 +1,6 @@
 use beitang::db::Database;
 use beitang::models::{Priority, Record, RecordType};
+use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
 fn setup_test_db() -> (Database, TempDir) {
@@ -217,4 +218,62 @@ fn test_search_records_supports_single_character_queries() {
 
     let results = db.search_records("字").unwrap();
     assert_eq!(titles(&results), vec!["单字".to_string()]);
+}
+
+#[test]
+fn test_get_records_by_tag_returns_all_matching_types_in_updated_order() {
+    let (db, _temp) = setup_test_db();
+    let now = Utc::now();
+
+    let mut task = Record::new_task(
+        "任务标题".to_string(),
+        "任务内容".to_string(),
+        Priority::High,
+    );
+    task.tags = vec!["开发".to_string()];
+    task.updated_at = now - Duration::minutes(3);
+
+    let mut note = Record::new_note("记录标题".to_string());
+    note.tags = vec!["开发".to_string()];
+    note.updated_at = now;
+
+    let mut idea = Record::new_idea("想法标题".to_string());
+    idea.tags = vec!["开发".to_string()];
+    idea.updated_at = now - Duration::minutes(1);
+
+    db.create_record(&task).unwrap();
+    db.create_record(&note).unwrap();
+    db.create_record(&idea).unwrap();
+
+    let results = db.get_records_by_tag("开发").unwrap();
+    assert_eq!(
+        titles(&results),
+        vec![
+            "记录标题".to_string(),
+            "想法标题".to_string(),
+            "任务标题".to_string()
+        ]
+    );
+    assert!(results
+        .iter()
+        .all(|record| record.tags.contains(&"开发".to_string())));
+    assert_eq!(results[0].record_type, RecordType::Note);
+    assert_eq!(results[1].record_type, RecordType::Idea);
+    assert_eq!(results[2].record_type, RecordType::Task);
+}
+
+#[test]
+fn test_get_records_by_tag_returns_empty_for_unknown_tag() {
+    let (db, _temp) = setup_test_db();
+
+    let mut task = Record::new_task(
+        "任务标题".to_string(),
+        "任务内容".to_string(),
+        Priority::Medium,
+    );
+    task.tags = vec!["开发".to_string()];
+    db.create_record(&task).unwrap();
+
+    let results = db.get_records_by_tag("不存在").unwrap();
+    assert!(results.is_empty());
 }
