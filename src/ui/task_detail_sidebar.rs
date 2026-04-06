@@ -10,6 +10,7 @@ use gpui_component::{
 };
 
 use crate::models::{Priority, Record, TaskStatus};
+use crate::ui::parsing;
 
 pub struct TaskDetailSidebar {
     current_task_id: Option<String>,
@@ -222,14 +223,16 @@ impl TaskDetailSidebar {
         }
 
         // 初始化或更新内容输入框（多行文本区域）
+        let content_value =
+            parsing::compose_content_with_metadata(&task.content, &task.tags, &task.persons);
         if let Some(ref input) = self.content_input {
             input.update(cx, |state, cx| {
-                state.set_value(&task.content, window, cx);
+                state.set_value(&content_value, window, cx);
             });
         } else {
             let content_input = cx.new(|cx| {
                 let mut input = InputState::new(window, cx).multi_line(true).auto_grow(1, 6);
-                input.set_value(&task.content, window, cx);
+                input.set_value(&content_value, window, cx);
                 input
             });
             self.content_input = Some(content_input);
@@ -329,11 +332,11 @@ impl TaskDetailSidebar {
         self.reminder_time_input = Some(reminder_time_input);
     }
 
-    fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn save_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let (Some(ref task_id), Some(ref priority), Some(ref status)) =
             (&self.current_task_id, &self.priority, &self.status)
         {
-            let title = self
+            let raw_title = self
                 .title_input
                 .as_ref()
                 .map(|input| {
@@ -346,11 +349,34 @@ impl TaskDetailSidebar {
                 })
                 .unwrap_or_else(|| self.task_title.clone());
 
-            let content = self
+            let raw_content = self
                 .content_input
                 .as_ref()
                 .map(|input| input.read(cx).value().to_string())
                 .unwrap_or_else(|| self.task_content.clone());
+            let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
+            let normalized_content = parsing::compose_content_with_metadata(
+                &parsed_fields.content,
+                &parsed_fields.tags,
+                &parsed_fields.people,
+            );
+            let normalized_title = parsed_fields.title.clone().unwrap_or_default();
+            self.task_title = parsed_fields.title.clone();
+            self.task_content = parsed_fields.content.clone();
+            self.tags = parsed_fields.tags.clone();
+            self.persons = parsed_fields.people.clone();
+
+            if let Some(ref input) = self.title_input {
+                input.update(cx, |state, cx| {
+                    state.set_value(&normalized_title, window, cx);
+                });
+            }
+
+            if let Some(ref input) = self.content_input {
+                input.update(cx, |state, cx| {
+                    state.set_value(&normalized_content, window, cx);
+                });
+            }
 
             let due_date = self.date_picker.as_ref().and_then(|dp| {
                 let date_range = dp.read(cx).date();
@@ -382,8 +408,8 @@ impl TaskDetailSidebar {
 
             let payload = SavePayload {
                 task_id: task_id.clone(),
-                title,
-                content,
+                title: parsed_fields.title,
+                content: parsed_fields.content,
                 priority: priority.clone(),
                 status: status.clone(),
                 due_date,

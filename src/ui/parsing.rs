@@ -1,4 +1,13 @@
 use crate::models::Priority;
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRecordFields {
+    pub title: Option<String>,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub people: Vec<String>,
+}
 
 /// 解析任务输入，返回 (内容, 优先级, 标签列表, 人物列表)
 pub fn parse_task_input(input: &str) -> (String, Priority, Vec<String>, Vec<String>) {
@@ -10,6 +19,35 @@ pub fn parse_task_input(input: &str) -> (String, Priority, Vec<String>, Vec<Stri
 /// 解析记录输入，返回 (内容, 标签列表, 人物列表)
 pub fn parse_record_input(input: &str) -> (String, Vec<String>, Vec<String>) {
     parse_tags_and_people(input)
+}
+
+pub fn parse_record_fields(title: Option<&str>, content: &str) -> ParsedRecordFields {
+    let (clean_title, title_tags, title_people) = parse_tags_and_people(title.unwrap_or_default());
+    let (clean_content, content_tags, content_people) = parse_tags_and_people(content);
+
+    ParsedRecordFields {
+        title: normalize_optional_text(&clean_title),
+        content: clean_content,
+        tags: dedup_preserving_order(title_tags.into_iter().chain(content_tags)),
+        people: dedup_preserving_order(title_people.into_iter().chain(content_people)),
+    }
+}
+
+pub fn compose_content_with_metadata(content: &str, tags: &[String], people: &[String]) -> String {
+    let metadata = tags
+        .iter()
+        .map(|tag| format!("#{tag}"))
+        .chain(people.iter().map(|person| format!("@{person}")))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let trimmed_content = content.trim();
+    match (trimmed_content.is_empty(), metadata.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => metadata,
+        (false, true) => trimmed_content.to_string(),
+        (false, false) => format!("{trimmed_content}\n{metadata}"),
+    }
 }
 
 /// 解析优先级，返回 (去除优先级的内容, 优先级)
@@ -46,25 +84,30 @@ pub fn parse_priority(input: &str) -> (String, Priority) {
 pub fn parse_tags_and_people(input: &str) -> (String, Vec<String>, Vec<String>) {
     let mut tags = Vec::new();
     let mut people = Vec::new();
-    let mut content_parts = Vec::new();
+    let mut cleaned_lines = Vec::new();
 
-    // 按空白字符分割输入
-    for word in input.split_whitespace() {
-        if let Some(tag) = word.strip_prefix('#') {
-            if !tag.is_empty() {
-                tags.push(tag.to_string());
+    for line in input.lines() {
+        let mut content_parts = Vec::new();
+
+        for word in line.split_whitespace() {
+            if let Some(tag) = word.strip_prefix('#') {
+                if !tag.is_empty() {
+                    tags.push(tag.to_string());
+                }
+            } else if let Some(person) = word.strip_prefix('@') {
+                if !person.is_empty() {
+                    people.push(person.to_string());
+                }
+            } else {
+                content_parts.push(word);
             }
-        } else if let Some(person) = word.strip_prefix('@') {
-            if !person.is_empty() {
-                people.push(person.to_string());
-            }
-        } else {
-            content_parts.push(word);
         }
+
+        cleaned_lines.push(content_parts.join(" "));
     }
 
-    let content = content_parts.join(" ");
-    (content, tags, people)
+    let content = trim_empty_edge_lines(cleaned_lines).join("\n");
+    (content.trim().to_string(), tags, people)
 }
 
 /// 批量解析多个标签（从逗号或空白分隔的字符串）
@@ -85,6 +128,41 @@ pub fn parse_person_list(input: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
+}
+
+fn normalize_optional_text(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn dedup_preserving_order<I>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    for value in values {
+        if seen.insert(value.clone()) {
+            result.push(value);
+        }
+    }
+
+    result
+}
+
+fn trim_empty_edge_lines(lines: Vec<String>) -> Vec<String> {
+    let start = lines.iter().position(|line| !line.trim().is_empty());
+    let end = lines.iter().rposition(|line| !line.trim().is_empty());
+
+    match (start, end) {
+        (Some(start), Some(end)) if start <= end => lines[start..=end].to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]

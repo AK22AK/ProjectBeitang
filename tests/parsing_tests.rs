@@ -1,7 +1,7 @@
 use beitang::models::Priority;
 use beitang::ui::parsing::{
-    parse_person_list, parse_priority, parse_record_input, parse_tag_list, parse_tags_and_people,
-    parse_task_input,
+    compose_content_with_metadata, parse_person_list, parse_priority, parse_record_fields,
+    parse_record_input, parse_tag_list, parse_tags_and_people, parse_task_input,
 };
 
 #[test]
@@ -165,6 +165,38 @@ fn test_parse_record_input() {
     assert_eq!(result.0, "Meeting notes");
     assert_eq!(result.1, vec!["work", "important"]);
     assert_eq!(result.2, vec!["john"]);
+}
+
+#[test]
+fn test_parse_record_input_preserves_line_breaks() {
+    let result = parse_record_input("第一行内容\n#工作 @张三\n第二行内容");
+    assert_eq!(result.0, "第一行内容\n\n第二行内容");
+    assert_eq!(result.1, vec!["工作"]);
+    assert_eq!(result.2, vec!["张三"]);
+}
+
+#[test]
+fn test_parse_record_fields_merges_and_dedups_metadata() {
+    let result = parse_record_fields(
+        Some("标题 #开发 @张三"),
+        "正文内容\n#开发 @李四\n补充说明 @张三 #测试",
+    );
+
+    assert_eq!(result.title, Some("标题".to_string()));
+    assert_eq!(result.content, "正文内容\n\n补充说明");
+    assert_eq!(result.tags, vec!["开发", "测试"]);
+    assert_eq!(result.people, vec!["张三", "李四"]);
+}
+
+#[test]
+fn test_compose_content_with_metadata_appends_tokens_on_new_line() {
+    let result = compose_content_with_metadata(
+        "正文内容",
+        &["开发".to_string(), "测试".to_string()],
+        &["张三".to_string()],
+    );
+
+    assert_eq!(result, "正文内容\n#开发 #测试 @张三");
 }
 
 #[test]

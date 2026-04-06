@@ -9,6 +9,7 @@ use gpui_component::{
 };
 
 use crate::models::Record;
+use crate::ui::parsing;
 
 pub struct RecordDetailSidebar {
     current_record_id: Option<String>,
@@ -32,6 +33,8 @@ pub struct SavePayload {
     pub record_id: String,
     pub title: Option<String>,
     pub content: String,
+    pub tags: Vec<String>,
+    pub persons: Vec<String>,
 }
 
 /// 侧边栏显示状态
@@ -115,14 +118,16 @@ impl RecordDetailSidebar {
         }
 
         // 初始化或更新内容输入框（多行文本区域）
+        let content_value =
+            parsing::compose_content_with_metadata(&record.content, &record.tags, &record.persons);
         if let Some(ref input) = self.content_input {
             input.update(cx, |state, cx| {
-                state.set_value(&record.content, window, cx);
+                state.set_value(&content_value, window, cx);
             });
         } else {
             let content_input = cx.new(|cx| {
                 let mut input = InputState::new(window, cx).multi_line(true).auto_grow(1, 6);
-                input.set_value(&record.content, window, cx);
+                input.set_value(&content_value, window, cx);
                 input
             });
             self.content_input = Some(content_input);
@@ -184,9 +189,9 @@ impl RecordDetailSidebar {
         estimated_lines.max(1)
     }
 
-    fn save_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn save_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ref record_id) = self.current_record_id {
-            let title = self
+            let raw_title = self
                 .title_input
                 .as_ref()
                 .map(|input| {
@@ -199,16 +204,41 @@ impl RecordDetailSidebar {
                 })
                 .unwrap_or_else(|| self.record_title.clone());
 
-            let content = self
+            let raw_content = self
                 .content_input
                 .as_ref()
                 .map(|input| input.read(cx).value().to_string())
                 .unwrap_or_else(|| self.record_content.clone());
+            let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
+            let normalized_content = parsing::compose_content_with_metadata(
+                &parsed_fields.content,
+                &parsed_fields.tags,
+                &parsed_fields.people,
+            );
+            let normalized_title = parsed_fields.title.clone().unwrap_or_default();
+            self.record_title = parsed_fields.title.clone();
+            self.record_content = parsed_fields.content.clone();
+            self.tags = parsed_fields.tags.clone();
+            self.persons = parsed_fields.people.clone();
+
+            if let Some(ref input) = self.title_input {
+                input.update(cx, |state, cx| {
+                    state.set_value(&normalized_title, window, cx);
+                });
+            }
+
+            if let Some(ref input) = self.content_input {
+                input.update(cx, |state, cx| {
+                    state.set_value(&normalized_content, window, cx);
+                });
+            }
 
             let payload = SavePayload {
                 record_id: record_id.clone(),
-                title,
-                content,
+                title: parsed_fields.title,
+                content: parsed_fields.content,
+                tags: self.tags.clone(),
+                persons: self.persons.clone(),
             };
 
             if let Some(ref callback) = self.on_save {

@@ -319,11 +319,19 @@ impl TaskPanel {
 
             let updated_task = task.clone();
             let store = self.store.clone();
-            cx.spawn(async move |_view, _cx| {
-                if let Err(e) = store.update_record(updated_task).await {
-                    eprintln!("[TaskPanel] Failed to update task: {}", e);
-                }
-            })
+            cx.spawn(
+                async move |view, cx| match store.update_record(updated_task).await {
+                    Ok(_) => {
+                        view.update(cx, |panel, cx| {
+                            panel.load_available_tags(cx);
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        eprintln!("[TaskPanel] Failed to update task: {}", e);
+                    }
+                },
+            )
             .detach();
 
             cx.notify();
@@ -619,13 +627,22 @@ impl TaskPanel {
                     task.priority = Some(priority);
                     task.tags = tags;
                     task.persons = people;
+                    task.updated_at = chrono::Utc::now();
                     let updated_task = task.clone();
                     let store = self.store.clone();
-                    cx.spawn(async move |_view, _cx| {
-                        if let Err(e) = store.update_record(updated_task).await {
-                            eprintln!("[TaskPanel] Failed to update task: {}", e);
-                        }
-                    })
+                    cx.spawn(
+                        async move |view, cx| match store.update_record(updated_task).await {
+                            Ok(_) => {
+                                view.update(cx, |panel, cx| {
+                                    panel.load_available_tags(cx);
+                                })
+                                .ok();
+                            }
+                            Err(e) => {
+                                eprintln!("[TaskPanel] Failed to update task: {}", e);
+                            }
+                        },
+                    )
                     .detach();
                 }
             }
@@ -874,6 +891,7 @@ impl TaskPanel {
                     let update_result = view.update(cx, |panel, cx| {
                         eprintln!("[TaskPanel] About to call load_tasks from create_task callback");
                         panel.load_tasks(cx);
+                        panel.load_available_tags(cx);
                         eprintln!("[TaskPanel] load_tasks called from callback");
                     });
                     if let Err(e) = update_result {
@@ -959,6 +977,7 @@ impl TaskPanel {
                             panel.handle_sidebar_close(cx);
                         }
                         panel.load_tasks(cx);
+                        panel.load_available_tags(cx);
                     })
                     .ok();
                 }
@@ -1439,7 +1458,6 @@ impl TaskPanel {
                             .child({
                                 let is_editing = self.editing_task_id == Some(task_id);
                                 let title_element = if is_editing {
-                                    let task_id_for_edit = task_id;
                                     let task_title = display_title.clone();
                                     let input_state = self
                                         .task_input_states
@@ -1458,42 +1476,7 @@ impl TaskPanel {
                                                 move |this, _state, event: &InputEvent, _window, cx| {
                                                     match event {
                                                         InputEvent::Blur | InputEvent::PressEnter { .. } => {
-                                                            let new_title = this
-                                                                .task_input_states
-                                                                .get(&task_id_for_edit)
-                                                                .map(|s| s.read(cx).text().to_string())
-                                                                .unwrap_or_default();
-
-                                                            if let Some(task) = this
-                                                                .tasks
-                                                                .iter_mut()
-                                                                .find(|t| t.id == task_id_for_edit)
-                                                            {
-                                                                let current_title = task
-                                                                    .title
-                                                                    .clone()
-                                                                    .unwrap_or_default();
-                                                                if current_title != new_title
-                                                                    && !new_title.trim().is_empty()
-                                                                {
-                                                                    task.title = Some(new_title);
-                                                                    task.updated_at = chrono::Utc::now();
-                                                                    let updated_task = task.clone();
-                                                                    let store = this.store.clone();
-                                                                    cx.spawn(async move |_view, _cx| {
-                                                                        if let Err(e) = store
-                                                                            .update_record(updated_task)
-                                                                            .await
-                                                                        {
-                                                                            eprintln!(
-                                                                                "[TaskPanel] Failed to update task: {}",
-                                                                                e
-                                                                            );
-                                                                        }
-                                                                    })
-                                                                    .detach();
-                                                                }
-                                                            }
+                                                            this.save_edit(_window, cx);
                                                         }
                                                         _ => {}
                                                     }

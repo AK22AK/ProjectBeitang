@@ -115,6 +115,8 @@ impl NotePanel {
         {
             note.title = payload.title.clone();
             note.content = payload.content.clone();
+            note.tags = payload.tags.clone();
+            note.persons = payload.persons.clone();
             note.updated_at = chrono::Utc::now();
 
             let updated_note = note.clone();
