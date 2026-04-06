@@ -25,9 +25,6 @@ pub struct NotePanel {
     focus_handle: FocusHandle,
     input_state: Entity<InputState>,
     _subscription: Subscription,
-    editing_note_id: Option<uuid::Uuid>,
-    edit_input_state: Option<Entity<InputState>>,
-    _edit_subscription: Option<Subscription>,
     _window_activation_subscription: Subscription,
     pending_deletion: Option<PendingDeletion>,
     record_detail_sidebar: Entity<RecordDetailSidebar>,
@@ -57,9 +54,6 @@ impl NotePanel {
             focus_handle,
             input_state,
             _subscription,
-            editing_note_id: None,
-            edit_input_state: None,
-            _edit_subscription: None,
             _window_activation_subscription: cx.observe_window_activation(
                 window,
                 |this, window, cx| {
@@ -97,7 +91,6 @@ impl NotePanel {
 
     pub fn focus_primary_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_deletion.is_some()
-            || self.editing_note_id.is_some()
             || self
                 .record_detail_sidebar
                 .read(cx)
@@ -141,57 +134,6 @@ impl NotePanel {
         self.record_detail_sidebar.update(cx, |sidebar, cx| {
             sidebar.show_record(record, window, cx);
         });
-        cx.notify();
-    }
-
-    fn start_edit(&mut self, note: Record, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_note_id = Some(note.id);
-        let edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("编辑笔记..."));
-        // 将内容中的换行符替换为空格，避免 gpui_component::input::Input 遇到换行符时 crash
-        let content = note.content.replace('\n', " ");
-        edit_input.update(cx, |state, cx| {
-            state.set_value(&content, window, cx);
-        });
-
-        let _edit_subscription = cx.subscribe_in(
-            &edit_input,
-            window,
-            |this, _state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.save_edit(window, cx);
-                }
-            },
-        );
-
-        self.edit_input_state = Some(edit_input);
-        self._edit_subscription = Some(_edit_subscription);
-        cx.notify();
-    }
-
-    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(note_id) = self.editing_note_id {
-            if let Some(edit_input) = &self.edit_input_state {
-                let new_content = edit_input.read(cx).text().to_string();
-                if let Some(note) = self.notes.iter_mut().find(|n| n.id == note_id) {
-                    note.content = new_content;
-                    let updated_note = note.clone();
-                    let store = self.store.clone();
-                    cx.spawn(async move |_view, _cx| {
-                        if let Err(e) = store.update_record(updated_note).await {
-                            eprintln!("[NotePanel] Failed to update note: {}", e);
-                        }
-                    })
-                    .detach();
-                }
-            }
-        }
-        self.cancel_edit(window, cx);
-    }
-
-    fn cancel_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_note_id = None;
-        self.edit_input_state = None;
-        self._edit_subscription = None;
         cx.notify();
     }
 
@@ -549,12 +491,6 @@ impl Render for NotePanel {
                     )
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(rgb(0x888888))
-                            .child("输入记录内容，第一行自动作为标题，Enter 保存 | #标签 @人物")
-                    )
-                    .child(
-                        div()
                             .flex_1()
                             .overflow_hidden()
                             .child(
@@ -568,47 +504,25 @@ impl Render for NotePanel {
                                     .overflow_y_scrollbar()
                                     .children(self.notes.clone().into_iter().enumerate().map(|(idx, note)| {
                                 let note_id = note.id;
-                                let is_editing = self.editing_note_id == Some(note_id);
                                 let is_selected = sidebar_task_id.as_ref() == Some(&note_id.to_string());
                                 let (title, preview) = Self::get_note_display(&note);
-
-                                if is_editing {
-                                    if let Some(ref edit_input) = self.edit_input_state {
-                                        let edit_input_clone = edit_input.clone();
-                                        return div()
-                                            .id(("edit", idx))
-                                            .flex()
-                                            .gap(px(8.0))
-                                            .items_center()
-                                            .px(px(12.0))
-                                            .py(px(8.0))
-                                            .rounded(px(6.0))
-                                            .bg(rgb(0xd0e8ff))
-                                            .child(Input::new(&edit_input_clone).flex_1())
-                                            .child(Button::new("save-btn").child("保存").on_click(cx.listener(|this, _event, window, cx| {
-                                                this.save_edit(window, cx);
-                                            })))
-                                            .child(Button::new("cancel-btn").child("取消").on_click(cx.listener(|this, _event, window, cx| {
-                                                this.cancel_edit(window, cx);
-                                            })))
-                                            .into_any_element();
-                                    }
-                                }
+                                let has_metadata = !note.tags.is_empty() || !note.persons.is_empty();
 
                                 div()
                                     .id(idx)
+                                    .w_full()
+                                    .min_w(px(0.0))
                                     .flex()
                                     .flex_col()
                                     .gap(px(4.0))
-                                    .px(px(12.0))
-                                    .py(px(8.0))
+                                    .p(px(12.0))
                                     .rounded(px(6.0))
-                                    .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xe8e8e8) })
+                                    .bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xffffff) })
                                     .border_1()
                                     .border_color(if is_selected { rgb(0x1890ff) } else { rgb(0xe8e8e8) })
                                     .text_color(rgb(0x000000))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xf0f0f0) }))
+                                    .hover(|s| s.bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xf6ffed) }))
                                     .on_click(cx.listener({
                                         let note = note.clone();
                                         move |this, _event: &ClickEvent, window, cx| {
@@ -618,38 +532,76 @@ impl Render for NotePanel {
                                     }))
                                     .child(
                                         div()
+                                            .w_full()
+                                            .min_w(px(0.0))
                                             .flex()
                                             .gap(px(8.0))
-                                            .items_center()
+                                            .items_start()
                                             .child(
                                                 div()
                                                     .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .flex()
+                                                    .flex_col()
                                                     .overflow_hidden()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(0x000000))
-                                                    .child(title)
+                                                    .gap(px(4.0))
+                                                    .child(
+                                                        div()
+                                                            .w_full()
+                                                            .min_w(px(0.0))
+                                                            .overflow_hidden()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(rgb(0x333333))
+                                                            .child(title)
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .min_w(px(0.0))
+                                                            .text_sm()
+                                                            .text_color(rgb(0x888888))
+                                                            .line_height(relative(1.35))
+                                                            .child(if preview.is_empty() { "...".to_string() } else { preview })
+                                                    )
+                                                    .when(has_metadata, |el| {
+                                                        el.child(
+                                                            div()
+                                                                .flex()
+                                                                .min_w(px(0.0))
+                                                                .gap(px(8.0))
+                                                                .flex_wrap()
+                                                                .text_xs()
+                                                                .text_color(rgb(0xbbbbbb))
+                                                                .children(note.tags.iter().enumerate().map(|(tag_idx, tag)| {
+                                                                    div()
+                                                                        .id(("note-tag", tag_idx))
+                                                                        .px(px(5.0))
+                                                                        .py(px(1.0))
+                                                                        .rounded(px(4.0))
+                                                                        .bg(rgb(0xf5f5f5))
+                                                                        .text_xs()
+                                                                        .text_color(rgb(0x595959))
+                                                                        .child(format!("#{}", tag))
+                                                                }))
+                                                                .children(note.persons.iter().enumerate().map(|(person_idx, person)| {
+                                                                    div()
+                                                                        .id(("note-person", person_idx))
+                                                                        .px(px(5.0))
+                                                                        .py(px(1.0))
+                                                                        .rounded(px(4.0))
+                                                                        .bg(rgb(0xe6f7ff))
+                                                                        .text_xs()
+                                                                        .text_color(rgb(0x1890ff))
+                                                                        .child(format!("@{}", person))
+                                                                }))
+                                                        )
+                                                    })
                                             )
                                             .child(
                                                 div()
                                                     .flex()
-                                                    .gap(px(4.0))
-                                                    .items_center()
-                                                    .child(
-                                                        div()
-                                                            .cursor_pointer()
-                                                            .px(px(4.0))
-                                                            .text_color(rgb(0x888888))
-                                                            .hover(|style| style.text_color(rgb(0x1890ff)))
-                                                            .child("✎")
-                                                            .id(("edit", idx))
-                                                            .on_click(cx.listener({
-                                                                let note = note.clone();
-                                                                move |this, _event: &ClickEvent, window, cx| {
-                                                                    this.start_edit(note.clone(), window, cx);
-                                                                    cx.stop_propagation();
-                                                                }
-                                                            }))
-                                                    )
+                                                    .items_start()
+                                                    .justify_end()
                                                     .child(
                                                         div()
                                                             .cursor_pointer()
@@ -665,63 +617,6 @@ impl Render for NotePanel {
                                                     )
                                             )
                                     )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x444444))
-                                            .line_height(relative(1.35))
-                                            .child(if preview.is_empty() { "...".to_string() } else { preview })
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_end()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(0x999999))
-                                                    .child(format!("创建于: {}", note.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")))
-                                            )
-                                    )
-                                    .when(!note.tags.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .flex()
-                                                .gap(px(6.0))
-                                                .flex_wrap()
-                                                .children(note.tags.iter().enumerate().map(|(tag_idx, tag)| {
-                                                    div()
-                                                        .id(("note-tag", tag_idx))
-                                                        .px(px(6.0))
-                                                        .py(px(2.0))
-                                                        .rounded(px(4.0))
-                                                        .bg(rgb(0xf5f5f5))
-                                                        .text_xs()
-                                                        .text_color(rgb(0x595959))
-                                                        .child(format!("#{}", tag))
-                                                }))
-                                        )
-                                    })
-                                    .when(!note.persons.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .flex()
-                                                .gap(px(6.0))
-                                                .flex_wrap()
-                                                .children(note.persons.iter().enumerate().map(|(person_idx, person)| {
-                                                    div()
-                                                        .id(("note-person", person_idx))
-                                                        .px(px(6.0))
-                                                        .py(px(2.0))
-                                                        .rounded(px(4.0))
-                                                        .bg(rgb(0xe6f7ff))
-                                                        .text_xs()
-                                                        .text_color(rgb(0x1890ff))
-                                                        .child(format!("@{}", person))
-                                                }))
-                                        )
-                                    })
                                     .into_any_element()
                             }))
                         )
