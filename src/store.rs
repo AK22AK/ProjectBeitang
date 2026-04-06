@@ -53,6 +53,10 @@ pub enum StoreCommand {
         tag: String,
         respond_to: Sender<Result<Vec<Record>, String>>,
     },
+    GetRecordsByPerson {
+        person: String,
+        respond_to: Sender<Result<Vec<Record>, String>>,
+    },
     // 看板数据
     GetDashboard {
         respond_to: Sender<Result<DashboardData, String>>,
@@ -198,6 +202,10 @@ impl StoreRuntime {
                 }
                 StoreCommand::GetRecordsByTag { tag, respond_to } => {
                     let result = self.handle_get_records_by_tag(tag).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetRecordsByPerson { person, respond_to } => {
+                    let result = self.handle_get_records_by_person(person).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetDashboard { respond_to } => {
@@ -387,6 +395,26 @@ impl StoreRuntime {
                 }
                 Err(e) => {
                     eprintln!("[Store] Tagged records query failed: {}", e);
+                    Err(format!("Database error: {}", e))
+                }
+            },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_records_by_person(&self, person: String) -> Result<Vec<Record>, String> {
+        eprintln!(
+            "[Store] handle_get_records_by_person called with person='{}'",
+            person
+        );
+        match &self.db {
+            Some(db) => match db.get_records_by_person(&person) {
+                Ok(records) => {
+                    eprintln!("[Store] Found {} person-linked records", records.len());
+                    Ok(records)
+                }
+                Err(e) => {
+                    eprintln!("[Store] Person records query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
             },
@@ -739,6 +767,27 @@ impl Store {
         let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
         eprintln!(
             "[Store] get_records_by_tag returning: {:?} records",
+            result.as_ref().map(|v| v.len())
+        );
+        result
+    }
+
+    pub async fn get_records_by_person(&self, person: &str) -> Result<Vec<Record>, String> {
+        eprintln!(
+            "[Store] get_records_by_person called with person='{}'",
+            person
+        );
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetRecordsByPerson {
+                person: person.to_string(),
+                respond_to: tx,
+            })
+            .await;
+        let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
+        eprintln!(
+            "[Store] get_records_by_person returning: {:?} records",
             result.as_ref().map(|v| v.len())
         );
         result

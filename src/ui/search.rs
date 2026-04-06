@@ -14,6 +14,12 @@ const SEARCH_DEBOUNCE_MS: u64 = 300;
 const SEARCH_TITLE_PREVIEW_LIMIT: usize = 48;
 const SEARCH_BODY_PREVIEW_LIMIT: usize = 96;
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum BrowseFilter {
+    Tag(String),
+    Person(String),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SearchFilterType {
     All,
@@ -47,9 +53,11 @@ pub struct SearchPanel {
     query: String,
     results: Vec<Record>,
     filter_type: SearchFilterType,
-    selected_tag: Option<String>,
+    browse_filter: Option<BrowseFilter>,
     #[allow(dead_code)]
     available_tags: Vec<String>,
+    #[allow(dead_code)]
+    available_persons: Vec<String>,
     input_state: Entity<InputState>,
     focus_handle: FocusHandle,
     _search_subscription: Subscription,
@@ -77,8 +85,9 @@ impl SearchPanel {
             query: String::new(),
             results: Vec::new(),
             filter_type: SearchFilterType::All,
-            selected_tag: None,
+            browse_filter: None,
             available_tags: Vec::new(),
+            available_persons: Vec::new(),
             input_state,
             focus_handle,
             _search_subscription: _subscription,
@@ -87,13 +96,17 @@ impl SearchPanel {
         };
 
         panel.load_available_tags(cx);
+        panel.load_available_persons(cx);
         panel
     }
 
-    fn next_selected_tag(current_tag: Option<&str>, clicked_tag: &str) -> Option<String> {
-        match current_tag {
-            Some(tag) if tag == clicked_tag => None,
-            _ => Some(clicked_tag.to_string()),
+    fn next_browse_filter(
+        current_filter: Option<&BrowseFilter>,
+        clicked_filter: BrowseFilter,
+    ) -> Option<BrowseFilter> {
+        match current_filter {
+            Some(filter) if *filter == clicked_filter => None,
+            _ => Some(clicked_filter),
         }
     }
 
@@ -150,12 +163,23 @@ impl SearchPanel {
     }
 
     fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
-        self.selected_tag = Self::next_selected_tag(self.selected_tag.as_deref(), tag);
+        self.browse_filter = Self::next_browse_filter(
+            self.browse_filter.as_ref(),
+            BrowseFilter::Tag(tag.to_string()),
+        );
+        self.refresh_results(cx);
+    }
+
+    fn toggle_person(&mut self, person: &str, cx: &mut Context<Self>) {
+        self.browse_filter = Self::next_browse_filter(
+            self.browse_filter.as_ref(),
+            BrowseFilter::Person(person.to_string()),
+        );
         self.refresh_results(cx);
     }
 
     fn clear_tag_filters(&mut self, cx: &mut Context<Self>) {
-        self.selected_tag = None;
+        self.browse_filter = None;
         self.refresh_results(cx);
     }
 
@@ -164,22 +188,45 @@ impl SearchPanel {
             .iter()
             .filter(|r| self.filter_type.matches(&r.record_type))
             .filter(|r| {
-                self.selected_tag
+                self.browse_filter
                     .as_ref()
-                    .map(|selected_tag| r.tags.iter().any(|tag| tag == selected_tag))
+                    .map(|browse_filter| match browse_filter {
+                        BrowseFilter::Tag(tag) => r.tags.iter().any(|record_tag| record_tag == tag),
+                        BrowseFilter::Person(person) => r
+                            .persons
+                            .iter()
+                            .any(|record_person| record_person == person),
+                    })
                     .unwrap_or(true)
             })
             .cloned()
             .collect()
     }
 
+    fn load_available_persons(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| match store.get_all_persons().await {
+            Ok(persons) => {
+                let _ = view.update(cx, |panel, cx| {
+                    panel.available_persons =
+                        persons.into_iter().map(|person| person.name).collect();
+                    cx.notify();
+                });
+            }
+            Err(e) => {
+                eprintln!("[SearchPanel] Failed to load persons: {}", e);
+            }
+        })
+        .detach();
+    }
+
     fn refresh_results(&mut self, cx: &mut Context<Self>) {
         self.search_generation += 1;
         let generation = self.search_generation;
         let query = self.query.trim().to_string();
-        let selected_tag = self.selected_tag.clone();
+        let browse_filter = self.browse_filter.clone();
 
-        if query.is_empty() && selected_tag.is_none() {
+        if query.is_empty() && browse_filter.is_none() {
             self.results.clear();
             self.is_searching = false;
             cx.notify();
@@ -223,32 +270,63 @@ impl SearchPanel {
             return;
         }
 
-        if let Some(tag) = selected_tag {
-            cx.spawn(
-                async move |view, cx| match store.get_records_by_tag(&tag).await {
-                    Ok(records) => {
-                        let _ = view.update(cx, |panel, cx| {
-                            if panel.search_generation != generation {
-                                return;
+        if let Some(browse_filter) = browse_filter {
+            match browse_filter {
+                BrowseFilter::Tag(tag) => {
+                    cx.spawn(
+                        async move |view, cx| match store.get_records_by_tag(&tag).await {
+                            Ok(records) => {
+                                let _ = view.update(cx, |panel, cx| {
+                                    if panel.search_generation != generation {
+                                        return;
+                                    }
+                                    panel.results = records;
+                                    panel.is_searching = false;
+                                    cx.notify();
+                                });
                             }
-                            panel.results = records;
-                            panel.is_searching = false;
-                            cx.notify();
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("[SearchPanel] Tagged records load failed: {}", e);
-                        let _ = view.update(cx, |panel, cx| {
-                            if panel.search_generation != generation {
-                                return;
+                            Err(e) => {
+                                eprintln!("[SearchPanel] Tagged records load failed: {}", e);
+                                let _ = view.update(cx, |panel, cx| {
+                                    if panel.search_generation != generation {
+                                        return;
+                                    }
+                                    panel.is_searching = false;
+                                    cx.notify();
+                                });
                             }
-                            panel.is_searching = false;
-                            cx.notify();
-                        });
-                    }
-                },
-            )
-            .detach();
+                        },
+                    )
+                    .detach();
+                }
+                BrowseFilter::Person(person) => {
+                    cx.spawn(async move |view, cx| {
+                        match store.get_records_by_person(&person).await {
+                            Ok(records) => {
+                                let _ = view.update(cx, |panel, cx| {
+                                    if panel.search_generation != generation {
+                                        return;
+                                    }
+                                    panel.results = records;
+                                    panel.is_searching = false;
+                                    cx.notify();
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("[SearchPanel] Person records load failed: {}", e);
+                                let _ = view.update(cx, |panel, cx| {
+                                    if panel.search_generation != generation {
+                                        return;
+                                    }
+                                    panel.is_searching = false;
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }
+            }
         }
     }
 
@@ -543,17 +621,18 @@ impl SearchPanel {
     }
 
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_selected = self.selected_tag.is_some();
+        let has_selected = self.browse_filter.is_some();
 
-        v_flex()
-            .gap(px(8.0))
-            .when(!self.available_tags.is_empty(), |el| {
+        v_flex().gap(px(8.0)).when(
+            !self.available_tags.is_empty() || !self.available_persons.is_empty() || has_selected,
+            |el| {
                 el.child(
                     h_flex()
                         .gap(px(4.0))
                         .flex_wrap()
                         .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
-                            let is_selected = self.selected_tag.as_deref() == Some(tag.as_str());
+                            let is_selected = self.browse_filter.as_ref()
+                                == Some(&BrowseFilter::Tag(tag.clone()));
                             let tag_clone = tag.clone();
                             div()
                                 .id(("search-tag-filter", idx))
@@ -592,6 +671,52 @@ impl SearchPanel {
                                     },
                                 ))
                         }))
+                        .children(
+                            self.available_persons
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, person)| {
+                                    let is_selected = self.browse_filter.as_ref()
+                                        == Some(&BrowseFilter::Person(person.clone()));
+                                    let person_clone = person.clone();
+                                    div()
+                                        .id(("search-person-filter", idx))
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .rounded(px(12.0))
+                                        .cursor_pointer()
+                                        .border_1()
+                                        .border_color(if is_selected {
+                                            rgb(0x1890ff)
+                                        } else {
+                                            rgb(0xd9d9d9)
+                                        })
+                                        .bg(if is_selected {
+                                            rgb(0xe6f7ff)
+                                        } else {
+                                            rgb(0xffffff)
+                                        })
+                                        .text_color(if is_selected {
+                                            rgb(0x1890ff)
+                                        } else {
+                                            rgb(0x595959)
+                                        })
+                                        .text_sm()
+                                        .hover(|s| {
+                                            s.bg(if is_selected {
+                                                rgb(0xbae7ff)
+                                            } else {
+                                                rgb(0xf5f5f5)
+                                            })
+                                        })
+                                        .child(format!("@{}", person))
+                                        .on_click(cx.listener(
+                                            move |this, _event: &ClickEvent, _window, cx| {
+                                                this.toggle_person(&person_clone, cx);
+                                            },
+                                        ))
+                                }),
+                        )
                         .when(has_selected, |el| {
                             el.child(Button::new("clear-search-tags").child("清除筛选").on_click(
                                 cx.listener(|this, _event, _window, cx| {
@@ -600,7 +725,8 @@ impl SearchPanel {
                             ))
                         }),
                 )
-            })
+            },
+        )
     }
 
     fn render_search_result_item(
@@ -711,8 +837,8 @@ impl SearchPanel {
         let grouped_results = self.group_results_by_date(&filtered_results);
         let is_searching = self.is_searching;
         let has_query = !self.query.trim().is_empty();
-        let tag_browse_active = !has_query && self.selected_tag.is_some();
-        let selected_tag = self.selected_tag.clone();
+        let browse_active = !has_query && self.browse_filter.is_some();
+        let browse_filter = self.browse_filter.clone();
 
         v_flex()
             .flex_1()
@@ -731,11 +857,18 @@ impl SearchPanel {
                     .text_sm()
                     .text_color(rgb(0x595959))
                     .child(format!("找到 {} 个结果：", result_count))
-            } else if let Some(tag) = selected_tag.as_ref() {
+            } else if let Some(browse_filter) = browse_filter.as_ref() {
                 div()
                     .text_sm()
                     .text_color(rgb(0x595959))
-                    .child(format!("#{} 下共 {} 个结果：", tag, result_count))
+                    .child(match browse_filter {
+                        BrowseFilter::Tag(tag) => {
+                            format!("#{} 下共 {} 个结果：", tag, result_count)
+                        }
+                        BrowseFilter::Person(person) => {
+                            format!("@{} 下共 {} 个结果：", person, result_count)
+                        }
+                    })
             } else {
                 div()
                     .text_sm()
@@ -771,7 +904,7 @@ impl SearchPanel {
                     }))
                     .when(
                         filtered_results.is_empty()
-                            && (has_query || tag_browse_active)
+                            && (has_query || browse_active)
                             && !is_searching,
                         |el| {
                             el.child(
@@ -784,7 +917,7 @@ impl SearchPanel {
                                         if has_query {
                                             "未找到匹配的结果"
                                         } else {
-                                            "该标签下暂无内容"
+                                            "该筛选下暂无内容"
                                         },
                                     )),
                             )
@@ -822,18 +955,34 @@ impl Focusable for SearchPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::SearchPanel;
+    use super::{BrowseFilter, SearchPanel};
 
     #[test]
-    fn test_next_selected_tag_supports_single_select_toggle() {
+    fn test_next_browse_filter_supports_single_select_toggle() {
         assert_eq!(
-            SearchPanel::next_selected_tag(None, "开发"),
-            Some("开发".to_string())
+            SearchPanel::next_browse_filter(None, BrowseFilter::Tag("开发".to_string())),
+            Some(BrowseFilter::Tag("开发".to_string()))
         );
-        assert_eq!(SearchPanel::next_selected_tag(Some("开发"), "开发"), None);
         assert_eq!(
-            SearchPanel::next_selected_tag(Some("开发"), "测试"),
-            Some("测试".to_string())
+            SearchPanel::next_browse_filter(
+                Some(&BrowseFilter::Tag("开发".to_string())),
+                BrowseFilter::Tag("开发".to_string())
+            ),
+            None
+        );
+        assert_eq!(
+            SearchPanel::next_browse_filter(
+                Some(&BrowseFilter::Tag("开发".to_string())),
+                BrowseFilter::Tag("测试".to_string())
+            ),
+            Some(BrowseFilter::Tag("测试".to_string()))
+        );
+        assert_eq!(
+            SearchPanel::next_browse_filter(
+                Some(&BrowseFilter::Tag("开发".to_string())),
+                BrowseFilter::Person("张三".to_string())
+            ),
+            Some(BrowseFilter::Person("张三".to_string()))
         );
     }
 }

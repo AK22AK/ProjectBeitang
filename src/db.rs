@@ -557,6 +557,35 @@ impl Database {
         Ok(result)
     }
 
+    pub fn get_records_by_person(&self, person: &str) -> Result<Vec<Record>> {
+        eprintln!("[DB] get_records_by_person called with person='{}'", person);
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
+                    r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
+                    r.cancelled_reason, r.record_type
+             FROM records r
+             JOIN record_persons rp ON r.id = rp.record_id
+             JOIN persons p ON p.id = rp.person_id
+             WHERE p.name = ?1
+             ORDER BY r.updated_at DESC",
+        )?;
+
+        let records = stmt.query_map([person], |row| self.row_to_record(row))?;
+
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+
+        eprintln!(
+            "[DB] get_records_by_person returning {} records",
+            result.len()
+        );
+        Ok(result)
+    }
+
     pub fn get_pending_reminders(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type

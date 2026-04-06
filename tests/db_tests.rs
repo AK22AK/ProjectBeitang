@@ -277,3 +277,61 @@ fn test_get_records_by_tag_returns_empty_for_unknown_tag() {
     let results = db.get_records_by_tag("不存在").unwrap();
     assert!(results.is_empty());
 }
+
+#[test]
+fn test_get_records_by_person_returns_all_matching_types_in_updated_order() {
+    let (db, _temp) = setup_test_db();
+    let now = Utc::now();
+
+    let mut task = Record::new_task(
+        "任务标题".to_string(),
+        "任务内容".to_string(),
+        Priority::High,
+    );
+    task.persons = vec!["张三".to_string()];
+    task.updated_at = now - Duration::minutes(3);
+
+    let mut note = Record::new_note("记录标题".to_string());
+    note.persons = vec!["张三".to_string()];
+    note.updated_at = now;
+
+    let mut idea = Record::new_idea("想法标题".to_string());
+    idea.persons = vec!["张三".to_string()];
+    idea.updated_at = now - Duration::minutes(1);
+
+    db.create_record(&task).unwrap();
+    db.create_record(&note).unwrap();
+    db.create_record(&idea).unwrap();
+
+    let results = db.get_records_by_person("张三").unwrap();
+    assert_eq!(
+        titles(&results),
+        vec![
+            "记录标题".to_string(),
+            "想法标题".to_string(),
+            "任务标题".to_string()
+        ]
+    );
+    assert!(results
+        .iter()
+        .all(|record| record.persons.contains(&"张三".to_string())));
+    assert_eq!(results[0].record_type, RecordType::Note);
+    assert_eq!(results[1].record_type, RecordType::Idea);
+    assert_eq!(results[2].record_type, RecordType::Task);
+}
+
+#[test]
+fn test_get_records_by_person_returns_empty_for_unknown_person() {
+    let (db, _temp) = setup_test_db();
+
+    let mut task = Record::new_task(
+        "任务标题".to_string(),
+        "任务内容".to_string(),
+        Priority::Medium,
+    );
+    task.persons = vec!["张三".to_string()];
+    db.create_record(&task).unwrap();
+
+    let results = db.get_records_by_person("不存在").unwrap();
+    assert!(results.is_empty());
+}
