@@ -9,6 +9,13 @@ fn setup_test_db() -> (Database, TempDir) {
     (db, temp_dir)
 }
 
+fn titles(records: &[Record]) -> Vec<String> {
+    records
+        .iter()
+        .map(|record| record.display_title())
+        .collect()
+}
+
 #[test]
 fn test_create_and_get_task() {
     let (db, _temp) = setup_test_db();
@@ -123,4 +130,91 @@ fn test_complete_task() {
     assert_eq!(tasks.len(), 1);
     assert!(tasks[0].is_completed());
     assert!(tasks[0].completed_at.is_some());
+}
+
+#[test]
+fn test_search_records_matches_chinese_title_substrings() {
+    let (db, _temp) = setup_test_db();
+
+    let task = Record::new_task(
+        "试试看".to_string(),
+        "正文没有额外关键词".to_string(),
+        Priority::Medium,
+    );
+    db.create_record(&task).unwrap();
+
+    for query in ["试", "试试", "试看"] {
+        let results = db.search_records(query).unwrap();
+        assert_eq!(
+            titles(&results),
+            vec!["试试看".to_string()],
+            "query={query}"
+        );
+    }
+}
+
+#[test]
+fn test_search_records_matches_chinese_content_substrings() {
+    let (db, _temp) = setup_test_db();
+
+    let task = Record::new_task(
+        "搜索修复".to_string(),
+        "功能是实现了，但是在设计意图上和我想要的不太一致".to_string(),
+        Priority::High,
+    );
+    db.create_record(&task).unwrap();
+
+    let results = db.search_records("设计意图").unwrap();
+    assert_eq!(titles(&results), vec!["搜索修复".to_string()]);
+
+    let results = db.search_records("我想要").unwrap();
+    assert_eq!(titles(&results), vec!["搜索修复".to_string()]);
+}
+
+#[test]
+fn test_search_records_returns_title_only_matches() {
+    let (db, _temp) = setup_test_db();
+
+    let task = Record::new_task(
+        "标题命中案例".to_string(),
+        "正文完全不包含这个片段".to_string(),
+        Priority::Low,
+    );
+    db.create_record(&task).unwrap();
+
+    let results = db.search_records("命中案").unwrap();
+    assert_eq!(titles(&results), vec!["标题命中案例".to_string()]);
+}
+
+#[test]
+fn test_search_records_keeps_and_semantics_for_multiple_terms() {
+    let (db, _temp) = setup_test_db();
+
+    let first = Record::new_task(
+        "搜索优化".to_string(),
+        "把试试看这个标题也搜出来".to_string(),
+        Priority::High,
+    );
+    let second = Record::new_task(
+        "搜索优化".to_string(),
+        "这里只有搜索，没有另一个关键词".to_string(),
+        Priority::Medium,
+    );
+    db.create_record(&first).unwrap();
+    db.create_record(&second).unwrap();
+
+    let results = db.search_records("搜索 试试").unwrap();
+    assert_eq!(titles(&results), vec!["搜索优化".to_string()]);
+    assert_eq!(results[0].content, "把试试看这个标题也搜出来");
+}
+
+#[test]
+fn test_search_records_supports_single_character_queries() {
+    let (db, _temp) = setup_test_db();
+
+    let task = Record::new_task("单字".to_string(), "搜字".to_string(), Priority::Medium);
+    db.create_record(&task).unwrap();
+
+    let results = db.search_records("字").unwrap();
+    assert_eq!(titles(&results), vec!["单字".to_string()]);
 }

@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use std::time::Duration as StdDuration;
 
 const SEARCH_DEBOUNCE_MS: u64 = 300;
+const SEARCH_TITLE_PREVIEW_LIMIT: usize = 48;
+const SEARCH_BODY_PREVIEW_LIMIT: usize = 96;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SearchFilterType {
@@ -117,7 +119,7 @@ impl SearchPanel {
         self.search_generation += 1;
         let generation = self.search_generation;
 
-        if self.query.len() < 2 {
+        if self.query.trim().is_empty() {
             self.results.clear();
             self.is_searching = false;
             cx.notify();
@@ -162,7 +164,7 @@ impl SearchPanel {
 
     #[allow(dead_code)]
     fn perform_search(&mut self, cx: &mut Context<Self>) {
-        if self.query.len() < 2 {
+        if self.query.trim().is_empty() {
             return;
         }
 
@@ -312,57 +314,155 @@ impl SearchPanel {
         }
     }
 
-    fn highlight_match_text(&self, content: &str) -> impl IntoElement {
-        if self.query.is_empty() || self.query.len() < 2 {
+    fn query_terms(&self) -> Vec<String> {
+        self.query
+            .split_whitespace()
+            .filter(|term| !term.is_empty())
+            .map(|term| term.to_string())
+            .collect()
+    }
+
+    fn text_match_ranges(&self, content: &str) -> Vec<(usize, usize)> {
+        let content_lower = content.to_lowercase();
+        let mut ranges = Vec::new();
+
+        for term in self.query_terms() {
+            let term_lower = term.to_lowercase();
+            for (start, _) in content_lower.match_indices(&term_lower) {
+                ranges.push((start, start + term_lower.len()));
+            }
+        }
+
+        ranges.sort_by_key(|(start, end)| (*start, *end));
+
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if start <= last.1 {
+                    last.1 = last.1.max(end);
+                    continue;
+                }
+            }
+            merged.push((start, end));
+        }
+
+        merged
+    }
+
+    fn highlight_match_text(
+        &self,
+        content: &str,
+        base_color: Rgba,
+        base_weight: FontWeight,
+    ) -> AnyElement {
+        let ranges = self.text_match_ranges(content);
+        if ranges.is_empty() {
             return div()
-                .text_base()
-                .text_color(rgb(0x262626))
+                .text_color(base_color)
+                .font_weight(base_weight)
                 .child(content.to_string())
                 .into_any_element();
         }
 
-        let query_lower = self.query.to_lowercase();
-        let content_lower = content.to_lowercase();
-
         let mut elements: Vec<AnyElement> = Vec::new();
         let mut last_end = 0;
 
-        for (idx, _) in content_lower.match_indices(&query_lower) {
-            if idx > last_end {
+        for (start, end) in ranges {
+            if start > last_end {
                 elements.push(
                     div()
-                        .child(content[last_end..idx].to_string())
+                        .text_color(base_color)
+                        .font_weight(base_weight)
+                        .child(content[last_end..start].to_string())
                         .into_any_element(),
                 );
             }
-            let end_idx = idx + self.query.len();
+
             elements.push(
                 div()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(0x1890ff))
-                    .child(content[idx..end_idx].to_string())
+                    .child(content[start..end].to_string())
                     .into_any_element(),
             );
-            last_end = end_idx;
+            last_end = end;
         }
 
         if last_end < content.len() {
             elements.push(
                 div()
+                    .text_color(base_color)
+                    .font_weight(base_weight)
                     .child(content[last_end..].to_string())
                     .into_any_element(),
             );
         }
 
-        if elements.is_empty() {
-            return div()
-                .text_base()
-                .text_color(rgb(0x262626))
-                .child(content.to_string())
-                .into_any_element();
+        h_flex().flex_wrap().children(elements).into_any_element()
+    }
+
+    fn first_match_char_index(&self, content: &str) -> Option<usize> {
+        let content_lower = content.to_lowercase();
+        self.query_terms()
+            .into_iter()
+            .filter_map(|term| {
+                let term_lower = term.to_lowercase();
+                content_lower
+                    .find(&term_lower)
+                    .map(|byte_idx| content[..byte_idx].chars().count())
+            })
+            .min()
+    }
+
+    fn excerpt_around_match(&self, content: &str, max_chars: usize) -> String {
+        let chars: Vec<char> = content.chars().collect();
+        if chars.len() <= max_chars {
+            return content.to_string();
         }
 
-        h_flex().flex_wrap().children(elements).into_any_element()
+        let match_start = self.first_match_char_index(content).unwrap_or(0);
+        let preferred_start = match_start.saturating_sub(max_chars / 3);
+        let max_start = chars.len().saturating_sub(max_chars);
+        let start = preferred_start.min(max_start);
+        let end = (start + max_chars).min(chars.len());
+
+        let mut excerpt: String = chars[start..end].iter().collect();
+        if start > 0 {
+            excerpt = format!("…{}", excerpt);
+        }
+        if end < chars.len() {
+            excerpt.push('…');
+        }
+        excerpt
+    }
+
+    fn body_preview(&self, record: &Record) -> Option<String> {
+        let body = if let Some(title) = record.title.as_deref() {
+            let title = title.trim();
+            let mut skipped_title = false;
+            record
+                .content
+                .lines()
+                .filter_map(|line| {
+                    if !skipped_title && !title.is_empty() && line.trim() == title {
+                        skipped_title = true;
+                        None
+                    } else {
+                        Some(line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            record.content.clone()
+        };
+
+        let body = body.trim();
+        if body.is_empty() {
+            return None;
+        }
+
+        Some(self.excerpt_around_match(body, SEARCH_BODY_PREVIEW_LIMIT))
     }
 
     fn render_search_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -503,7 +603,8 @@ impl SearchPanel {
         let icon = Self::get_node_icon(record);
         let icon_color = Self::get_node_color(record);
         let record_type_label = Self::get_record_type_label(record);
-        let content = record.content.clone();
+        let title = self.excerpt_around_match(&record.display_title(), SEARCH_TITLE_PREVIEW_LIMIT);
+        let body_preview = self.body_preview(record);
         let tags = record.tags.clone();
 
         h_flex()
@@ -536,7 +637,22 @@ impl SearchPanel {
                                 .child(record_type_label),
                         ),
                     )
-                    .child(self.highlight_match_text(&content))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x262626))
+                            .child(self.highlight_match_text(
+                                &title,
+                                rgb(0x262626),
+                                FontWeight::SEMIBOLD,
+                            )),
+                    )
+                    .when_some(body_preview, |el, body| {
+                        el.child(div().text_sm().text_color(rgb(0x8c8c8c)).child(
+                            self.highlight_match_text(&body, rgb(0x8c8c8c), FontWeight::NORMAL),
+                        ))
+                    })
                     .child(h_flex().gap(px(6.0)).flex_wrap().children(
                         tags.into_iter().enumerate().map(|(idx, tag)| {
                             div()
@@ -585,7 +701,7 @@ impl SearchPanel {
         let result_count = filtered_results.len();
         let grouped_results = self.group_results_by_date(&filtered_results);
         let is_searching = self.is_searching;
-        let has_query = !self.query.is_empty();
+        let has_query = !self.query.trim().is_empty();
 
         v_flex()
             .flex_1()

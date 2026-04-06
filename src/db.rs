@@ -1,9 +1,40 @@
 use crate::models::{Attachment, Person, Priority, Record, RecordType, Tag, TaskStatus};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, Result};
+use rusqlite::types::Value;
+use rusqlite::{params_from_iter, Connection, Result};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+const SEARCH_RANK_FALLBACK: f64 = 1_000_000_000.0;
+
+#[derive(Debug, Clone)]
+struct SearchToken {
+    like_pattern: String,
+    fts_prefix_query: Option<String>,
+}
+
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn tokenize_search_query(query: &str) -> Vec<SearchToken> {
+    query
+        .trim()
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(|token| SearchToken {
+            like_pattern: format!("%{}%", escape_like_pattern(token)),
+            fts_prefix_query: if token.chars().count() >= 2 {
+                Some(format!("\"{}\"*", token.replace('"', "\"\"")))
+            } else {
+                None
+            },
+        })
+        .collect()
+}
 
 pub struct Database {
     conn: Connection,
@@ -104,14 +135,6 @@ impl Database {
         )?;
 
         self.conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
-                record_id,
-                content
-            )",
-            [],
-        )?;
-
-        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_records_type ON records(record_type)",
             [],
         )?;
@@ -154,11 +177,26 @@ impl Database {
             [],
         )?;
 
+        self.create_records_fts_schema()?;
+
+        Ok(())
+    }
+
+    fn create_records_fts_schema(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
+                record_id,
+                content
+            )",
+            [],
+        )?;
+
         self.conn.execute(
             "CREATE TRIGGER IF NOT EXISTS records_fts_insert
              AFTER INSERT ON records
              BEGIN
-                 INSERT INTO records_fts (record_id, content) VALUES (new.id, COALESCE(new.title, '') || ' ' || new.content);
+                 INSERT INTO records_fts (record_id, content)
+                 VALUES (new.id, COALESCE(new.title, '') || ' ' || COALESCE(new.content, ''));
              END",
             [],
         )?;
@@ -167,7 +205,9 @@ impl Database {
             "CREATE TRIGGER IF NOT EXISTS records_fts_update
              AFTER UPDATE ON records
              BEGIN
-                 UPDATE records_fts SET content = COALESCE(new.title, '') || ' ' || new.content WHERE record_id = old.id;
+                 UPDATE records_fts
+                 SET content = COALESCE(new.title, '') || ' ' || COALESCE(new.content, '')
+                 WHERE record_id = old.id;
              END",
             [],
         )?;
@@ -181,6 +221,28 @@ impl Database {
             [],
         )?;
 
+        Ok(())
+    }
+
+    fn drop_records_fts_schema(&self) -> Result<()> {
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS records_fts_insert", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS records_fts_update", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS records_fts_delete", [])?;
+        self.conn.execute("DROP TABLE IF EXISTS records_fts", [])?;
+        Ok(())
+    }
+
+    fn rebuild_records_fts(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM records_fts", [])?;
+        self.conn.execute(
+            "INSERT INTO records_fts (record_id, content)
+             SELECT id, COALESCE(title, '') || ' ' || COALESCE(content, '')
+             FROM records",
+            [],
+        )?;
         Ok(())
     }
 
@@ -206,6 +268,10 @@ impl Database {
 
         if version < 3 {
             self.migrate_v2_to_v3()?;
+        }
+
+        if version < 4 {
+            self.migrate_v3_to_v4()?;
         }
 
         let now = Utc::now().to_rfc3339();
@@ -287,25 +353,13 @@ impl Database {
             )?;
         }
 
-        // 重建 FTS 索引以包含 title
-        self.conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS records_fts_insert
-             AFTER INSERT ON records
-             BEGIN
-                 INSERT INTO records_fts (record_id, content) VALUES (new.id, COALESCE(new.title, '') || ' ' || new.content);
-             END",
-            [],
-        )?;
+        Ok(())
+    }
 
-        self.conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS records_fts_update
-             AFTER UPDATE ON records
-             BEGIN
-                 UPDATE records_fts SET content = COALESCE(new.title, '') || ' ' || new.content WHERE record_id = old.id;
-             END",
-            [],
-        )?;
-
+    fn migrate_v3_to_v4(&self) -> Result<()> {
+        self.drop_records_fts_schema()?;
+        self.create_records_fts_schema()?;
+        self.rebuild_records_fts()?;
         Ok(())
     }
 
@@ -546,23 +600,92 @@ impl Database {
     }
 
     pub fn search_records(&self, query: &str) -> Result<Vec<Record>> {
-        let fts_query = query
-            .replace('"', "\"\"")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let tokens = tokenize_search_query(query);
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        let mut stmt = self.conn.prepare(
+        let title_score_fragments = tokens
+            .iter()
+            .map(|_| "CASE WHEN COALESCE(r.title, '') LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let title_score_expr = if title_score_fragments.is_empty() {
+            "0".to_string()
+        } else {
+            title_score_fragments
+        };
+
+        let fts_tokens: Vec<&str> = tokens
+            .iter()
+            .filter_map(|token| token.fts_prefix_query.as_deref())
+            .collect();
+        let fts_rank_expr = if fts_tokens.is_empty() {
+            format!("{SEARCH_RANK_FALLBACK}")
+        } else {
+            "COALESCE((
+                SELECT bm25(records_fts)
+                FROM records_fts
+                WHERE record_id = r.id AND records_fts MATCH ?
+            ), ?)"
+                .to_string()
+        };
+
+        let mut where_clauses = Vec::new();
+        let mut params = Vec::new();
+
+        for token in &tokens {
+            params.push(Value::from(token.like_pattern.clone()));
+        }
+
+        if !fts_tokens.is_empty() {
+            params.push(Value::from(fts_tokens.join(" ")));
+            params.push(Value::from(SEARCH_RANK_FALLBACK));
+        }
+
+        for token in &tokens {
+            if let Some(fts_prefix_query) = &token.fts_prefix_query {
+                where_clauses.push(
+                    "(EXISTS(
+                        SELECT 1
+                        FROM records_fts
+                        WHERE record_id = r.id AND records_fts MATCH ?
+                    ) OR COALESCE(r.title, '') LIKE ? ESCAPE '\\'
+                      OR r.content LIKE ? ESCAPE '\\')"
+                        .to_string(),
+                );
+                params.push(Value::from(fts_prefix_query.clone()));
+                params.push(Value::from(token.like_pattern.clone()));
+                params.push(Value::from(token.like_pattern.clone()));
+            } else {
+                where_clauses.push(
+                    "(COALESCE(r.title, '') LIKE ? ESCAPE '\\'
+                      OR r.content LIKE ? ESCAPE '\\')"
+                        .to_string(),
+                );
+                params.push(Value::from(token.like_pattern.clone()));
+                params.push(Value::from(token.like_pattern.clone()));
+            }
+        }
+
+        let sql = format!(
             "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
                     r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
-                    r.cancelled_reason, r.record_type
+                    r.cancelled_reason, r.record_type,
+                    ({title_score_expr}) AS title_match_count,
+                    ({fts_rank_expr}) AS fts_rank
              FROM records r
-             JOIN records_fts fts ON r.id = fts.record_id
-             WHERE records_fts MATCH ?1
-             ORDER BY rank",
-        )?;
+             WHERE {}
+             ORDER BY CASE WHEN title_match_count > 0 THEN 0 ELSE 1 END,
+                      fts_rank,
+                      r.updated_at DESC",
+            where_clauses.join(" AND ")
+        );
 
-        let records = stmt.query_map([&fts_query], |row| self.row_to_record(row))?;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let records = stmt.query_map(params_from_iter(params.iter()), |row| {
+            self.row_to_record(row)
+        })?;
 
         let mut result = Vec::new();
         for record in records {
@@ -1087,6 +1210,93 @@ mod tests {
         let results = db.search_records("cats").unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.contains("cats"));
+    }
+
+    #[test]
+    fn test_migrate_v3_to_v4_rebuilds_search_index_from_title_and_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("migration-v3.db");
+        let record_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE records (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    priority INTEGER,
+                    status TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    scheduled_for TEXT,
+                    due_date TEXT,
+                    notified_at TEXT,
+                    cancelled_reason TEXT,
+                    record_type TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE VIRTUAL TABLE records_fts USING fts5(record_id, content)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO records (
+                    id, title, content, priority, status, created_at, updated_at,
+                    completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+                ) VALUES (?1, ?2, ?3, NULL, 'todo', ?4, ?4, NULL, NULL, NULL, NULL, NULL, 'task')",
+                [
+                    &record_id.to_string(),
+                    &"试试看".to_string(),
+                    &"正文保留旧值".to_string(),
+                    &now,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO records_fts (record_id, content) VALUES (?1, ?2)",
+                [&record_id.to_string(), &"正文保留旧值".to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO schema_version (version, updated_at) VALUES (3, ?1)",
+                [&now],
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&db_path).unwrap();
+
+        let title_results = db.search_records("试试").unwrap();
+        assert_eq!(title_results.len(), 1);
+        assert_eq!(title_results[0].title.as_deref(), Some("试试看"));
+
+        let body_results = db.search_records("旧值").unwrap();
+        assert_eq!(body_results.len(), 1);
+
+        let indexed_content: String = db
+            .conn
+            .query_row(
+                "SELECT content FROM records_fts WHERE record_id = ?1",
+                [record_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(indexed_content.contains("试试看"));
+        assert!(indexed_content.contains("正文保留旧值"));
     }
 
     #[test]
