@@ -1379,6 +1379,10 @@ impl TaskPanel {
         let display_title = Self::task_display_name(task);
         let content_preview = Self::task_preview(task);
         let has_content_preview = !content_preview.is_empty();
+        let has_metadata = task.due_date.is_some()
+            || task.scheduled_for.is_some()
+            || !task.tags.is_empty()
+            || !task.persons.is_empty();
 
         div()
             .id(("task-card", idx))
@@ -1425,10 +1429,10 @@ impl TaskPanel {
                             }))
                     )
                     .child(
-                        h_flex()
+                        v_flex()
                             .flex_1()
                             .min_w(px(0.0))
-                            .gap(px(8.0))
+                            .gap(px(4.0))
                             .items_start()
                             .overflow_hidden()
                             .child({
@@ -1537,9 +1541,8 @@ impl TaskPanel {
                                 };
 
                                 v_flex()
-                                    .flex_1()
+                                    .w_full()
                                     .min_w(px(0.0))
-                                    .overflow_hidden()
                                     .gap(px(4.0))
                                     .child(
                                         h_flex()
@@ -1570,7 +1573,7 @@ impl TaskPanel {
                                         )
                                     })
                             })
-                            .when(!compact, |el| {
+                            .when(has_metadata, |el| {
                                 el.child(
                                     div()
                                         .flex()
@@ -1581,46 +1584,32 @@ impl TaskPanel {
                                         .text_color(rgb(0xbbbbbb))
                                         .children(task.due_date.map(|t| {
                                             div()
+                                                .text_xs()
                                                 .text_color(rgb(0xff4d4f))
                                                 .child(format!("⏰ {}", fmt_short(t)))
                                         }))
                                         .children(task.scheduled_for.map(|t| {
                                             div()
+                                                .text_xs()
                                                 .text_color(rgb(0x1890ff))
                                                 .child(format!("📅 {}", fmt_short(t)))
                                         }))
-                                )
-                            })
-                            .when(!task.tags.is_empty(), |el| {
-                                el.child(
-                                    h_flex()
-                                        .min_w(px(0.0))
-                                        .gap(px(6.0))
-                                        .flex_wrap()
                                         .children(task.tags.iter().enumerate().map(|(idx, tag)| {
                                             div()
                                                 .id(("task-tag", idx))
-                                                .px(px(6.0))
-                                                .py(px(2.0))
+                                                .px(px(5.0))
+                                                .py(px(1.0))
                                                 .rounded(px(4.0))
                                                 .bg(rgb(0xf5f5f5))
                                                 .text_xs()
                                                 .text_color(rgb(0x595959))
                                                 .child(format!("#{}", tag))
                                         }))
-                                )
-                            })
-                            .when(!task.persons.is_empty(), |el| {
-                                el.child(
-                                    h_flex()
-                                        .min_w(px(0.0))
-                                        .gap(px(6.0))
-                                        .flex_wrap()
                                         .children(task.persons.iter().enumerate().map(|(idx, person)| {
                                             div()
                                                 .id(("task-person", idx))
-                                                .px(px(6.0))
-                                                .py(px(2.0))
+                                                .px(px(5.0))
+                                                .py(px(1.0))
                                                 .rounded(px(4.0))
                                                 .bg(rgb(0xe6f7ff))
                                                 .text_xs()
@@ -1629,26 +1618,26 @@ impl TaskPanel {
                                         }))
                                 )
                             })
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .justify_end()
                             .child(
                                 div()
-                                    .flex()
-                                    .items_start()
-                                    .justify_end()
-                                    .child(
-                                        div()
-                                            .cursor_pointer()
-                                            .px(px(4.0))
-                                            .text_color(rgb(0x888888))
-                                            .hover(|style| style.text_color(rgb(0xff4d4f)))
-                                            .child("×")
-                                            .id(("task-delete", idx))
-                                            .on_click(cx.listener(
-                                                move |this, _event: &ClickEvent, _window, cx| {
-                                                    this.request_delete_task(task_id, cx);
-                                                    cx.stop_propagation();
-                                                },
-                                            )),
-                                    ),
+                                    .cursor_pointer()
+                                    .px(px(4.0))
+                                    .text_color(rgb(0x888888))
+                                    .hover(|style| style.text_color(rgb(0xff4d4f)))
+                                    .child("×")
+                                    .id(("task-delete", idx))
+                                    .on_click(cx.listener(
+                                        move |this, _event: &ClickEvent, _window, cx| {
+                                            this.request_delete_task(task_id, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    )),
                             ),
                     )
             )
