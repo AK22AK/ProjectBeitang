@@ -530,14 +530,9 @@ impl Render for Dashboard {
                                             .child(icon),
                                     )
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .overflow_hidden()
-                                            .text_sm()
-                                            .child(Self::display_text(
-                                                record,
-                                                DASHBOARD_RECENT_LIMIT,
-                                            )),
+                                        div().flex_1().overflow_hidden().text_sm().child(
+                                            Self::display_text(record, DASHBOARD_RECENT_LIMIT),
+                                        ),
                                     )
                                     .child(
                                         div()

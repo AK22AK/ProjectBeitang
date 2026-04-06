@@ -98,7 +98,11 @@ impl NotePanel {
     pub fn focus_primary_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_deletion.is_some()
             || self.editing_note_id.is_some()
-            || self.record_detail_sidebar.read(cx).current_record_id().is_some()
+            || self
+                .record_detail_sidebar
+                .read(cx)
+                .current_record_id()
+                .is_some()
         {
             self.focus_handle.focus(window, cx);
             return;
