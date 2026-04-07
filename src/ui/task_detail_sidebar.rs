@@ -4,10 +4,11 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     date_picker::{DatePicker, DatePickerState},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Paste},
     scroll::ScrollableElement,
     v_flex,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -740,19 +741,33 @@ impl TaskDetailSidebar {
             return;
         };
 
-        let store = self.store.clone();
         let picker = pick_image_files(ParentWindowHint::from_window(window));
         cx.spawn(async move |view, cx| {
             let Some(paths) = picker.await else {
                 return;
             };
+            let _ = view.update(cx, |this, cx| {
+                this.import_attachment_paths(task_id, paths, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn import_attachment_paths(
+        &mut self,
+        task_id: Uuid,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
             let result = store.import_image_attachments(task_id, paths).await;
             let _ = view.update(cx, |this, cx| match result {
-                Ok(_) => {
-                    this.attachments_loading = true;
-                    this.attachment_error = None;
-                    this.reload_attachments(cx);
-                }
+                Ok(_) => this.reload_attachments(cx),
                 Err(err) => {
                     this.attachments_loading = false;
                     this.attachment_error = Some(err);
@@ -761,6 +776,35 @@ impl TaskDetailSidebar {
             });
         })
         .detach();
+    }
+
+    fn paste_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self
+            .current_task_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            return;
+        };
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        match crate::clipboard_attachment::extract_image_paths_from_clipboard(&clipboard) {
+            Ok(paths) if !paths.is_empty() => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.import_attachment_paths(task_id, paths, cx);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.attachments_loading = false;
+                self.attachment_error = Some(err);
+                cx.notify();
+            }
+        }
     }
 
     fn delete_attachment(&mut self, attachment_id: String, cx: &mut Context<Self>) {
@@ -1074,6 +1118,9 @@ impl Render for TaskDetailSidebar {
             .flex_row()
             .justify_end()
             .cursor_default()
+            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
+                this.paste_attachments(window, cx);
+            }))
             .child(
                 div()
                     .id("task-detail-sidebar-dismiss-area")

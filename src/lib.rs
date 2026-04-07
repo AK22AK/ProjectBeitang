@@ -1,5 +1,6 @@
 pub mod app_shortcuts;
 pub mod attachment_image;
+pub mod clipboard_attachment;
 pub mod config;
 pub mod db;
 pub mod file_dialog;

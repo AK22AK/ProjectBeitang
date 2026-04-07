@@ -8,10 +8,11 @@ use crate::ui::attachment_draft::{
 use crate::ui::parsing;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Escape, IndentInline, Input, InputEvent, InputState};
+use gpui_component::input::{Escape, IndentInline, Input, InputEvent, InputState, Paste};
 use gpui_component::IconName;
 use gpui_component::{h_flex, v_flex};
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -591,11 +592,18 @@ impl QuickAddWindow {
             };
 
             let _ = view.update(cx, |this, cx| {
-                this.attachments_loading = true;
-                this.attachment_error = None;
-                cx.notify();
+                this.append_pending_attachment_paths(paths, cx);
             });
+        })
+        .detach();
+    }
 
+    fn append_pending_attachment_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = prepare_pending_attachments(paths);
@@ -624,6 +632,28 @@ impl QuickAddWindow {
             });
         })
         .detach();
+    }
+
+    fn paste_pending_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        match crate::clipboard_attachment::extract_image_paths_from_clipboard(&clipboard) {
+            Ok(paths) if !paths.is_empty() => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.append_pending_attachment_paths(paths, cx);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.attachments_loading = false;
+                self.attachment_error = Some(err);
+                cx.notify();
+            }
+        }
     }
 
     fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -977,6 +1007,9 @@ impl Render for QuickAddWindow {
             .flex_col()
             .gap(px(10.0))
             .track_focus(&self.focus_handle(cx))
+            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
+                this.paste_pending_attachments(window, cx);
+            }))
             .on_action(cx.listener(|this, _action: &Escape, window, cx| {
                 this.handle_escape(window, cx);
             }))

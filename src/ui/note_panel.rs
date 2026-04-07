@@ -13,9 +13,10 @@ use crate::ui::tokenized_text::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Paste};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 const NOTE_TITLE_LIMIT: usize = 24;
@@ -304,16 +305,24 @@ impl NotePanel {
             };
 
             let _ = view.update(cx, |panel, cx| {
-                panel.attachments_loading = true;
-                panel.attachment_error = None;
-                cx.notify();
+                panel.append_pending_attachment_paths(paths, cx);
             });
+        })
+        .detach();
+    }
 
+    fn append_pending_attachment_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = prepare_pending_attachments(paths);
                 let _ = tx.send_blocking(result);
             });
+
             let result = rx
                 .recv()
                 .await
@@ -335,6 +344,28 @@ impl NotePanel {
             });
         })
         .detach();
+    }
+
+    fn paste_pending_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        match crate::clipboard_attachment::extract_image_paths_from_clipboard(&clipboard) {
+            Ok(paths) if !paths.is_empty() => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.append_pending_attachment_paths(paths, cx);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.attachments_loading = false;
+                self.attachment_error = Some(err);
+                cx.notify();
+            }
+        }
     }
 
     fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -749,6 +780,9 @@ impl Render for NotePanel {
             .flex_row()
             .relative()
             .track_focus(&self.focus_handle(cx))
+            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
+                this.paste_pending_attachments(window, cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.pending_deletion.is_none() {
                     return;
