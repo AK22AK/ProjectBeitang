@@ -97,6 +97,7 @@ pub struct SearchPanel {
     query: String,
     results: Vec<Record>,
     filter_type: SearchFilterType,
+    show_completed_tasks: bool,
     browse_filter: Option<BrowseFilter>,
     advanced_filter_enabled: bool,
     selected_tags: BTreeSet<String>,
@@ -136,6 +137,7 @@ impl SearchPanel {
             query: String::new(),
             results: Vec::new(),
             filter_type: SearchFilterType::All,
+            show_completed_tasks: false,
             browse_filter: None,
             advanced_filter_enabled: false,
             selected_tags: BTreeSet::new(),
@@ -338,26 +340,47 @@ impl SearchPanel {
         self.refresh_results(cx);
     }
 
+    fn toggle_show_completed_tasks(&mut self, cx: &mut Context<Self>) {
+        self.show_completed_tasks = !self.show_completed_tasks;
+        self.sync_open_detail_visibility(cx);
+        cx.notify();
+    }
+
+    fn matches_completion_visibility(show_completed_tasks: bool, record: &Record) -> bool {
+        !matches!(record.record_type, RecordType::Task)
+            || record.completed_at.is_none()
+            || show_completed_tasks
+    }
+
+    fn should_show_record(&self, record: &Record) -> bool {
+        if !self.filter_type.matches(&record.record_type) {
+            return false;
+        }
+
+        if !Self::matches_completion_visibility(self.show_completed_tasks, record) {
+            return false;
+        }
+
+        if self.advanced_filter_enabled {
+            Self::matches_advanced_filter(
+                record,
+                &self.selected_tags,
+                &self.selected_persons,
+                self.filter_mode,
+            )
+        } else {
+            self.browse_filter
+                .as_ref()
+                .map(|browse_filter| Self::matches_single_browse_filter(record, browse_filter))
+                .unwrap_or(true)
+        }
+    }
+
     fn get_filtered_results(&self) -> Vec<Record> {
         let mut results: Vec<Record> = self
             .results
             .iter()
-            .filter(|r| self.filter_type.matches(&r.record_type))
-            .filter(|r| {
-                if self.advanced_filter_enabled {
-                    Self::matches_advanced_filter(
-                        r,
-                        &self.selected_tags,
-                        &self.selected_persons,
-                        self.filter_mode,
-                    )
-                } else {
-                    self.browse_filter
-                        .as_ref()
-                        .map(|browse_filter| Self::matches_single_browse_filter(r, browse_filter))
-                        .unwrap_or(true)
-                }
-            })
+            .filter(|r| self.should_show_record(r))
             .cloned()
             .collect();
 
@@ -1190,47 +1213,96 @@ impl SearchPanel {
             SearchFilterType::Idea,
         ];
 
-        h_flex().gap(px(4.0)).child(h_flex().gap(px(4.0)).children(
-            filters.into_iter().enumerate().map(|(idx, filter)| {
-                let is_selected = self.filter_type == filter;
-                let filter_clone = filter;
+        h_flex()
+            .gap(px(8.0))
+            .flex_wrap()
+            .items_center()
+            .child(
+                h_flex()
+                    .gap(px(4.0))
+                    .children(filters.into_iter().enumerate().map(|(idx, filter)| {
+                        let is_selected = self.filter_type == filter;
+                        let filter_clone = filter;
 
+                        div()
+                            .id(("filter", idx))
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded(px(16.0))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if is_selected {
+                                rgb(0x1890ff)
+                            } else {
+                                rgb(0xd9d9d9)
+                            })
+                            .bg(if is_selected {
+                                rgb(0xe6f7ff)
+                            } else {
+                                rgb(0xffffff)
+                            })
+                            .text_color(if is_selected {
+                                rgb(0x1890ff)
+                            } else {
+                                rgb(0x595959)
+                            })
+                            .text_sm()
+                            .hover(|s| {
+                                s.bg(if is_selected {
+                                    rgb(0xbae7ff)
+                                } else {
+                                    rgb(0xf5f5f5)
+                                })
+                            })
+                            .child(filter.label())
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                this.set_filter_type(filter_clone, window, cx);
+                            }))
+                    })),
+            )
+            .child(
                 div()
-                    .id(("filter", idx))
-                    .px(px(12.0))
+                    .id("search-show-completed-tasks")
+                    .px(px(10.0))
                     .py(px(6.0))
                     .rounded(px(16.0))
                     .cursor_pointer()
                     .border_1()
-                    .border_color(if is_selected {
+                    .border_color(if self.show_completed_tasks {
                         rgb(0x1890ff)
                     } else {
                         rgb(0xd9d9d9)
                     })
-                    .bg(if is_selected {
+                    .bg(if self.show_completed_tasks {
                         rgb(0xe6f7ff)
                     } else {
                         rgb(0xffffff)
                     })
-                    .text_color(if is_selected {
+                    .text_color(if self.show_completed_tasks {
                         rgb(0x1890ff)
                     } else {
                         rgb(0x595959)
                     })
                     .text_sm()
                     .hover(|s| {
-                        s.bg(if is_selected {
+                        s.bg(if self.show_completed_tasks {
                             rgb(0xbae7ff)
                         } else {
                             rgb(0xf5f5f5)
                         })
                     })
-                    .child(filter.label())
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.set_filter_type(filter_clone, window, cx);
-                    }))
-            }),
-        ))
+                    .child(format!(
+                        "{} 已完成任务",
+                        if self.show_completed_tasks {
+                            "☑"
+                        } else {
+                            "☐"
+                        }
+                    ))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                        this.toggle_show_completed_tasks(cx);
+                    })),
+            )
     }
 
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1989,5 +2061,31 @@ mod tests {
             &mut records,
             Uuid::new_v4()
         ));
+    }
+
+    #[test]
+    fn test_matches_completion_visibility_hides_completed_tasks_by_default() {
+        let mut completed_task =
+            Record::new_task("已完成".to_string(), "内容".to_string(), Priority::Low);
+        completed_task.completed_at = Some(Utc::now());
+        completed_task.status = Some(crate::models::TaskStatus::Done);
+
+        let active_task =
+            Record::new_task("进行中".to_string(), "内容".to_string(), Priority::Medium);
+        let note = Record::new_note("普通记录".to_string());
+
+        assert!(!SearchPanel::matches_completion_visibility(
+            false,
+            &completed_task
+        ));
+        assert!(SearchPanel::matches_completion_visibility(
+            true,
+            &completed_task
+        ));
+        assert!(SearchPanel::matches_completion_visibility(
+            false,
+            &active_task
+        ));
+        assert!(SearchPanel::matches_completion_visibility(false, &note));
     }
 }
