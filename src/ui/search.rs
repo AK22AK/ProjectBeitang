@@ -1,11 +1,14 @@
 use crate::models::{Record, RecordType, TaskStatus};
 use crate::store::Store;
+use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload as RecordSavePayload};
+use crate::ui::task_detail_sidebar::{SavePayload as TaskSavePayload, TaskDetailSidebar};
 use crate::ui::tokenized_text::{
     render_inline_token_text, render_metadata_chip, tokenize_text, MetadataChipKind,
     TextTokenSegment, TokenTextStyle,
 };
 use chrono::{DateTime, Datelike, Duration, Local, Utc, Weekday};
 use gpui::prelude::FluentBuilder as _;
+use gpui::StatefulInteractiveElement as _;
 use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::h_flex;
@@ -14,6 +17,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::v_flex;
 use std::collections::BTreeSet;
 use std::time::Duration as StdDuration;
+use uuid::Uuid;
 
 const SEARCH_DEBOUNCE_MS: u64 = 300;
 const SEARCH_TITLE_PREVIEW_LIMIT: usize = 48;
@@ -29,6 +33,19 @@ enum BrowseFilter {
 enum AdvancedFilterMode {
     And,
     Or,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SearchDetailTarget {
+    Task,
+    Record,
+}
+
+#[derive(Clone)]
+struct PendingDeletion {
+    id: Uuid,
+    record_label: &'static str,
+    display_title: String,
 }
 
 impl AdvancedFilterMode {
@@ -94,6 +111,9 @@ pub struct SearchPanel {
     _search_subscription: Subscription,
     is_searching: bool,
     search_generation: usize,
+    pending_deletion: Option<PendingDeletion>,
+    task_detail_sidebar: Entity<TaskDetailSidebar>,
+    record_detail_sidebar: Entity<RecordDetailSidebar>,
 }
 
 impl SearchPanel {
@@ -128,7 +148,64 @@ impl SearchPanel {
             _search_subscription: _subscription,
             is_searching: false,
             search_generation: 0,
+            pending_deletion: None,
+            task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
+            record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(window, cx)),
         };
+
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_save(move |payload, cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_task_sidebar_save(&payload, cx);
+                });
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_delete(move |task_id, cx| {
+                if let Ok(task_id) = Uuid::parse_str(&task_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.request_delete_record(task_id, cx);
+                    });
+                }
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_close(move |cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_detail_sidebar_close(cx);
+                });
+            });
+        });
+
+        let handle = cx.entity().clone();
+        panel.record_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_save(move |payload, cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_record_sidebar_save(&payload, cx);
+                });
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.record_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_delete(move |record_id, cx| {
+                if let Ok(record_id) = Uuid::parse_str(&record_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.request_delete_record(record_id, cx);
+                    });
+                }
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.record_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_close(move |cx| {
+                handle.update(cx, |panel, cx| {
+                    panel.handle_detail_sidebar_close(cx);
+                });
+            });
+        });
 
         panel.load_available_tags(cx);
         panel.load_available_persons(cx);
@@ -146,6 +223,11 @@ impl SearchPanel {
     }
 
     pub fn focus_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_deletion.is_some() || self.sidebar_visible(cx) {
+            self.focus_handle.focus(window, cx);
+            return;
+        }
+
         self.focus_handle.focus(window, cx);
         self.input_state.update(cx, |state, cx| {
             state.focus(window, cx);
@@ -194,6 +276,7 @@ impl SearchPanel {
         cx: &mut Context<Self>,
     ) {
         self.filter_type = filter_type;
+        self.sync_open_detail_visibility(cx);
         cx.notify();
     }
 
@@ -320,6 +403,7 @@ impl SearchPanel {
         if query.is_empty() && !advanced_filter_enabled && browse_filter.is_none() {
             self.results.clear();
             self.is_searching = false;
+            self.sync_open_detail_visibility(cx);
             cx.notify();
             return;
         }
@@ -327,6 +411,7 @@ impl SearchPanel {
         if query.is_empty() && advanced_filter_enabled && !has_advanced_filters {
             self.results.clear();
             self.is_searching = false;
+            self.sync_open_detail_visibility(cx);
             cx.notify();
             return;
         }
@@ -349,6 +434,7 @@ impl SearchPanel {
                             }
                             panel.results = records;
                             panel.is_searching = false;
+                            panel.sync_open_detail_visibility(cx);
                             cx.notify();
                         });
                     }
@@ -377,6 +463,7 @@ impl SearchPanel {
                         }
                         panel.results = records;
                         panel.is_searching = false;
+                        panel.sync_open_detail_visibility(cx);
                         cx.notify();
                     });
                 }
@@ -407,6 +494,7 @@ impl SearchPanel {
                                     }
                                     panel.results = records;
                                     panel.is_searching = false;
+                                    panel.sync_open_detail_visibility(cx);
                                     cx.notify();
                                 });
                             }
@@ -434,6 +522,7 @@ impl SearchPanel {
                                     }
                                     panel.results = records;
                                     panel.is_searching = false;
+                                    panel.sync_open_detail_visibility(cx);
                                     cx.notify();
                                 });
                             }
@@ -624,6 +713,268 @@ impl SearchPanel {
             RecordType::Idea => "想法",
             RecordType::Note => "笔记",
         }
+    }
+
+    fn detail_target_for(record: &Record) -> SearchDetailTarget {
+        match record.record_type {
+            RecordType::Task => SearchDetailTarget::Task,
+            RecordType::Note | RecordType::Idea | RecordType::Event => SearchDetailTarget::Record,
+        }
+    }
+
+    fn sidebar_visible(&self, cx: &App) -> bool {
+        self.task_detail_sidebar
+            .read(cx)
+            .current_task_id()
+            .is_some()
+            || self
+                .record_detail_sidebar
+                .read(cx)
+                .current_record_id()
+                .is_some()
+    }
+
+    fn selected_task_id(&self, cx: &App) -> Option<String> {
+        self.task_detail_sidebar
+            .read(cx)
+            .current_task_id()
+            .map(|id| id.to_string())
+    }
+
+    fn selected_record_id(&self, cx: &App) -> Option<String> {
+        self.record_detail_sidebar
+            .read(cx)
+            .current_record_id()
+            .map(|id| id.to_string())
+    }
+
+    fn is_record_selected(
+        record: &Record,
+        selected_task_id: Option<&str>,
+        selected_record_id: Option<&str>,
+    ) -> bool {
+        match Self::detail_target_for(record) {
+            SearchDetailTarget::Task => selected_task_id == Some(record.id.to_string().as_str()),
+            SearchDetailTarget::Record => {
+                selected_record_id == Some(record.id.to_string().as_str())
+            }
+        }
+    }
+
+    fn handle_detail_sidebar_close(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
+    fn refresh_available_metadata(&mut self, cx: &mut Context<Self>) {
+        self.load_available_tags(cx);
+        self.load_available_persons(cx);
+    }
+
+    fn select_result(&mut self, record: &Record, window: &mut Window, cx: &mut Context<Self>) {
+        match Self::detail_target_for(record) {
+            SearchDetailTarget::Task => {
+                self.record_detail_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.dismiss(cx);
+                });
+                self.task_detail_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.show_task(record, window, cx);
+                });
+            }
+            SearchDetailTarget::Record => {
+                self.task_detail_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.dismiss(cx);
+                });
+                self.record_detail_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.show_record(record, window, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn sync_open_detail_visibility(&mut self, cx: &mut Context<Self>) {
+        let filtered_results = self.get_filtered_results();
+        let current_task_id = self.selected_task_id(cx);
+        let current_record_id = self.selected_record_id(cx);
+        let should_keep_task = current_task_id.as_ref().is_some_and(|task_id| {
+            filtered_results.iter().any(|record| {
+                matches!(Self::detail_target_for(record), SearchDetailTarget::Task)
+                    && record.id.to_string() == *task_id
+            })
+        });
+        let should_keep_record = current_record_id.as_ref().is_some_and(|record_id| {
+            filtered_results.iter().any(|record| {
+                matches!(Self::detail_target_for(record), SearchDetailTarget::Record)
+                    && record.id.to_string() == *record_id
+            })
+        });
+
+        let mut changed = false;
+        if current_task_id.is_some() && !should_keep_task {
+            self.task_detail_sidebar.update(cx, |sidebar, cx| {
+                sidebar.dismiss(cx);
+            });
+            changed = true;
+        }
+        if current_record_id.is_some() && !should_keep_record {
+            self.record_detail_sidebar.update(cx, |sidebar, cx| {
+                sidebar.dismiss(cx);
+            });
+            changed = true;
+        }
+
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn handle_task_sidebar_save(&mut self, payload: &TaskSavePayload, cx: &mut Context<Self>) {
+        if let Some(task) = self
+            .results
+            .iter_mut()
+            .find(|record| record.id.to_string() == payload.task_id)
+        {
+            task.title = payload.title.clone();
+            task.content = payload.content.clone();
+            task.priority = Some(payload.priority.clone());
+            task.status = Some(payload.status.clone());
+            task.due_date = payload.due_date;
+            task.scheduled_for = payload.scheduled_for;
+            task.cancelled_reason = payload.cancel_reason.clone();
+            task.tags = payload.tags.clone();
+            task.persons = payload.persons.clone();
+            task.updated_at = chrono::Utc::now();
+
+            match payload.status {
+                TaskStatus::Done | TaskStatus::Cancelled => {
+                    if task.completed_at.is_none() {
+                        task.completed_at = Some(chrono::Utc::now());
+                    }
+                }
+                _ => {
+                    task.completed_at = None;
+                }
+            }
+
+            let updated_task = task.clone();
+            let store = self.store.clone();
+            cx.spawn(async move |_view, _cx| {
+                if let Err(e) = store.update_record(updated_task).await {
+                    eprintln!("[SearchPanel] Failed to update task: {}", e);
+                }
+            })
+            .detach();
+
+            self.refresh_available_metadata(cx);
+            self.sync_open_detail_visibility(cx);
+            cx.notify();
+        }
+    }
+
+    fn handle_record_sidebar_save(&mut self, payload: &RecordSavePayload, cx: &mut Context<Self>) {
+        if let Some(record) = self
+            .results
+            .iter_mut()
+            .find(|item| item.id.to_string() == payload.record_id)
+        {
+            record.title = payload.title.clone();
+            record.content = payload.content.clone();
+            record.tags = payload.tags.clone();
+            record.persons = payload.persons.clone();
+            record.updated_at = chrono::Utc::now();
+
+            let updated_record = record.clone();
+            let store = self.store.clone();
+            cx.spawn(async move |_view, _cx| {
+                if let Err(e) = store.update_record(updated_record).await {
+                    eprintln!("[SearchPanel] Failed to update record: {}", e);
+                }
+            })
+            .detach();
+
+            self.refresh_available_metadata(cx);
+            self.sync_open_detail_visibility(cx);
+            cx.notify();
+        }
+    }
+
+    fn request_delete_record(&mut self, record_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(record) = self.results.iter().find(|record| record.id == record_id) {
+            self.pending_deletion = Some(PendingDeletion {
+                id: record_id,
+                record_label: match Self::detail_target_for(record) {
+                    SearchDetailTarget::Task => "任务",
+                    SearchDetailTarget::Record => "记录",
+                },
+                display_title: record.display_title(),
+            });
+            cx.notify();
+        }
+    }
+
+    fn cancel_delete_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.pending_deletion = None;
+        cx.notify();
+    }
+
+    fn confirm_delete_record(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_deletion.clone() else {
+            return;
+        };
+
+        self.perform_delete_record(pending.id, true, cx);
+    }
+
+    fn remove_record_from_results(results: &mut Vec<Record>, record_id: Uuid) -> bool {
+        let original_len = results.len();
+        results.retain(|record| record.id != record_id);
+        results.len() != original_len
+    }
+
+    fn perform_delete_record(
+        &mut self,
+        record_id: Uuid,
+        clear_confirmation: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let record_id_string = record_id.to_string();
+        cx.spawn(
+            async move |view, cx| match store.delete_record(record_id).await {
+                Ok(_) => {
+                    view.update(cx, |panel, cx| {
+                        if clear_confirmation {
+                            panel.pending_deletion = None;
+                        }
+
+                        Self::remove_record_from_results(&mut panel.results, record_id);
+
+                        if panel.task_detail_sidebar.read(cx).current_task_id()
+                            == Some(record_id_string.as_str())
+                        {
+                            panel.task_detail_sidebar.update(cx, |sidebar, cx| {
+                                sidebar.dismiss(cx);
+                            });
+                        }
+
+                        if panel.record_detail_sidebar.read(cx).current_record_id()
+                            == Some(record_id_string.as_str())
+                        {
+                            panel.record_detail_sidebar.update(cx, |sidebar, cx| {
+                                sidebar.dismiss(cx);
+                            });
+                        }
+
+                        panel.refresh_available_metadata(cx);
+                        panel.sync_open_detail_visibility(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => eprintln!("[SearchPanel] Failed to delete record: {}", e),
+            },
+        )
+        .detach();
     }
 
     fn query_terms(&self) -> Vec<String> {
@@ -1054,7 +1405,8 @@ impl SearchPanel {
     fn render_search_result_item(
         &self,
         record: &Record,
-        _cx: &mut Context<Self>,
+        is_selected: bool,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let time_str = Self::format_time(record.created_at);
         let icon = Self::get_node_icon(record);
@@ -1065,72 +1417,107 @@ impl SearchPanel {
         let tags = record.tags.clone();
         let persons = record.persons.clone();
 
-        h_flex()
+        div()
+            .id(record.id)
             .w_full()
-            .py(px(8.0))
-            .gap(px(12.0))
+            .min_w(px(0.0))
+            .p(px(12.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(if is_selected {
+                rgb(0x1890ff)
+            } else {
+                rgb(0xe8e8e8)
+            })
+            .bg(if is_selected {
+                rgb(0xe6f7ff)
+            } else {
+                rgb(0xffffff)
+            })
+            .cursor_pointer()
+            .hover(|style| {
+                style.bg(if is_selected {
+                    rgb(0xe6f7ff)
+                } else {
+                    rgb(0xf6ffed)
+                })
+            })
+            .on_click(cx.listener({
+                let record = record.clone();
+                move |this, _event: &ClickEvent, window, cx| {
+                    this.select_result(&record, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
-                div()
-                    .w(px(60.0))
-                    .text_sm()
-                    .text_color(rgb(0x8c8c8c))
-                    .child(time_str),
-            )
-            .child(div().text_color(icon_color).text_sm().child(icon))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        h_flex().gap(px(8.0)).items_center().child(
-                            div()
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0xf0f0f0))
-                                .text_xs()
-                                .text_color(rgb(0x8c8c8c))
-                                .child(record_type_label),
-                        ),
-                    )
+                h_flex()
+                    .w_full()
+                    .gap(px(12.0))
+                    .items_start()
                     .child(
                         div()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x262626))
-                            .child(self.render_search_tokenized_text(
-                                &title,
-                                rgb(0x262626),
-                                FontWeight::SEMIBOLD,
-                            )),
+                            .w(px(60.0))
+                            .text_sm()
+                            .text_color(rgb(0x8c8c8c))
+                            .child(time_str),
                     )
-                    .when_some(body_preview, |el, body| {
-                        el.child(div().text_sm().text_color(rgb(0x8c8c8c)).child(
-                            self.render_search_tokenized_text(
-                                &body,
-                                rgb(0x8c8c8c),
-                                FontWeight::NORMAL,
-                            ),
-                        ))
-                    })
-                    .child(h_flex().gap(px(6.0)).flex_wrap().children(
-                        tags.into_iter().enumerate().map(|(idx, tag)| {
-                            div()
-                                .id(("result-tag", idx))
-                                .child(render_metadata_chip(MetadataChipKind::Tag, &tag))
-                        }),
-                    ))
-                    .when(!persons.is_empty(), |el| {
-                        el.child(h_flex().gap(px(6.0)).flex_wrap().children(
-                            persons.into_iter().enumerate().map(|(idx, person)| {
+                    .child(div().text_color(icon_color).text_sm().child(icon))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                h_flex().gap(px(8.0)).items_center().child(
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgb(0xf0f0f0))
+                                        .text_xs()
+                                        .text_color(rgb(0x8c8c8c))
+                                        .child(record_type_label),
+                                ),
+                            )
+                            .child(
                                 div()
-                                    .id(("result-person", idx))
-                                    .child(render_metadata_chip(MetadataChipKind::Person, &person))
+                                    .text_base()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x262626))
+                                    .child(self.render_search_tokenized_text(
+                                        &title,
+                                        rgb(0x262626),
+                                        FontWeight::SEMIBOLD,
+                                    )),
+                            )
+                            .when_some(body_preview, |el, body| {
+                                el.child(div().text_sm().text_color(rgb(0x8c8c8c)).child(
+                                    self.render_search_tokenized_text(
+                                        &body,
+                                        rgb(0x8c8c8c),
+                                        FontWeight::NORMAL,
+                                    ),
+                                ))
+                            })
+                            .child(h_flex().gap(px(6.0)).flex_wrap().children(
+                                tags.into_iter().enumerate().map(|(idx, tag)| {
+                                    div()
+                                        .id(("result-tag", idx))
+                                        .child(render_metadata_chip(MetadataChipKind::Tag, &tag))
+                                }),
+                            ))
+                            .when(!persons.is_empty(), |el| {
+                                el.child(h_flex().gap(px(6.0)).flex_wrap().children(
+                                    persons.into_iter().enumerate().map(|(idx, person)| {
+                                        div().id(("result-person", idx)).child(
+                                            render_metadata_chip(MetadataChipKind::Person, &person),
+                                        )
+                                    }),
+                                ))
                             }),
-                        ))
-                    }),
+                    ),
             )
     }
 
@@ -1169,6 +1556,8 @@ impl SearchPanel {
         let has_query = !self.query.trim().is_empty();
         let browse_active = !has_query && self.has_active_browse_filters();
         let browse_filter = self.browse_filter.clone();
+        let selected_task_id = self.selected_task_id(cx);
+        let selected_record_id = self.selected_record_id(cx);
 
         div()
             .id("search-results")
@@ -1236,9 +1625,14 @@ impl SearchPanel {
                                     ),
                             )
                             .children(records.iter().enumerate().map(|(idx, record)| {
+                                let is_selected = Self::is_record_selected(
+                                    record,
+                                    selected_task_id.as_deref(),
+                                    selected_record_id.as_deref(),
+                                );
                                 div()
                                     .id(("result", idx))
-                                    .child(self.render_search_result_item(record, cx))
+                                    .child(self.render_search_result_item(record, is_selected, cx))
                             }))
                     }))
                     .when(
@@ -1264,15 +1658,118 @@ impl SearchPanel {
                     ),
             )
     }
+
+    fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pending = self.pending_deletion.as_ref()?;
+        let title = pending.display_title.clone();
+        let record_label = pending.record_label;
+
+        Some(
+            div()
+                .id("search-delete-confirm-overlay")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0xf5f5f5))
+                .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div()
+                        .w(px(360.0))
+                        .max_w(px(360.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .cursor_default()
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("删除{}", record_label)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x666666))
+                                .child(format!("确认删除“{}”？删除后无法恢复。", title)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x999999))
+                                .child("按 Enter 确认，按 Esc 取消"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new("search-delete-confirm-cancel")
+                                        .child("取消")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.cancel_delete_confirmation(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("search-delete-confirm-submit")
+                                        .child("确认删除")
+                                        .text_color(rgb(0xff4d4f))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.confirm_delete_record(cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for SearchPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_deletion.is_some() {
+            self.focus_handle.focus(window, cx);
+        }
+
         v_flex()
             .size_full()
             .overflow_hidden()
+            .relative()
             .p(px(24.0))
             .gap(px(18.0))
+            .track_focus(&self.focus_handle(cx))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.pending_deletion.is_none() {
+                    return;
+                }
+
+                match event.keystroke.key.as_str() {
+                    "enter" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.confirm_delete_record(cx);
+                    }
+                    "escape" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.cancel_delete_confirmation(cx);
+                    }
+                    _ => {}
+                }
+            }))
             .child(
                 div()
                     .text_xl()
@@ -1283,7 +1780,16 @@ impl Render for SearchPanel {
             .child(self.render_search_input(cx))
             .child(self.render_type_filter(cx))
             .child(self.render_tag_filter(cx))
-            .child(div().flex_1().min_h_0().overflow_hidden().child(self.render_results(cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.render_results(cx)),
+            )
+            .child(self.task_detail_sidebar.clone())
+            .child(self.record_detail_sidebar.clone())
+            .children(self.render_delete_confirmation(cx))
     }
 }
 
@@ -1295,10 +1801,11 @@ impl Focusable for SearchPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdvancedFilterMode, BrowseFilter, SearchPanel};
-    use crate::models::{Priority, Record};
+    use super::{AdvancedFilterMode, BrowseFilter, SearchDetailTarget, SearchPanel};
+    use crate::models::{Priority, Record, RecordType};
     use chrono::{Duration, Utc};
     use std::collections::BTreeSet;
+    use uuid::Uuid;
 
     #[test]
     fn test_next_browse_filter_supports_single_select_toggle() {
@@ -1418,27 +1925,18 @@ mod tests {
     fn test_sort_results_by_created_at_desc_keeps_latest_first() {
         let now = Utc::now();
 
-        let mut oldest = Record::new_task(
-            "最早".to_string(),
-            "最早内容".to_string(),
-            Priority::Low,
-        );
+        let mut oldest =
+            Record::new_task("最早".to_string(), "最早内容".to_string(), Priority::Low);
         oldest.created_at = now - Duration::days(3);
         oldest.updated_at = oldest.created_at;
 
-        let mut newest = Record::new_task(
-            "最新".to_string(),
-            "最新内容".to_string(),
-            Priority::High,
-        );
+        let mut newest =
+            Record::new_task("最新".to_string(), "最新内容".to_string(), Priority::High);
         newest.created_at = now;
         newest.updated_at = newest.created_at;
 
-        let mut middle = Record::new_task(
-            "中间".to_string(),
-            "中间内容".to_string(),
-            Priority::Medium,
-        );
+        let mut middle =
+            Record::new_task("中间".to_string(), "中间内容".to_string(), Priority::Medium);
         middle.created_at = now - Duration::days(1);
         middle.updated_at = middle.created_at;
 
@@ -1452,5 +1950,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["最新", "中间", "最早"]
         );
+    }
+
+    #[test]
+    fn test_detail_target_routes_tasks_and_non_tasks_to_correct_sidebar() {
+        let task = Record::new_task("任务".to_string(), "内容".to_string(), Priority::Medium);
+        assert_eq!(
+            SearchPanel::detail_target_for(&task),
+            SearchDetailTarget::Task
+        );
+
+        for record_type in [RecordType::Note, RecordType::Idea, RecordType::Event] {
+            let mut record = Record::new_note("记录".to_string());
+            record.record_type = record_type;
+            assert_eq!(
+                SearchPanel::detail_target_for(&record),
+                SearchDetailTarget::Record
+            );
+        }
+    }
+
+    #[test]
+    fn test_remove_record_from_results_removes_matching_record_only() {
+        let mut records = vec![
+            Record::new_task("任务 A".to_string(), "内容".to_string(), Priority::Low),
+            Record::new_task("任务 B".to_string(), "内容".to_string(), Priority::Medium),
+        ];
+        let removed_id = records[0].id;
+        let kept_id = records[1].id;
+
+        assert!(SearchPanel::remove_record_from_results(
+            &mut records,
+            removed_id
+        ));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, kept_id);
+        assert!(!SearchPanel::remove_record_from_results(
+            &mut records,
+            Uuid::new_v4()
+        ));
     }
 }
