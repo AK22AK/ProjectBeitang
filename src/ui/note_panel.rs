@@ -8,7 +8,7 @@ use crate::ui::tokenized_text::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
 use uuid::Uuid;
 
@@ -27,7 +27,6 @@ pub struct NotePanel {
     notes: Vec<Record>,
     focus_handle: FocusHandle,
     input_state: Entity<InputState>,
-    _subscription: Subscription,
     _window_activation_subscription: Subscription,
     pending_deletion: Option<PendingDeletion>,
     record_detail_sidebar: Entity<RecordDetailSidebar>,
@@ -38,25 +37,16 @@ impl NotePanel {
         let focus_handle = cx.focus_handle();
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("输入笔记内容，第一行自动作为标题，Enter 保存 | #标签 @人物")
+                .multi_line(true)
+                .auto_grow(1, 6)
+                .placeholder("输入记录，Cmd+Enter 换行后首行作为标题 | Enter 保存 | #标签 @人物")
         });
-
-        let _subscription = cx.subscribe_in(
-            &input_state,
-            window,
-            |this, _state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.create_note(window, cx);
-                }
-            },
-        );
 
         let mut panel = Self {
             store: store.clone(),
             notes: Vec::new(),
             focus_handle,
             input_state,
-            _subscription,
             _window_activation_subscription: cx.observe_window_activation(
                 window,
                 |this, window, cx| {
@@ -192,15 +182,15 @@ impl NotePanel {
             return;
         }
 
-        let (content, tags, people) = parsing::parse_record_input(&text);
+        let parsed = parsing::parse_record_draft(&text);
         eprintln!(
-            "[NotePanel] Parsed content: '{}', tags: {:?}, people: {:?}",
-            content, tags, people
+            "[NotePanel] Parsed title: {:?}, content: '{}', tags: {:?}, people: {:?}",
+            parsed.title, parsed.content, parsed.tags, parsed.people
         );
 
-        let mut note = Record::new_note(content);
-        note.tags = tags;
-        note.persons = people;
+        let mut note = Record::new_note_with_title(parsed.title, parsed.content);
+        note.tags = parsed.tags;
+        note.persons = parsed.people;
         eprintln!(
             "[NotePanel] Created note with id: {}, tags: {:?}, persons: {:?}",
             note.id, note.tags, note.persons
@@ -475,12 +465,17 @@ impl Render for NotePanel {
                     .child(
                         div()
                             .flex()
+                            .items_end()
                             .gap(px(8.0))
                             .child(
                                 div()
                                     .flex_1()
                                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                                        if event.keystroke.key == "enter" {
+                                        if event.keystroke.key == "enter"
+                                            && !event.keystroke.modifiers.platform
+                                        {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
                                             this.create_note(window, cx);
                                         }
                                     }))

@@ -1,7 +1,7 @@
 use beitang::models::Priority;
 use beitang::ui::parsing::{
-    parse_person_list, parse_priority, parse_record_fields, parse_record_input, parse_tag_list,
-    parse_tags_and_people, parse_task_input, reconcile_metadata,
+    parse_person_list, parse_priority, parse_record_draft, parse_record_fields, parse_record_input,
+    parse_tag_list, parse_tags_and_people, parse_task_draft, parse_task_input, reconcile_metadata,
 };
 
 #[test]
@@ -173,6 +173,44 @@ fn test_parse_record_input_preserves_line_breaks() {
     assert_eq!(result.0, "第一行内容\n#工作 @张三\n第二行内容");
     assert_eq!(result.1, vec!["工作"]);
     assert_eq!(result.2, vec!["张三"]);
+}
+
+#[test]
+fn test_parse_task_draft_single_line_keeps_empty_content() {
+    let result = parse_task_draft("!! 任务标题 #开发 @张三");
+    assert_eq!(result.title, "任务标题 #开发 @张三");
+    assert_eq!(result.content, "");
+    assert_eq!(result.priority, Priority::High);
+    assert_eq!(result.tags, vec!["开发"]);
+    assert_eq!(result.people, vec!["张三"]);
+}
+
+#[test]
+fn test_parse_task_draft_multiline_splits_title_and_content() {
+    let result = parse_task_draft("! 任务标题 #开发\n正文第一行 @张三\n正文第二行 #测试");
+    assert_eq!(result.title, "任务标题 #开发");
+    assert_eq!(result.content, "正文第一行 @张三\n正文第二行 #测试");
+    assert_eq!(result.priority, Priority::Medium);
+    assert_eq!(result.tags, vec!["开发", "测试"]);
+    assert_eq!(result.people, vec!["张三"]);
+}
+
+#[test]
+fn test_parse_record_draft_single_line_keeps_content_only() {
+    let result = parse_record_draft("单行记录 #开发 @张三");
+    assert_eq!(result.title, None);
+    assert_eq!(result.content, "单行记录 #开发 @张三");
+    assert_eq!(result.tags, vec!["开发"]);
+    assert_eq!(result.people, vec!["张三"]);
+}
+
+#[test]
+fn test_parse_record_draft_multiline_splits_title_and_content() {
+    let result = parse_record_draft("记录标题 #开发\n正文第一行 @张三\n正文第二行 #测试");
+    assert_eq!(result.title, Some("记录标题 #开发".to_string()));
+    assert_eq!(result.content, "正文第一行 @张三\n正文第二行 #测试");
+    assert_eq!(result.tags, vec!["开发", "测试"]);
+    assert_eq!(result.people, vec!["张三"]);
 }
 
 #[test]

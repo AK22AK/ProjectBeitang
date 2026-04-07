@@ -2,6 +2,23 @@ use crate::models::Priority;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTaskDraft {
+    pub title: String,
+    pub content: String,
+    pub priority: Priority,
+    pub tags: Vec<String>,
+    pub people: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRecordDraft {
+    pub title: Option<String>,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub people: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRecordFields {
     pub title: Option<String>,
     pub content: String,
@@ -53,6 +70,63 @@ pub fn reconcile_metadata(
         .cloned();
 
     dedup_preserving_order(preserved.chain(new_inline.iter().cloned()))
+}
+
+pub fn parse_task_draft(input: &str) -> ParsedTaskDraft {
+    let normalized = normalize_multiline_input(input);
+    let Some(first_line) = normalized.first() else {
+        return ParsedTaskDraft {
+            title: String::new(),
+            content: String::new(),
+            priority: Priority::Low,
+            tags: Vec::new(),
+            people: Vec::new(),
+        };
+    };
+
+    let (title, priority) = parse_priority(first_line);
+    let content = normalized[1..].join("\n");
+    let inline_fields = parse_record_fields(Some(&title), &content);
+
+    ParsedTaskDraft {
+        title,
+        content,
+        priority,
+        tags: inline_fields.tags,
+        people: inline_fields.people,
+    }
+}
+
+pub fn parse_record_draft(input: &str) -> ParsedRecordDraft {
+    let normalized = normalize_multiline_input(input);
+    match normalized.as_slice() {
+        [] => ParsedRecordDraft {
+            title: None,
+            content: String::new(),
+            tags: Vec::new(),
+            people: Vec::new(),
+        },
+        [single] => {
+            let content = single.to_string();
+            let (tags, people) = extract_tags_and_people(&content);
+            ParsedRecordDraft {
+                title: None,
+                content,
+                tags,
+                people,
+            }
+        }
+        [title, rest @ ..] => {
+            let content = rest.join("\n");
+            let inline_fields = parse_record_fields(Some(title), &content);
+            ParsedRecordDraft {
+                title: inline_fields.title,
+                content: inline_fields.content,
+                tags: inline_fields.tags,
+                people: inline_fields.people,
+            }
+        }
+    }
 }
 
 /// 解析优先级，返回 (去除优先级的内容, 优先级)
@@ -177,6 +251,10 @@ where
     }
 
     result
+}
+
+fn normalize_multiline_input(input: &str) -> Vec<String> {
+    trim_empty_edge_lines(input.lines().map(|line| line.to_string()).collect())
 }
 
 fn trim_empty_edge_lines(lines: Vec<String>) -> Vec<String> {

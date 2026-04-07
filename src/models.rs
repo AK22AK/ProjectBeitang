@@ -123,6 +123,28 @@ impl Record {
         }
     }
 
+    /// 创建新记录/笔记 - 显式指定标题与正文
+    pub fn new_note_with_title(title: Option<String>, content: String) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            title,
+            content,
+            priority: None,
+            status: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            scheduled_for: None,
+            due_date: None,
+            notified_at: None,
+            cancelled_reason: None,
+            record_type: RecordType::Note,
+            tags: Vec::new(),
+            persons: Vec::new(),
+        }
+    }
+
     /// 创建新想法 - 类似笔记，content 为主
     pub fn new_idea(content: String) -> Self {
         let now = Utc::now();

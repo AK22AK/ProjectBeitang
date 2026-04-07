@@ -149,7 +149,6 @@ pub struct TaskPanel {
     tasks: Vec<Record>,
     focus_handle: FocusHandle,
     input_state: Entity<InputState>,
-    _subscription: Subscription,
     editing_task_id: Option<uuid::Uuid>,
     task_input_states: HashMap<uuid::Uuid, Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
@@ -180,18 +179,10 @@ impl TaskPanel {
         let focus_handle = cx.focus_handle();
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("!! 高优先级 | ! 普通优先级 | 直接输入 | #标签 @人物")
+                .multi_line(true)
+                .auto_grow(1, 6)
+                .placeholder("输入任务标题，Cmd+Enter 换行添加正文 | !! 高优先级 | ! 普通优先级 | #标签 @人物")
         });
-
-        let _subscription = cx.subscribe_in(
-            &input_state,
-            window,
-            |this, _state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.create_task(window, cx);
-                }
-            },
-        );
 
         let _window_activation_subscription =
             cx.observe_window_activation(window, |this, window, cx| {
@@ -209,7 +200,6 @@ impl TaskPanel {
             tasks: Vec::new(),
             focus_handle,
             input_state,
-            _subscription,
             editing_task_id: None,
             task_input_states: HashMap::new(),
             _edit_subscription: None,
@@ -870,16 +860,15 @@ impl TaskPanel {
             return;
         }
 
-        let (title, priority, tags, people) = parsing::parse_task_input(&text);
+        let parsed = parsing::parse_task_draft(&text);
         eprintln!(
             "[TaskPanel] Parsed title: '{}', priority: {:?}, tags: {:?}, people: {:?}",
-            title, priority, tags, people
+            parsed.title, parsed.priority, parsed.tags, parsed.people
         );
 
-        // 任务创建时，输入内容作为 title，content 初始为空
-        let mut task = Record::new_task(title, String::new(), priority);
-        task.tags = tags;
-        task.persons = people;
+        let mut task = Record::new_task(parsed.title, parsed.content, parsed.priority);
+        task.tags = parsed.tags;
+        task.persons = parsed.people;
         eprintln!(
             "[TaskPanel] Created task with id: {}, tags: {:?}, persons: {:?}",
             task.id, task.tags, task.persons
@@ -2112,7 +2101,7 @@ impl Render for TaskPanel {
                         div()
                             .w_full()
                             .flex()
-                            .items_center()
+                            .items_end()
                             .gap(px(8.0))
                             .child(
                                 div()
@@ -2121,7 +2110,11 @@ impl Render for TaskPanel {
                                     .overflow_hidden()
                                     .on_key_down(cx.listener(
                                         |this, event: &KeyDownEvent, window, cx| {
-                                            if event.keystroke.key == "enter" {
+                                            if event.keystroke.key == "enter"
+                                                && !event.keystroke.modifiers.platform
+                                            {
+                                                window.prevent_default();
+                                                cx.stop_propagation();
                                                 this.create_task(window, cx);
                                             }
                                         },
