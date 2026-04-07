@@ -56,7 +56,7 @@ impl NotePanel {
                 },
             ),
             pending_deletion: None,
-            record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(window, cx)),
+            record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(store.clone(), window, cx)),
         };
 
         let handle = cx.entity().clone();

@@ -176,6 +176,7 @@ pub struct TaskPanel {
 
 impl TaskPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sidebar_store = store.clone();
         let focus_handle = cx.focus_handle();
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
@@ -222,7 +223,8 @@ impl TaskPanel {
             available_tags: Vec::new(),
             tag_filter_mode: TagFilterMode::And,
             pending_deletion: None,
-            task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
+            task_detail_sidebar: cx
+                .new(|cx| TaskDetailSidebar::new(sidebar_store.clone(), window, cx)),
         };
 
         let handle = cx.entity().clone();

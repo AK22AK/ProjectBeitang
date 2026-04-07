@@ -8,14 +8,25 @@ use gpui_component::{
     scroll::ScrollableElement,
     v_flex,
 };
+use rfd::AsyncFileDialog;
+use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::models::{Priority, Record, TaskStatus};
+use crate::models::{Attachment, Priority, Record, TaskStatus};
+use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::tokenized_text::{
     render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
 };
 
+#[derive(Clone)]
+struct AttachmentPreview {
+    attachment: Attachment,
+    preview_image: Option<Arc<Image>>,
+}
+
 pub struct TaskDetailSidebar {
+    store: Store,
     current_task_id: Option<String>,
     task_title: Option<String>,
     task_content: String,
@@ -39,6 +50,10 @@ pub struct TaskDetailSidebar {
     editing_title: bool,
     editing_content: bool,
     content_expanded: bool,
+    attachments: Vec<AttachmentPreview>,
+    active_attachment_preview: Option<AttachmentPreview>,
+    attachments_loading: bool,
+    attachment_error: Option<String>,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_delete: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
@@ -67,8 +82,9 @@ pub enum SidebarState {
 }
 
 impl TaskDetailSidebar {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, _window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
+            store,
             current_task_id: None,
             task_title: None,
             task_content: String::new(),
@@ -92,6 +108,10 @@ impl TaskDetailSidebar {
             editing_title: false,
             editing_content: false,
             content_expanded: false,
+            attachments: Vec::new(),
+            active_attachment_preview: None,
+            attachments_loading: false,
+            attachment_error: None,
             on_save: None,
             on_delete: None,
             on_close: None,
@@ -144,6 +164,10 @@ impl TaskDetailSidebar {
         self.inline_persons = inline_fields.people;
         self.editing_title = false;
         self.editing_content = false;
+        self.attachments.clear();
+        self.active_attachment_preview = None;
+        self.attachments_loading = true;
+        self.attachment_error = None;
 
         // 初始化或更新截止日期选择器状态
         let (init_date, init_time_str) = if let Some(due) = self.due_date {
@@ -277,6 +301,7 @@ impl TaskDetailSidebar {
             self.content_input_subscription = Some(subscription);
         }
 
+        self.reload_attachments(cx);
         cx.notify();
     }
 
@@ -287,6 +312,10 @@ impl TaskDetailSidebar {
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.current_task_id = None;
+        self.attachments.clear();
+        self.active_attachment_preview = None;
+        self.attachments_loading = false;
+        self.attachment_error = None;
         cx.notify();
     }
 
@@ -616,6 +645,325 @@ impl TaskDetailSidebar {
                 this.set_priority(priority.clone(), window, cx);
                 cx.stop_propagation();
             }))
+    }
+
+    fn reload_attachments(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self
+            .current_task_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            self.attachments.clear();
+            self.attachments_loading = false;
+            self.attachment_error = None;
+            cx.notify();
+            return;
+        };
+
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let result = async {
+                let attachments = store.get_attachments(task_id).await?;
+                let mut previews = Vec::with_capacity(attachments.len());
+                for attachment in attachments {
+                    let preview_image = match store.get_attachment_bytes(&attachment.id).await? {
+                        Some(bytes) => preview_image_from_bytes(&attachment.mime_type, bytes),
+                        None => None,
+                    };
+                    previews.push(AttachmentPreview {
+                        attachment,
+                        preview_image,
+                    });
+                }
+                Ok::<_, String>(previews)
+            }
+            .await;
+
+            let _ = view.update(cx, |this, cx| {
+                this.attachments_loading = false;
+                match result {
+                    Ok(previews) => {
+                        this.attachments = previews;
+                        this.attachment_error = None;
+                    }
+                    Err(err) => {
+                        this.attachments.clear();
+                        this.attachment_error = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn import_attachments(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self
+            .current_task_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            return;
+        };
+
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let Some(handles) = AsyncFileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
+                .pick_files()
+                .await
+            else {
+                return;
+            };
+            let paths = handles
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect();
+            let result = store.import_image_attachments(task_id, paths).await;
+            let _ = view.update(cx, |this, cx| match result {
+                Ok(_) => {
+                    this.attachments_loading = true;
+                    this.attachment_error = None;
+                    this.reload_attachments(cx);
+                }
+                Err(err) => {
+                    this.attachments_loading = false;
+                    this.attachment_error = Some(err);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn delete_attachment(&mut self, attachment_id: String, cx: &mut Context<Self>) {
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let result = store.delete_attachment(&attachment_id).await;
+            let _ = view.update(cx, |this, cx| match result {
+                Ok(_) => this.reload_attachments(cx),
+                Err(err) => {
+                    this.attachments_loading = false;
+                    this.attachment_error = Some(err);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_attachment_card(
+        &self,
+        idx: usize,
+        preview: &AttachmentPreview,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let attachment_id = preview.attachment.id.clone();
+        let lightbox_preview = preview.clone();
+        let meta = format_attachment_meta(&preview.attachment);
+        let (preview_width, preview_height) = attachment_preview_size(&preview.attachment);
+
+        v_flex()
+            .id(("task-attachment", idx))
+            .gap(px(8.0))
+            .p(px(8.0))
+            .border_1()
+            .border_color(rgb(0xf0f0f0))
+            .rounded(px(10.0))
+            .bg(rgb(0xfcfcfc))
+            .child(
+                preview
+                    .preview_image
+                    .clone()
+                    .map(|image| {
+                        div()
+                            .w_full()
+                            .min_h(px(156.0))
+                            .py(px(8.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                    this.open_attachment_preview(lightbox_preview.clone(), cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(img(image).w(preview_width).h(preview_height))
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|| {
+                        div()
+                            .w_full()
+                            .min_h(px(156.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x999999))
+                            .child("图片不可预览")
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().text_xs().text_color(rgb(0x999999)).child(meta))
+                    .child(
+                        Button::new(format!("task-attachment-delete-{}", idx))
+                            .child("删除")
+                            .text_color(rgb(0xff4d4f))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.delete_attachment(attachment_id.clone(), cx);
+                                cx.stop_propagation();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn open_attachment_preview(&mut self, preview: AttachmentPreview, cx: &mut Context<Self>) {
+        self.active_attachment_preview = Some(preview);
+        cx.notify();
+    }
+
+    fn close_attachment_preview(&mut self, cx: &mut Context<Self>) {
+        self.active_attachment_preview = None;
+        cx.notify();
+    }
+
+    fn render_attachment_lightbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let preview = self.active_attachment_preview.as_ref()?;
+        let image = preview.preview_image.clone()?;
+        let meta = format_attachment_meta(&preview.attachment);
+        let (lightbox_width, lightbox_height) = attachment_lightbox_size(&preview.attachment);
+
+        Some(
+            div()
+                .id("task-attachment-lightbox")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000061))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.close_attachment_preview(cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(
+                    v_flex()
+                        .w(px(960.0))
+                        .max_w(relative(0.9))
+                        .gap(px(12.0))
+                        .p(px(16.0))
+                        .rounded(px(14.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .shadow_lg()
+                        .cursor_default()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .child(div().text_sm().text_color(rgb(0x666666)).child(meta))
+                                .child(
+                                    Button::new("task-attachment-lightbox-close")
+                                        .child("关闭")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.close_attachment_preview(cx);
+                                            cx.stop_propagation();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .min_h(px(240.0))
+                                .max_h(px(760.0))
+                                .py(px(8.0))
+                                .rounded(px(10.0))
+                                .bg(rgb(0xf5f5f5))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .overflow_hidden()
+                                .child(img(image).w(lightbox_width).h(lightbox_height)),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+fn preview_image_from_bytes(mime_type: &str, bytes: Vec<u8>) -> Option<Arc<Image>> {
+    let format = ImageFormat::from_mime_type(mime_type)?;
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+fn format_attachment_meta(attachment: &Attachment) -> String {
+    format!(
+        "{} × {} · {}",
+        attachment.width,
+        attachment.height,
+        format_file_size(attachment.file_size)
+    )
+}
+
+fn attachment_preview_size(attachment: &Attachment) -> (Pixels, Pixels) {
+    const MAX_WIDTH: f32 = 280.0;
+    const MAX_HEIGHT: f32 = 180.0;
+
+    let width = attachment.width.max(1) as f32;
+    let height = attachment.height.max(1) as f32;
+    let scale = (MAX_WIDTH / width).min(MAX_HEIGHT / height).min(1.0);
+
+    (px(width * scale), px(height * scale))
+}
+
+fn attachment_lightbox_size(attachment: &Attachment) -> (Pixels, Pixels) {
+    const MAX_WIDTH: f32 = 880.0;
+    const MAX_HEIGHT: f32 = 720.0;
+
+    let width = attachment.width.max(1) as f32;
+    let height = attachment.height.max(1) as f32;
+    let scale = (MAX_WIDTH / width).min(MAX_HEIGHT / height).min(1.0);
+
+    (px(width * scale), px(height * scale))
+}
+
+fn format_file_size(file_size: usize) -> String {
+    if file_size >= 1024 * 1024 {
+        format!("{:.1} MB", file_size as f64 / (1024.0 * 1024.0))
+    } else if file_size >= 1024 {
+        format!("{:.1} KB", file_size as f64 / 1024.0)
+    } else {
+        format!("{} B", file_size)
     }
 }
 
@@ -1116,7 +1464,66 @@ impl Render for TaskDetailSidebar {
                                                     ),
                                                 )),
                                         )
-                                    }),
+                                    })
+                                    .child(
+                                        v_flex()
+                                            .gap(px(8.0))
+                                            .child(
+                                                h_flex()
+                                                    .justify_between()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0x666666))
+                                                            .child("附件"),
+                                                    )
+                                                    .child(
+                                                        Button::new("task-sidebar-add-attachment")
+                                                            .child("添加图片")
+                                                            .on_click(cx.listener(
+                                                                |this, _event, _window, cx| {
+                                                                    this.import_attachments(cx);
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
+                                            .when(self.attachments_loading, |el| {
+                                                el.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0x999999))
+                                                        .child("正在加载图片…"),
+                                                )
+                                            })
+                                            .when_some(self.attachment_error.clone(), |el, err| {
+                                                el.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0xff4d4f))
+                                                        .child(err),
+                                                )
+                                            })
+                                            .when(
+                                                !self.attachments_loading
+                                                    && self.attachment_error.is_none()
+                                                    && self.attachments.is_empty(),
+                                                |el| {
+                                                    el.child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(0x999999))
+                                                            .child("暂无图片"),
+                                                    )
+                                                },
+                                            )
+                                            .children(self.attachments.iter().enumerate().map(
+                                                |(idx, preview)| {
+                                                    self.render_attachment_card(idx, preview, cx)
+                                                },
+                                            )),
+                                    ),
                             ),
                     )
                     .child(
@@ -1164,6 +1571,9 @@ impl Render for TaskDetailSidebar {
                             ),
                     ),
             )
+            .when_some(self.render_attachment_lightbox(cx), |el, overlay| {
+                el.child(overlay)
+            })
             .into_any_element()
     }
 }

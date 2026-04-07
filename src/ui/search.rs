@@ -131,6 +131,8 @@ impl SearchPanel {
         );
 
         let focus_handle = cx.focus_handle();
+        let task_sidebar_store = store.clone();
+        let record_sidebar_store = store.clone();
 
         let mut panel = Self {
             store,
@@ -151,8 +153,10 @@ impl SearchPanel {
             is_searching: false,
             search_generation: 0,
             pending_deletion: None,
-            task_detail_sidebar: cx.new(|cx| TaskDetailSidebar::new(window, cx)),
-            record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(window, cx)),
+            task_detail_sidebar: cx
+                .new(|cx| TaskDetailSidebar::new(task_sidebar_store.clone(), window, cx)),
+            record_detail_sidebar: cx
+                .new(|cx| RecordDetailSidebar::new(record_sidebar_store.clone(), window, cx)),
         };
 
         let handle = cx.entity().clone();

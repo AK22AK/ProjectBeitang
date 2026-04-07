@@ -1,5 +1,6 @@
+use crate::attachment_image::{prepare_image_attachments, PreparedImageAttachment};
 use crate::db::Database;
-use crate::models::{Person, Record, Tag};
+use crate::models::{Attachment, Person, Record, Tag};
 use async_channel::{unbounded, Receiver, Sender};
 use std::path::PathBuf;
 
@@ -102,6 +103,22 @@ pub enum StoreCommand {
     AddPersonToRecord {
         record_id: uuid::Uuid,
         person_id: i64,
+        respond_to: Sender<Result<(), String>>,
+    },
+    GetAttachments {
+        record_id: uuid::Uuid,
+        respond_to: Sender<Result<Vec<Attachment>, String>>,
+    },
+    ImportImageAttachments {
+        prepared: Vec<PreparedImageAttachment>,
+        respond_to: Sender<Result<Vec<Attachment>, String>>,
+    },
+    GetAttachmentBytes {
+        attachment_id: String,
+        respond_to: Sender<Result<Option<Vec<u8>>, String>>,
+    },
+    DeleteAttachment {
+        attachment_id: String,
         respond_to: Sender<Result<(), String>>,
     },
 }
@@ -265,6 +282,34 @@ impl StoreRuntime {
                     respond_to,
                 } => {
                     let result = self.handle_add_person_to_record(record_id, person_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetAttachments {
+                    record_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_get_attachments(record_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::ImportImageAttachments {
+                    prepared,
+                    respond_to,
+                } => {
+                    let result = self.handle_import_image_attachments(prepared).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetAttachmentBytes {
+                    attachment_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_get_attachment_bytes(attachment_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::DeleteAttachment {
+                    attachment_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_delete_attachment(attachment_id).await;
                     let _ = respond_to.send(result).await;
                 }
             }
@@ -661,6 +706,60 @@ impl StoreRuntime {
             None => Err("Database not initialized".to_string()),
         }
     }
+
+    async fn handle_get_attachments(
+        &self,
+        record_id: uuid::Uuid,
+    ) -> Result<Vec<Attachment>, String> {
+        match &self.db {
+            Some(db) => db
+                .get_attachments(record_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_import_image_attachments(
+        &self,
+        prepared: Vec<PreparedImageAttachment>,
+    ) -> Result<Vec<Attachment>, String> {
+        match &self.db {
+            Some(db) => {
+                let mut attachments = Vec::with_capacity(prepared.len());
+                for prepared_attachment in prepared {
+                    db.create_attachment_with_data(
+                        &prepared_attachment.attachment,
+                        Some(&prepared_attachment.file_data),
+                    )
+                    .map_err(|e| format!("Database error: {}", e))?;
+                    attachments.push(prepared_attachment.attachment);
+                }
+                Ok(attachments)
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_attachment_bytes(
+        &self,
+        attachment_id: String,
+    ) -> Result<Option<Vec<u8>>, String> {
+        match &self.db {
+            Some(db) => db
+                .get_attachment_bytes(&attachment_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_delete_attachment(&self, attachment_id: String) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .delete_attachment(&attachment_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
 }
 
 pub fn create_store() -> (Store, StoreRuntime) {
@@ -842,6 +941,70 @@ impl Store {
         rx.recv()
             .await
             .unwrap_or_else(|_| Err("Failed to get dashboard".to_string()))
+    }
+
+    pub async fn get_attachments(&self, record_id: uuid::Uuid) -> Result<Vec<Attachment>, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetAttachments {
+                record_id,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn import_image_attachments(
+        &self,
+        record_id: uuid::Uuid,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<Attachment>, String> {
+        let (prep_tx, prep_rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = prepare_image_attachments(record_id, paths);
+            let _ = prep_tx.send_blocking(result);
+        });
+        let prepared = prep_rx
+            .recv()
+            .await
+            .map_err(|err| format!("图片处理任务失败: {}", err))??;
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::ImportImageAttachments {
+                prepared,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn get_attachment_bytes(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetAttachmentBytes {
+                attachment_id: attachment_id.to_string(),
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(None))
+    }
+
+    pub async fn delete_attachment(&self, attachment_id: &str) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::DeleteAttachment {
+                attachment_id: attachment_id.to_string(),
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
     }
 
     pub async fn start_task(&self, id: uuid::Uuid) -> Result<(), String> {

@@ -4,7 +4,7 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, Result};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const SEARCH_RANK_FALLBACK: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Clone)]
@@ -128,6 +128,7 @@ impl Database {
                 mime_type TEXT NOT NULL,
                 width INTEGER,
                 height INTEGER,
+                file_data BLOB,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE CASCADE
             )",
@@ -274,6 +275,10 @@ impl Database {
             self.migrate_v3_to_v4()?;
         }
 
+        if version < 5 {
+            self.migrate_v4_to_v5()?;
+        }
+
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO schema_version (version, updated_at) VALUES (?1, ?2)
@@ -360,6 +365,13 @@ impl Database {
         self.drop_records_fts_schema()?;
         self.create_records_fts_schema()?;
         self.rebuild_records_fts()?;
+        Ok(())
+    }
+
+    fn migrate_v4_to_v5(&self) -> Result<()> {
+        let _ = self
+            .conn
+            .execute("ALTER TABLE attachments ADD COLUMN file_data BLOB", []);
         Ok(())
     }
 
@@ -969,16 +981,25 @@ impl Database {
     }
 
     pub fn create_attachment(&self, attachment: &Attachment) -> Result<()> {
+        self.create_attachment_with_data(attachment, None)
+    }
+
+    pub fn create_attachment_with_data(
+        &self,
+        attachment: &Attachment,
+        file_data: Option<&[u8]>,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO attachments (id, record_id, file_name, file_path, file_size, mime_type, width, height, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO attachments (id, record_id, file_name, file_path, file_size, mime_type, width, height, file_data, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 file_name = excluded.file_name,
                 file_path = excluded.file_path,
                 file_size = excluded.file_size,
                 mime_type = excluded.mime_type,
                 width = excluded.width,
-                height = excluded.height",
+                height = excluded.height,
+                file_data = COALESCE(excluded.file_data, attachments.file_data)",
             [
                 &attachment.id as &dyn rusqlite::ToSql,
                 &attachment.record_id as &dyn rusqlite::ToSql,
@@ -988,6 +1009,7 @@ impl Database {
                 &attachment.mime_type as &dyn rusqlite::ToSql,
                 &(attachment.width as i64) as &dyn rusqlite::ToSql,
                 &(attachment.height as i64) as &dyn rusqlite::ToSql,
+                &file_data as &dyn rusqlite::ToSql,
                 &attachment.created_at.to_rfc3339() as &dyn rusqlite::ToSql,
             ],
         )?;
@@ -1009,8 +1031,8 @@ impl Database {
             let file_path: String = row.get(3)?;
             let file_size: i64 = row.get(4)?;
             let mime_type: String = row.get(5)?;
-            let width: i64 = row.get(6)?;
-            let height: i64 = row.get(7)?;
+            let width: Option<i64> = row.get(6)?;
+            let height: Option<i64> = row.get(7)?;
             let created_at_str: String = row.get(8)?;
 
             Ok(Attachment {
@@ -1020,8 +1042,8 @@ impl Database {
                 file_path,
                 file_size: file_size as usize,
                 mime_type,
-                width: width as u32,
-                height: height as u32,
+                width: width.unwrap_or_default() as u32,
+                height: height.unwrap_or_default() as u32,
                 created_at: DateTime::parse_from_rfc3339(&created_at_str)
                     .unwrap_or_else(|_| chrono::Local::now().into())
                     .with_timezone(&Utc),
@@ -1029,6 +1051,34 @@ impl Database {
         })?;
 
         attachments.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_attachment_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path, file_data
+             FROM attachments
+             WHERE id = ?1",
+        )?;
+
+        let mut rows = stmt.query([id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        let file_path: String = row.get(0)?;
+        let file_data: Option<Vec<u8>> = row.get(1)?;
+        if let Some(file_data) = file_data {
+            return Ok(Some(file_data));
+        }
+
+        let path = std::path::Path::new(&file_path);
+        if path.exists() {
+            let bytes = std::fs::read(path)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+            return Ok(Some(bytes));
+        }
+
+        Ok(None)
     }
 
     pub fn delete_attachment(&self, id: &str) -> Result<()> {
@@ -1252,6 +1302,160 @@ mod tests {
         db.delete_attachment(&attachment.id).unwrap();
         let attachments = db.get_attachments(record.id).unwrap();
         assert_eq!(attachments.len(), 0);
+    }
+
+    #[test]
+    fn test_attachment_bytes_round_trip_from_database() {
+        let (db, _temp) = setup_test_db();
+        let record = Record::new_note("Test note".to_string());
+        db.create_record(&record).unwrap();
+
+        let attachment = Attachment {
+            id: Uuid::new_v4().to_string(),
+            record_id: record.id.to_string(),
+            file_name: "db-image.jpg".to_string(),
+            file_path: "db://attachment/test".to_string(),
+            file_size: 4,
+            mime_type: "image/jpeg".to_string(),
+            width: 2,
+            height: 2,
+            created_at: Utc::now(),
+        };
+
+        db.create_attachment_with_data(&attachment, Some(&[1, 2, 3, 4]))
+            .unwrap();
+
+        let bytes = db.get_attachment_bytes(&attachment.id).unwrap().unwrap();
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_attachment_bytes_fallback_to_file_path_for_legacy_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let legacy_file_path = temp_dir.path().join("legacy-image.png");
+        std::fs::write(&legacy_file_path, [9u8, 8, 7, 6]).unwrap();
+
+        let db_path = temp_dir.path().join("test.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO schema_version (version, updated_at) VALUES (4, ?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE records (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    priority INTEGER,
+                    status TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    scheduled_for TEXT,
+                    due_date TEXT,
+                    notified_at TEXT,
+                    cancelled_reason TEXT,
+                    record_type TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    color TEXT,
+                    created_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE record_tags (
+                    record_id TEXT NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    PRIMARY KEY (record_id, tag_id)
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE persons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE record_persons (
+                    record_id TEXT NOT NULL,
+                    person_id INTEGER NOT NULL,
+                    PRIMARY KEY (record_id, person_id)
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE attachments (
+                    id TEXT PRIMARY KEY,
+                    record_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    created_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+
+            let record_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO records (id, title, content, created_at, updated_at, record_type)
+                 VALUES (?1, '', '', ?2, ?2, 'note')",
+                [&record_id, &Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO attachments (id, record_id, file_name, file_path, file_size, mime_type, width, height, created_at)
+                 VALUES (?1, ?2, 'legacy.png', ?3, 4, 'image/png', 1, 1, ?4)",
+                [
+                    &Uuid::new_v4().to_string(),
+                    &record_id,
+                    &legacy_file_path.to_string_lossy().to_string(),
+                    &Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&db_path).unwrap();
+        let mut attachments = db
+            .conn
+            .prepare("SELECT id FROM attachments LIMIT 1")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        let attachment_id = attachments.pop().unwrap();
+        let bytes = db.get_attachment_bytes(&attachment_id).unwrap().unwrap();
+        assert_eq!(bytes, vec![9, 8, 7, 6]);
     }
 
     #[test]

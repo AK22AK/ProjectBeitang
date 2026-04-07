@@ -27,6 +27,9 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 dirs = "5.0"
+base64 = "0.22"
+image = "0.25"
+rfd = "0.15"
 
 # 全局快捷键
 global-hotkey = "0.4"
