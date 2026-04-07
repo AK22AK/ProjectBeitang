@@ -1,4 +1,4 @@
-use crate::models::Attachment;
+use crate::models::{Attachment, AttachmentStatus};
 use chrono::Utc;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -17,19 +17,108 @@ pub struct PreparedImageAttachment {
     pub file_data: Vec<u8>,
 }
 
+pub struct SourceImageMetadata {
+    pub file_name: String,
+    pub file_size: usize,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub struct AttachmentImportJob {
+    pub attachment: Attachment,
+    pub path: PathBuf,
+}
+
 pub fn prepare_image_attachments(
     record_id: Uuid,
     paths: Vec<PathBuf>,
 ) -> Result<Vec<PreparedImageAttachment>, String> {
     paths
         .into_iter()
-        .map(|path| prepare_single_image_attachment(record_id, path))
+        .map(|path| prepare_single_image_attachment(record_id.to_string(), path, None))
         .collect()
 }
 
-fn prepare_single_image_attachment(
+pub fn build_attachment_import_jobs(
     record_id: Uuid,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<AttachmentImportJob>, String> {
+    paths
+        .into_iter()
+        .map(|path| build_single_attachment_import_job(record_id.to_string(), path))
+        .collect()
+}
+
+pub fn prepare_attachment_for_existing_id(
+    record_id: &str,
+    attachment_id: &str,
     path: PathBuf,
+) -> Result<PreparedImageAttachment, String> {
+    prepare_single_image_attachment(record_id.to_string(), path, Some(attachment_id.to_string()))
+}
+
+pub fn read_source_image_metadata(path: &std::path::Path) -> Result<SourceImageMetadata, String> {
+    let source_bytes =
+        fs::read(path).map_err(|err| format!("读取图片失败 {}: {}", path.display(), err))?;
+    let mut reader = ImageReader::new(Cursor::new(&source_bytes));
+    reader = reader
+        .with_guessed_format()
+        .map_err(|err| format!("识别图片格式失败 {}: {}", path.display(), err))?;
+
+    let Some(format) = reader.format() else {
+        return Err(format!("无法识别图片格式: {}", path.display()));
+    };
+
+    ensure_supported_format(format, &path.to_path_buf())?;
+
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|err| format!("读取图片尺寸失败 {}: {}", path.display(), err))?;
+
+    Ok(SourceImageMetadata {
+        file_name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| "image".to_string()),
+        file_size: source_bytes.len(),
+        mime_type: format_to_mime_type(format).to_string(),
+        width,
+        height,
+    })
+}
+
+fn build_single_attachment_import_job(
+    record_id: String,
+    path: PathBuf,
+) -> Result<AttachmentImportJob, String> {
+    let metadata = read_source_image_metadata(&path)?;
+    let attachment_id = Uuid::new_v4().to_string();
+
+    Ok(AttachmentImportJob {
+        attachment: Attachment {
+            id: attachment_id.clone(),
+            record_id,
+            file_name: metadata.file_name,
+            file_path: format!("db://attachment/{}", attachment_id),
+            file_size: metadata.file_size,
+            mime_type: metadata.mime_type,
+            width: metadata.width,
+            height: metadata.height,
+            created_at: Utc::now(),
+            status: AttachmentStatus::Processing,
+            error_message: None,
+            source_path: Some(path.to_string_lossy().to_string()),
+        },
+        path,
+    })
+}
+
+fn prepare_single_image_attachment(
+    record_id: String,
+    path: PathBuf,
+    attachment_id: Option<String>,
 ) -> Result<PreparedImageAttachment, String> {
     let source_bytes =
         fs::read(&path).map_err(|err| format!("读取图片失败 {}: {}", path.display(), err))?;
@@ -52,7 +141,7 @@ fn prepare_single_image_attachment(
     let (file_data, mime_type) = encode_image(&resized, has_alpha)
         .map_err(|err| format!("压缩图片失败 {}: {}", path.display(), err))?;
     let (width, height) = resized.dimensions();
-    let attachment_id = Uuid::new_v4().to_string();
+    let attachment_id = attachment_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -62,7 +151,7 @@ fn prepare_single_image_attachment(
     Ok(PreparedImageAttachment {
         attachment: Attachment {
             id: attachment_id.clone(),
-            record_id: record_id.to_string(),
+            record_id,
             file_name,
             file_path: format!("db://attachment/{}", attachment_id),
             file_size: file_data.len(),
@@ -70,6 +159,9 @@ fn prepare_single_image_attachment(
             width,
             height,
             created_at: Utc::now(),
+            status: AttachmentStatus::Ready,
+            error_message: None,
+            source_path: None,
         },
         file_data,
     })
@@ -79,6 +171,16 @@ fn ensure_supported_format(format: ImageFormat, path: &PathBuf) -> Result<(), St
     match format {
         ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP => Ok(()),
         _ => Err(format!("暂不支持的图片格式: {}", path.display())),
+    }
+}
+
+fn format_to_mime_type(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::WebP => "image/webp",
+        _ => "application/octet-stream",
     }
 }
 

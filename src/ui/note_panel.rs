@@ -1,5 +1,8 @@
 use crate::models::Record;
 use crate::store::Store;
+use crate::ui::attachment_draft::{
+    attachment_preview_size, format_attachment_meta, prepare_pending_attachments, PendingAttachment,
+};
 use crate::ui::parsing;
 use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
 use crate::ui::tokenized_text::{
@@ -10,6 +13,8 @@ use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{h_flex, v_flex};
+use rfd::AsyncFileDialog;
 use uuid::Uuid;
 
 const NOTE_TITLE_LIMIT: usize = 24;
@@ -27,6 +32,9 @@ pub struct NotePanel {
     notes: Vec<Record>,
     focus_handle: FocusHandle,
     input_state: Entity<InputState>,
+    pending_attachments: Vec<PendingAttachment>,
+    attachments_loading: bool,
+    attachment_error: Option<String>,
     _window_activation_subscription: Subscription,
     pending_deletion: Option<PendingDeletion>,
     record_detail_sidebar: Entity<RecordDetailSidebar>,
@@ -47,6 +55,9 @@ impl NotePanel {
             notes: Vec::new(),
             focus_handle,
             input_state,
+            pending_attachments: Vec::new(),
+            attachments_loading: false,
+            attachment_error: None,
             _window_activation_subscription: cx.observe_window_activation(
                 window,
                 |this, window, cx| {
@@ -172,16 +183,28 @@ impl NotePanel {
         .detach();
     }
 
-    fn create_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_note(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_state.read(cx).text().to_string();
 
         eprintln!("[NotePanel] create_note called with text: '{}'", text);
 
-        if text.trim().is_empty() {
-            eprintln!("[NotePanel] Text is empty, returning");
+        if self.attachments_loading {
+            self.attachment_error = Some("图片仍在处理中，请稍候".to_string());
+            cx.notify();
             return;
         }
 
+        if text.trim().is_empty() {
+            if self.pending_attachments.is_empty() {
+                eprintln!("[NotePanel] Text is empty, returning");
+            } else {
+                self.attachment_error = Some("请先输入记录内容，再创建附图记录".to_string());
+                cx.notify();
+            }
+            return;
+        }
+
+        self.attachment_error = None;
         let parsed = parsing::parse_record_draft(&text);
         eprintln!(
             "[NotePanel] Parsed title: {:?}, content: '{}', tags: {:?}, people: {:?}",
@@ -196,19 +219,30 @@ impl NotePanel {
             note.id, note.tags, note.persons
         );
 
-        // Clear input
-        self.input_state.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-        });
-
         let store = self.store.clone();
+        let active_window = cx.active_window();
+        let pending_paths: Vec<_> = self
+            .pending_attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect();
         cx.spawn(async move |view, cx| {
             eprintln!("[NotePanel] Spawning create_record...");
+            let note_id = note.id;
             match store.create_record(note).await {
                 Ok(_) => {
                     eprintln!("[NotePanel] create_record succeeded, scheduling load_notes");
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                     let update_result = view.update(cx, |panel, cx| {
+                        if let Some(window_handle) = active_window {
+                            let input_state = panel.input_state.clone();
+                            let _ = window_handle.update(cx, move |_, window, cx| {
+                                input_state.update(cx, |state, cx| {
+                                    state.set_value("", window, cx);
+                                });
+                            });
+                        }
+                        panel.pending_attachments.clear();
+                        panel.attachment_error = None;
                         eprintln!("[NotePanel] About to call load_notes from create_note callback");
                         panel.load_notes(cx);
                         eprintln!("[NotePanel] load_notes called from callback");
@@ -218,11 +252,163 @@ impl NotePanel {
                     } else {
                         eprintln!("[NotePanel] View view succeeded");
                     }
+
+                    if !pending_paths.is_empty() {
+                        if let Err(import_err) = store
+                            .enqueue_record_attachment_import(note_id, pending_paths)
+                            .await
+                        {
+                            let _ = view.update(cx, |panel, cx| {
+                                panel.attachment_error =
+                                    Some(format!("图片后台处理启动失败：{}", import_err));
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
-                Err(e) => eprintln!("[NotePanel] Failed to create note: {}", e),
+                Err(e) => {
+                    eprintln!("[NotePanel] Failed to create note: {}", e);
+                    let _ = view.update(cx, |panel, cx| {
+                        panel.attachment_error = Some(format!("创建记录失败：{}", e));
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
+    }
+
+    fn import_pending_attachments(&mut self, cx: &mut Context<Self>) {
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let Some(handles) = AsyncFileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
+                .pick_files()
+                .await
+            else {
+                let _ = view.update(cx, |panel, cx| {
+                    panel.attachments_loading = false;
+                    cx.notify();
+                });
+                return;
+            };
+
+            let paths = handles
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect();
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = prepare_pending_attachments(paths);
+                let _ = tx.send_blocking(result);
+            });
+            let result = rx
+                .recv()
+                .await
+                .map_err(|err| format!("图片处理任务失败: {}", err))
+                .and_then(|result| result);
+
+            let _ = view.update(cx, |panel, cx| {
+                panel.attachments_loading = false;
+                match result {
+                    Ok(mut attachments) => {
+                        panel.pending_attachments.append(&mut attachments);
+                        panel.attachment_error = None;
+                    }
+                    Err(err) => {
+                        panel.attachment_error = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.pending_attachments.len() {
+            self.pending_attachments.remove(idx);
+            if self.pending_attachments.is_empty()
+                && self
+                    .attachment_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("请先输入记录内容"))
+            {
+                self.attachment_error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_pending_attachment_card(
+        &self,
+        idx: usize,
+        attachment: &PendingAttachment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let meta = format_attachment_meta(attachment);
+        let (preview_width, preview_height) = attachment_preview_size(attachment);
+
+        v_flex()
+            .id(("note-pending-attachment", idx))
+            .gap(px(8.0))
+            .p(px(8.0))
+            .border_1()
+            .border_color(rgb(0xf0f0f0))
+            .rounded(px(10.0))
+            .bg(rgb(0xfcfcfc))
+            .child(
+                attachment
+                    .preview_image
+                    .clone()
+                    .map(|image| {
+                        div()
+                            .w_full()
+                            .min_h(px(132.0))
+                            .py(px(6.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(img(image).w(preview_width).h(preview_height))
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|| {
+                        div()
+                            .w_full()
+                            .min_h(px(132.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x999999))
+                            .child("图片不可预览")
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().text_xs().text_color(rgb(0x999999)).child(meta))
+                    .child(
+                        Button::new(format!("note-pending-attachment-delete-{}", idx))
+                            .child("移除")
+                            .text_color(rgb(0xff4d4f))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.remove_pending_attachment(idx, cx);
+                                cx.stop_propagation();
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn request_delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
@@ -465,29 +651,68 @@ impl Render for NotePanel {
                     .child(
                         div()
                             .flex()
-                            .items_end()
+                            .flex_col()
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                                        if event.keystroke.key == "enter"
-                                            && !event.keystroke.modifiers.platform
-                                        {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                            this.create_note(window, cx);
-                                        }
-                                    }))
-                                    .child(Input::new(&self.input_state))
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                                                if event.keystroke.key == "enter"
+                                                    && !event.keystroke.modifiers.platform
+                                                {
+                                                    window.prevent_default();
+                                                    cx.stop_propagation();
+                                                    this.create_note(window, cx);
+                                                }
+                                            }))
+                                            .child(Input::new(&self.input_state))
+                                    )
+                                    .child(
+                                        Button::new("note-add-image-btn")
+                                            .child("添加图片")
+                                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                                this.import_pending_attachments(cx);
+                                                cx.stop_propagation();
+                                            }))
+                                    )
+                                    .child(
+                                        Button::new("add-btn")
+                                            .child("添加")
+                                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                                                this.create_note(window, cx);
+                                            }))
+                                    )
                             )
-                            .child(
-                                Button::new("add-btn")
-                                    .child("添加")
-                                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                                        this.create_note(window, cx);
-                                    }))
-                            )
+                            .when(self.attachments_loading, |el| {
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x999999))
+                                        .child("正在处理图片…"),
+                                )
+                            })
+                            .when_some(self.attachment_error.clone(), |el, err| {
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xff4d4f))
+                                        .child(err),
+                                )
+                            })
+                            .when(!self.pending_attachments.is_empty(), |el| {
+                                el.child(
+                                    v_flex()
+                                        .gap(px(8.0))
+                                        .children(self.pending_attachments.iter().enumerate().map(|(idx, attachment)| {
+                                            self.render_pending_attachment_card(idx, attachment, cx)
+                                        })),
+                                )
+                            })
                     )
                     .child(
                         div()

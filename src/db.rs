@@ -1,10 +1,12 @@
-use crate::models::{Attachment, Person, Priority, Record, RecordType, Tag, TaskStatus};
+use crate::models::{
+    Attachment, AttachmentStatus, Person, Priority, Record, RecordType, Tag, TaskStatus,
+};
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, Result};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const SEARCH_RANK_FALLBACK: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,7 @@ pub struct Database {
 impl Database {
     pub fn new(path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Self { conn };
         db.init_tables()?;
         db.run_migrations()?;
@@ -129,6 +132,9 @@ impl Database {
                 width INTEGER,
                 height INTEGER,
                 file_data BLOB,
+                status TEXT NOT NULL DEFAULT 'ready',
+                error_message TEXT,
+                source_path TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE CASCADE
             )",
@@ -279,6 +285,10 @@ impl Database {
             self.migrate_v4_to_v5()?;
         }
 
+        if version < 6 {
+            self.migrate_v5_to_v6()?;
+        }
+
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO schema_version (version, updated_at) VALUES (?1, ?2)
@@ -372,6 +382,20 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE attachments ADD COLUMN file_data BLOB", []);
+        Ok(())
+    }
+
+    fn migrate_v5_to_v6(&self) -> Result<()> {
+        let _ = self.conn.execute(
+            "ALTER TABLE attachments ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'",
+            [],
+        );
+        let _ = self
+            .conn
+            .execute("ALTER TABLE attachments ADD COLUMN error_message TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE attachments ADD COLUMN source_path TEXT", []);
         Ok(())
     }
 
@@ -650,8 +674,13 @@ impl Database {
 
     pub fn delete_record(&self, id: Uuid) -> Result<()> {
         eprintln!("[DB] delete_record called for id: {}", id);
-        self.conn
-            .execute("DELETE FROM records WHERE id = ?1", [&id.to_string()])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM attachments WHERE record_id = ?1",
+            [&id.to_string()],
+        )?;
+        tx.execute("DELETE FROM records WHERE id = ?1", [&id.to_string()])?;
+        tx.commit()?;
         eprintln!("[DB] delete_record succeeded");
         Ok(())
     }
@@ -990,8 +1019,8 @@ impl Database {
         file_data: Option<&[u8]>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO attachments (id, record_id, file_name, file_path, file_size, mime_type, width, height, file_data, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO attachments (id, record_id, file_name, file_path, file_size, mime_type, width, height, file_data, status, error_message, source_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 file_name = excluded.file_name,
                 file_path = excluded.file_path,
@@ -999,7 +1028,10 @@ impl Database {
                 mime_type = excluded.mime_type,
                 width = excluded.width,
                 height = excluded.height,
-                file_data = COALESCE(excluded.file_data, attachments.file_data)",
+                file_data = COALESCE(excluded.file_data, attachments.file_data),
+                status = excluded.status,
+                error_message = excluded.error_message,
+                source_path = excluded.source_path",
             [
                 &attachment.id as &dyn rusqlite::ToSql,
                 &attachment.record_id as &dyn rusqlite::ToSql,
@@ -1010,15 +1042,37 @@ impl Database {
                 &(attachment.width as i64) as &dyn rusqlite::ToSql,
                 &(attachment.height as i64) as &dyn rusqlite::ToSql,
                 &file_data as &dyn rusqlite::ToSql,
+                &attachment.status.as_str() as &dyn rusqlite::ToSql,
+                &attachment.error_message as &dyn rusqlite::ToSql,
+                &attachment.source_path as &dyn rusqlite::ToSql,
                 &attachment.created_at.to_rfc3339() as &dyn rusqlite::ToSql,
             ],
         )?;
         Ok(())
     }
 
+    pub fn create_attachment_placeholder(&self, attachment: &Attachment) -> Result<()> {
+        self.create_attachment_with_data(attachment, None)
+    }
+
+    pub fn mark_attachment_ready(&self, attachment: &Attachment, file_data: &[u8]) -> Result<()> {
+        self.create_attachment_with_data(attachment, Some(file_data))
+    }
+
+    pub fn mark_attachment_failed(&self, id: &str, error_message: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE attachments
+             SET status = 'failed',
+                 error_message = ?2
+             WHERE id = ?1",
+            [id, error_message],
+        )?;
+        Ok(())
+    }
+
     pub fn get_attachments(&self, record_id: Uuid) -> Result<Vec<Attachment>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, record_id, file_name, file_path, file_size, mime_type, width, height, created_at
+            "SELECT id, record_id, file_name, file_path, file_size, mime_type, width, height, status, error_message, source_path, created_at
              FROM attachments
              WHERE record_id = ?1
              ORDER BY created_at DESC"
@@ -1033,7 +1087,10 @@ impl Database {
             let mime_type: String = row.get(5)?;
             let width: Option<i64> = row.get(6)?;
             let height: Option<i64> = row.get(7)?;
-            let created_at_str: String = row.get(8)?;
+            let status: String = row.get(8)?;
+            let error_message: Option<String> = row.get(9)?;
+            let source_path: Option<String> = row.get(10)?;
+            let created_at_str: String = row.get(11)?;
 
             Ok(Attachment {
                 id,
@@ -1047,6 +1104,9 @@ impl Database {
                 created_at: DateTime::parse_from_rfc3339(&created_at_str)
                     .unwrap_or_else(|_| chrono::Local::now().into())
                     .with_timezone(&Utc),
+                status: AttachmentStatus::from_db(&status),
+                error_message,
+                source_path,
             })
         })?;
 
@@ -1055,7 +1115,7 @@ impl Database {
 
     pub fn get_attachment_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let mut stmt = self.conn.prepare(
-            "SELECT file_path, file_data
+            "SELECT file_path, file_data, status
              FROM attachments
              WHERE id = ?1",
         )?;
@@ -1067,6 +1127,13 @@ impl Database {
 
         let file_path: String = row.get(0)?;
         let file_data: Option<Vec<u8>> = row.get(1)?;
+        let status: Option<String> = row.get(2)?;
+        if status
+            .as_deref()
+            .is_some_and(|value| AttachmentStatus::from_db(value) != AttachmentStatus::Ready)
+        {
+            return Ok(None);
+        }
         if let Some(file_data) = file_data {
             return Ok(Some(file_data));
         }
@@ -1291,6 +1358,9 @@ mod tests {
             width: 100,
             height: 100,
             created_at: Utc::now(),
+            status: AttachmentStatus::Ready,
+            error_message: None,
+            source_path: None,
         };
 
         db.create_attachment(&attachment).unwrap();
@@ -1320,6 +1390,9 @@ mod tests {
             width: 2,
             height: 2,
             created_at: Utc::now(),
+            status: AttachmentStatus::Ready,
+            error_message: None,
+            source_path: None,
         };
 
         db.create_attachment_with_data(&attachment, Some(&[1, 2, 3, 4]))
@@ -1456,6 +1529,69 @@ mod tests {
         let attachment_id = attachments.pop().unwrap();
         let bytes = db.get_attachment_bytes(&attachment_id).unwrap().unwrap();
         assert_eq!(bytes, vec![9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn test_processing_attachment_does_not_return_preview_bytes() {
+        let (db, _temp) = setup_test_db();
+        let record = Record::new_note("Test note".to_string());
+        db.create_record(&record).unwrap();
+
+        let attachment = Attachment {
+            id: Uuid::new_v4().to_string(),
+            record_id: record.id.to_string(),
+            file_name: "processing.png".to_string(),
+            file_path: "db://attachment/processing".to_string(),
+            file_size: 3,
+            mime_type: "image/png".to_string(),
+            width: 20,
+            height: 20,
+            created_at: Utc::now(),
+            status: AttachmentStatus::Processing,
+            error_message: None,
+            source_path: Some("/tmp/source.png".to_string()),
+        };
+
+        db.create_attachment_placeholder(&attachment).unwrap();
+        let bytes = db.get_attachment_bytes(&attachment.id).unwrap();
+        assert!(bytes.is_none());
+    }
+
+    #[test]
+    fn test_delete_record_removes_attachments() {
+        let (db, _temp) = setup_test_db();
+        let record = Record::new_note("Note with image".to_string());
+        db.create_record(&record).unwrap();
+
+        let attachment = Attachment {
+            id: Uuid::new_v4().to_string(),
+            record_id: record.id.to_string(),
+            file_name: "cleanup.png".to_string(),
+            file_path: "db://attachment/cleanup".to_string(),
+            file_size: 4,
+            mime_type: "image/png".to_string(),
+            width: 10,
+            height: 10,
+            created_at: Utc::now(),
+            status: AttachmentStatus::Ready,
+            error_message: None,
+            source_path: None,
+        };
+
+        db.create_attachment_with_data(&attachment, Some(&[1, 2, 3, 4]))
+            .unwrap();
+
+        db.delete_record(record.id).unwrap();
+
+        let remaining = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM attachments WHERE record_id = ?1",
+                [record.id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]

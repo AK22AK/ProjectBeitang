@@ -12,12 +12,13 @@ use rfd::AsyncFileDialog;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::models::{Attachment, Priority, Record, TaskStatus};
+use crate::models::{Attachment, AttachmentStatus, Priority, Record, TaskStatus};
 use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::tokenized_text::{
     render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
 };
+use std::time::Duration;
 
 #[derive(Clone)]
 struct AttachmentPreview {
@@ -685,8 +686,14 @@ impl TaskDetailSidebar {
                 this.attachments_loading = false;
                 match result {
                     Ok(previews) => {
+                        let should_poll = previews.iter().any(|preview| {
+                            preview.attachment.status == AttachmentStatus::Processing
+                        });
                         this.attachments = previews;
                         this.attachment_error = None;
+                        if should_poll {
+                            this.schedule_attachment_reload(cx);
+                        }
                     }
                     Err(err) => {
                         this.attachments.clear();
@@ -694,6 +701,31 @@ impl TaskDetailSidebar {
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_attachment_reload(&mut self, cx: &mut Context<Self>) {
+        let Some(current_task_id) = self.current_task_id.clone() else {
+            return;
+        };
+
+        cx.spawn(async move |view, cx| {
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(800));
+                let _ = tx.send_blocking(());
+            });
+
+            if rx.recv().await.is_err() {
+                return;
+            }
+
+            let _ = view.update(cx, |this, cx| {
+                if this.current_task_id.as_deref() == Some(current_task_id.as_str()) {
+                    this.reload_attachments(cx);
+                }
             });
         })
         .detach();
@@ -766,6 +798,76 @@ impl TaskDetailSidebar {
         let lightbox_preview = preview.clone();
         let meta = format_attachment_meta(&preview.attachment);
         let (preview_width, preview_height) = attachment_preview_size(&preview.attachment);
+        let preview_content = match preview.attachment.status {
+            AttachmentStatus::Ready => preview
+                .preview_image
+                .clone()
+                .map(|image| {
+                    div()
+                        .w_full()
+                        .min_h(px(156.0))
+                        .py(px(8.0))
+                        .rounded(px(8.0))
+                        .bg(rgb(0xf5f5f5))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                this.open_attachment_preview(lightbox_preview.clone(), cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(img(image).w(preview_width).h(preview_height))
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| {
+                    div()
+                        .w_full()
+                        .min_h(px(156.0))
+                        .rounded(px(8.0))
+                        .bg(rgb(0xf5f5f5))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(0x999999))
+                        .child("图片不可预览")
+                        .into_any_element()
+                }),
+            AttachmentStatus::Processing => div()
+                .w_full()
+                .min_h(px(156.0))
+                .rounded(px(8.0))
+                .bg(rgb(0xf5f5f5))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(0x999999))
+                .child("图片处理中…")
+                .into_any_element(),
+            AttachmentStatus::Failed => div()
+                .w_full()
+                .min_h(px(156.0))
+                .rounded(px(8.0))
+                .bg(rgb(0xfff2f0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(0xff4d4f))
+                .child(
+                    preview
+                        .attachment
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "图片不可用".to_string()),
+                )
+                .into_any_element(),
+        };
 
         v_flex()
             .id(("task-attachment", idx))
@@ -775,46 +877,7 @@ impl TaskDetailSidebar {
             .border_color(rgb(0xf0f0f0))
             .rounded(px(10.0))
             .bg(rgb(0xfcfcfc))
-            .child(
-                preview
-                    .preview_image
-                    .clone()
-                    .map(|image| {
-                        div()
-                            .w_full()
-                            .min_h(px(156.0))
-                            .py(px(8.0))
-                            .rounded(px(8.0))
-                            .bg(rgb(0xf5f5f5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                                    this.open_attachment_preview(lightbox_preview.clone(), cx);
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .child(img(image).w(preview_width).h(preview_height))
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| {
-                        div()
-                            .w_full()
-                            .min_h(px(156.0))
-                            .rounded(px(8.0))
-                            .bg(rgb(0xf5f5f5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_sm()
-                            .text_color(rgb(0x999999))
-                            .child("图片不可预览")
-                            .into_any_element()
-                    }),
-            )
+            .child(preview_content)
             .child(
                 h_flex()
                     .justify_between()

@@ -74,6 +74,34 @@ pub struct Attachment {
     pub width: u32,
     pub height: u32,
     pub created_at: DateTime<Utc>,
+    pub status: AttachmentStatus,
+    pub error_message: Option<String>,
+    pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AttachmentStatus {
+    Processing,
+    Ready,
+    Failed,
+}
+
+impl AttachmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Processing => "processing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "processing" => Self::Processing,
+            "failed" => Self::Failed,
+            _ => Self::Ready,
+        }
+    }
 }
 
 impl Record {

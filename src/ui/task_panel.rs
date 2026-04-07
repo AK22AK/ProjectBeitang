@@ -1,5 +1,8 @@
 use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
+use crate::ui::attachment_draft::{
+    attachment_preview_size, format_attachment_meta, prepare_pending_attachments, PendingAttachment,
+};
 use crate::ui::parsing;
 use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
 use crate::ui::task_detail_sidebar::TaskDetailSidebar;
@@ -15,6 +18,7 @@ use gpui_component::date_picker::{DatePicker, DatePickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, IconName};
+use rfd::AsyncFileDialog;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -149,6 +153,9 @@ pub struct TaskPanel {
     tasks: Vec<Record>,
     focus_handle: FocusHandle,
     input_state: Entity<InputState>,
+    pending_attachments: Vec<PendingAttachment>,
+    attachments_loading: bool,
+    attachment_error: Option<String>,
     editing_task_id: Option<uuid::Uuid>,
     task_input_states: HashMap<uuid::Uuid, Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
@@ -201,6 +208,9 @@ impl TaskPanel {
             tasks: Vec::new(),
             focus_handle,
             input_state,
+            pending_attachments: Vec::new(),
+            attachments_loading: false,
+            attachment_error: None,
             editing_task_id: None,
             task_input_states: HashMap::new(),
             _edit_subscription: None,
@@ -854,14 +864,25 @@ impl TaskPanel {
         cx.notify();
     }
 
-    fn create_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_task(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_state.read(cx).text().to_string();
         eprintln!("[TaskPanel] create_task called with text: '{}'", text);
+        if self.attachments_loading {
+            self.attachment_error = Some("图片仍在处理中，请稍候".to_string());
+            cx.notify();
+            return;
+        }
         if text.trim().is_empty() {
-            eprintln!("[TaskPanel] Text is empty, returning");
+            if self.pending_attachments.is_empty() {
+                eprintln!("[TaskPanel] Text is empty, returning");
+            } else {
+                self.attachment_error = Some("请先输入任务内容，再创建附图任务".to_string());
+                cx.notify();
+            }
             return;
         }
 
+        self.attachment_error = None;
         let parsed = parsing::parse_task_draft(&text);
         eprintln!(
             "[TaskPanel] Parsed title: '{}', priority: {:?}, tags: {:?}, people: {:?}",
@@ -876,18 +897,30 @@ impl TaskPanel {
             task.id, task.tags, task.persons
         );
 
-        self.input_state.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-        });
-
         let store = self.store.clone();
+        let active_window = cx.active_window();
+        let pending_paths: Vec<_> = self
+            .pending_attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect();
         cx.spawn(async move |view, cx| {
             eprintln!("[TaskPanel] Spawning create_record...");
+            let task_id = task.id;
             match store.create_record(task).await {
                 Ok(_) => {
                     eprintln!("[TaskPanel] create_record succeeded, scheduling load_tasks");
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                     let update_result = view.update(cx, |panel, cx| {
+                        if let Some(window_handle) = active_window {
+                            let input_state = panel.input_state.clone();
+                            let _ = window_handle.update(cx, move |_, window, cx| {
+                                input_state.update(cx, |state, cx| {
+                                    state.set_value("", window, cx);
+                                });
+                            });
+                        }
+                        panel.pending_attachments.clear();
+                        panel.attachment_error = None;
                         eprintln!("[TaskPanel] About to call load_tasks from create_task callback");
                         panel.load_tasks(cx);
                         panel.load_available_tags(cx);
@@ -898,11 +931,163 @@ impl TaskPanel {
                     } else {
                         eprintln!("[TaskPanel] View update succeeded");
                     }
+
+                    if !pending_paths.is_empty() {
+                        if let Err(import_err) = store
+                            .enqueue_record_attachment_import(task_id, pending_paths)
+                            .await
+                        {
+                            let _ = view.update(cx, |panel, cx| {
+                                panel.attachment_error =
+                                    Some(format!("图片后台处理启动失败：{}", import_err));
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
-                Err(e) => eprintln!("[TaskPanel] Failed to create task: {}", e),
+                Err(e) => {
+                    eprintln!("[TaskPanel] Failed to create task: {}", e);
+                    let _ = view.update(cx, |panel, cx| {
+                        panel.attachment_error = Some(format!("创建任务失败：{}", e));
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
+    }
+
+    fn import_pending_attachments(&mut self, cx: &mut Context<Self>) {
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let Some(handles) = AsyncFileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
+                .pick_files()
+                .await
+            else {
+                let _ = view.update(cx, |panel, cx| {
+                    panel.attachments_loading = false;
+                    cx.notify();
+                });
+                return;
+            };
+
+            let paths = handles
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect();
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = prepare_pending_attachments(paths);
+                let _ = tx.send_blocking(result);
+            });
+            let result = rx
+                .recv()
+                .await
+                .map_err(|err| format!("图片处理任务失败: {}", err))
+                .and_then(|result| result);
+
+            let _ = view.update(cx, |panel, cx| {
+                panel.attachments_loading = false;
+                match result {
+                    Ok(mut attachments) => {
+                        panel.pending_attachments.append(&mut attachments);
+                        panel.attachment_error = None;
+                    }
+                    Err(err) => {
+                        panel.attachment_error = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.pending_attachments.len() {
+            self.pending_attachments.remove(idx);
+            if self.pending_attachments.is_empty()
+                && self
+                    .attachment_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("请先输入任务内容"))
+            {
+                self.attachment_error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_pending_attachment_card(
+        &self,
+        idx: usize,
+        attachment: &PendingAttachment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let meta = format_attachment_meta(attachment);
+        let (preview_width, preview_height) = attachment_preview_size(attachment);
+
+        v_flex()
+            .id(("task-pending-attachment", idx))
+            .gap(px(8.0))
+            .p(px(8.0))
+            .border_1()
+            .border_color(rgb(0xf0f0f0))
+            .rounded(px(10.0))
+            .bg(rgb(0xfcfcfc))
+            .child(
+                attachment
+                    .preview_image
+                    .clone()
+                    .map(|image| {
+                        div()
+                            .w_full()
+                            .min_h(px(132.0))
+                            .py(px(6.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(img(image).w(preview_width).h(preview_height))
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|| {
+                        div()
+                            .w_full()
+                            .min_h(px(132.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x999999))
+                            .child("图片不可预览")
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().text_xs().text_color(rgb(0x999999)).child(meta))
+                    .child(
+                        Button::new(format!("task-pending-attachment-delete-{}", idx))
+                            .child("移除")
+                            .text_color(rgb(0xff4d4f))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.remove_pending_attachment(idx, cx);
+                                cx.stop_propagation();
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn toggle_task_complete(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
@@ -2103,31 +2288,68 @@ impl Render for TaskPanel {
                         div()
                             .w_full()
                             .flex()
-                            .items_end()
+                            .flex_col()
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .on_key_down(cx.listener(
-                                        |this, event: &KeyDownEvent, window, cx| {
-                                            if event.keystroke.key == "enter"
-                                                && !event.keystroke.modifiers.platform
-                                            {
-                                                window.prevent_default();
-                                                cx.stop_propagation();
-                                                this.create_task(window, cx);
-                                            }
-                                        },
-                                    ))
-                                    .child(Input::new(&self.input_state).flex_1()),
+                                    .w_full()
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .on_key_down(cx.listener(
+                                                |this, event: &KeyDownEvent, window, cx| {
+                                                    if event.keystroke.key == "enter"
+                                                        && !event.keystroke.modifiers.platform
+                                                    {
+                                                        window.prevent_default();
+                                                        cx.stop_propagation();
+                                                        this.create_task(window, cx);
+                                                    }
+                                                },
+                                            ))
+                                            .child(Input::new(&self.input_state).flex_1()),
+                                    )
+                                    .child(
+                                        Button::new("task-add-image-btn")
+                                            .child("添加图片")
+                                            .on_click(cx.listener(
+                                                |this, _event: &ClickEvent, _window, cx| {
+                                                    this.import_pending_attachments(cx);
+                                                    cx.stop_propagation();
+                                                },
+                                            )),
+                                    )
+                                    .child(Button::new("add-btn").child("添加").on_click(
+                                        cx.listener(|this, _event: &ClickEvent, window, cx| {
+                                            this.create_task(window, cx);
+                                        }),
+                                    )),
                             )
-                            .child(Button::new("add-btn").child("添加").on_click(cx.listener(
-                                |this, _event: &ClickEvent, window, cx| {
-                                    this.create_task(window, cx);
-                                },
-                            ))),
+                            .when(self.attachments_loading, |el| {
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x999999))
+                                        .child("正在处理图片…"),
+                                )
+                            })
+                            .when_some(self.attachment_error.clone(), |el, err| {
+                                el.child(div().text_sm().text_color(rgb(0xff4d4f)).child(err))
+                            })
+                            .when(!self.pending_attachments.is_empty(), |el| {
+                                el.child(v_flex().gap(px(8.0)).children(
+                                    self.pending_attachments.iter().enumerate().map(
+                                        |(idx, attachment)| {
+                                            self.render_pending_attachment_card(idx, attachment, cx)
+                                        },
+                                    ),
+                                ))
+                            }),
                     )
                     .child(self.render_toolbar(cx))
                     .child(self.render_tag_filter(cx))

@@ -1,3 +1,4 @@
+pub mod attachment_draft;
 pub mod dashboard;
 pub mod floating_window;
 pub mod note_panel;

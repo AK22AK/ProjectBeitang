@@ -1,4 +1,7 @@
-use crate::attachment_image::{prepare_image_attachments, PreparedImageAttachment};
+use crate::attachment_image::{
+    build_attachment_import_jobs, prepare_attachment_for_existing_id, prepare_image_attachments,
+    PreparedImageAttachment,
+};
 use crate::db::Database;
 use crate::models::{Attachment, Person, Record, Tag};
 use async_channel::{unbounded, Receiver, Sender};
@@ -112,6 +115,17 @@ pub enum StoreCommand {
     ImportImageAttachments {
         prepared: Vec<PreparedImageAttachment>,
         respond_to: Sender<Result<Vec<Attachment>, String>>,
+    },
+    CreateAttachmentPlaceholders {
+        attachments: Vec<Attachment>,
+        respond_to: Sender<Result<(), String>>,
+    },
+    MarkAttachmentReady {
+        prepared: PreparedImageAttachment,
+    },
+    MarkAttachmentFailed {
+        attachment_id: String,
+        error_message: String,
     },
     GetAttachmentBytes {
         attachment_id: String,
@@ -297,6 +311,31 @@ impl StoreRuntime {
                 } => {
                     let result = self.handle_import_image_attachments(prepared).await;
                     let _ = respond_to.send(result).await;
+                }
+                StoreCommand::CreateAttachmentPlaceholders {
+                    attachments,
+                    respond_to,
+                } => {
+                    let result = self
+                        .handle_create_attachment_placeholders(attachments)
+                        .await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::MarkAttachmentReady { prepared } => {
+                    if let Err(err) = self.handle_mark_attachment_ready(prepared).await {
+                        eprintln!("[Store] Failed to mark attachment ready: {}", err);
+                    }
+                }
+                StoreCommand::MarkAttachmentFailed {
+                    attachment_id,
+                    error_message,
+                } => {
+                    if let Err(err) = self
+                        .handle_mark_attachment_failed(attachment_id, error_message)
+                        .await
+                    {
+                        eprintln!("[Store] Failed to mark attachment failed: {}", err);
+                    }
                 }
                 StoreCommand::GetAttachmentBytes {
                     attachment_id,
@@ -740,6 +779,47 @@ impl StoreRuntime {
         }
     }
 
+    async fn handle_create_attachment_placeholders(
+        &self,
+        attachments: Vec<Attachment>,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => {
+                for attachment in attachments {
+                    db.create_attachment_placeholder(&attachment)
+                        .map_err(|e| format!("Database error: {}", e))?;
+                }
+                Ok(())
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_mark_attachment_ready(
+        &self,
+        prepared: PreparedImageAttachment,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .mark_attachment_ready(&prepared.attachment, &prepared.file_data)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_mark_attachment_failed(
+        &self,
+        attachment_id: String,
+        error_message: String,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .mark_attachment_failed(&attachment_id, &error_message)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
     async fn handle_get_attachment_bytes(
         &self,
         attachment_id: String,
@@ -978,6 +1058,69 @@ impl Store {
             })
             .await;
         rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn enqueue_record_attachment_import(
+        &self,
+        record_id: uuid::Uuid,
+        paths: Vec<PathBuf>,
+    ) -> Result<(), String> {
+        let (jobs_tx, jobs_rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = build_attachment_import_jobs(record_id, paths);
+            let _ = jobs_tx.send_blocking(result);
+        });
+        let jobs = jobs_rx
+            .recv()
+            .await
+            .map_err(|err| format!("图片处理任务失败: {}", err))??;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let attachments = jobs.iter().map(|job| job.attachment.clone()).collect();
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::CreateAttachmentPlaceholders {
+                attachments,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))?;
+
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            for job in jobs {
+                let result = prepare_attachment_for_existing_id(
+                    &job.attachment.record_id,
+                    &job.attachment.id,
+                    job.path,
+                );
+                let send_result = match result {
+                    Ok(prepared) => {
+                        sender.send_blocking(StoreCommand::MarkAttachmentReady { prepared })
+                    }
+                    Err(error_message) => {
+                        sender.send_blocking(StoreCommand::MarkAttachmentFailed {
+                            attachment_id: job.attachment.id,
+                            error_message,
+                        })
+                    }
+                };
+
+                if let Err(err) = send_result {
+                    eprintln!(
+                        "[Store] Failed to dispatch attachment background result: {}",
+                        err
+                    );
+                    break;
+                }
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn get_attachment_bytes(
