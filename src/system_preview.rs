@@ -1,10 +1,19 @@
 use crate::models::Attachment;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+
+    unsafe extern "C" {
+        fn bt_quicklook_preview_file(
+            path: *const c_char,
+            error_buffer: *mut c_char,
+            error_buffer_len: usize,
+        ) -> bool;
+    }
 
     fn preview_cache_dir() -> Result<PathBuf, String> {
         let base = dirs::cache_dir()
@@ -49,19 +58,40 @@ mod macos {
         Ok(path)
     }
 
+    fn ffi_open_path(path: &Path) -> Result<(), String> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| format!("预览路径不是有效 UTF-8: {}", path.display()))?;
+        let c_path = CString::new(path_str)
+            .map_err(|_| format!("预览路径包含非法字符: {}", path.display()))?;
+        let mut error_buffer = vec![0 as c_char; 1024];
+        let success = unsafe {
+            bt_quicklook_preview_file(
+                c_path.as_ptr(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            return Ok(());
+        }
+
+        let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if message.is_empty() {
+            Err(format!("打开系统预览失败: {}", path.display()))
+        } else {
+            Err(message)
+        }
+    }
+
     pub fn open_path(path: &Path) -> Result<(), String> {
         let canonical_path = path
             .canonicalize()
             .map_err(|err| format!("预览文件不可访问 {}: {}", path.display(), err))?;
-        Command::new("qlmanage")
-            .arg("-p")
-            .arg(&canonical_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("启动系统预览失败 {}: {}", canonical_path.display(), err))
+        ffi_open_path(&canonical_path)
     }
 }
 

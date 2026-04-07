@@ -530,6 +530,7 @@ dependencies = [
  "async-channel 2.5.0",
  "base64",
  "block2",
+ "cc",
  "chrono",
  "chrono-english",
  "dirs 5.0.1",
