@@ -33,8 +33,19 @@ pub fn format_attachment_meta(attachment: &PendingAttachment) -> String {
 }
 
 pub fn attachment_preview_size(attachment: &PendingAttachment) -> (Pixels, Pixels) {
-    const MAX_WIDTH: f32 = 180.0;
-    const MAX_HEIGHT: f32 = 120.0;
+    const MAX_WIDTH: f32 = 16.0;
+    const MAX_HEIGHT: f32 = 16.0;
+
+    let width = attachment.width.max(1) as f32;
+    let height = attachment.height.max(1) as f32;
+    let scale = (MAX_WIDTH / width).min(MAX_HEIGHT / height).min(1.0);
+
+    (px(width * scale), px(height * scale))
+}
+
+pub fn attachment_lightbox_size(attachment: &PendingAttachment) -> (Pixels, Pixels) {
+    const MAX_WIDTH: f32 = 880.0;
+    const MAX_HEIGHT: f32 = 720.0;
 
     let width = attachment.width.max(1) as f32;
     let height = attachment.height.max(1) as f32;
@@ -132,7 +143,24 @@ mod tests {
         };
 
         let (width, height) = attachment_preview_size(&attachment);
-        assert!(width <= px(180.0));
-        assert!(height <= px(120.0));
+        assert!(width <= px(16.0));
+        assert!(height <= px(16.0));
+    }
+
+    #[test]
+    fn test_attachment_lightbox_size_stays_within_bounds() {
+        let attachment = PendingAttachment {
+            path: PathBuf::from("/tmp/huge.png"),
+            file_name: "huge.png".to_string(),
+            file_size: 1024,
+            mime_type: "image/png".to_string(),
+            width: 4096,
+            height: 2048,
+            preview_image: None,
+        };
+
+        let (width, height) = attachment_lightbox_size(&attachment);
+        assert!(width <= px(880.0));
+        assert!(height <= px(720.0));
     }
 }

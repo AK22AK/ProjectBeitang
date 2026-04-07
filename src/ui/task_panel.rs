@@ -2,7 +2,8 @@ use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
 use crate::ui::attachment_draft::{
-    attachment_preview_size, format_attachment_meta, prepare_pending_attachments, PendingAttachment,
+    attachment_lightbox_size, attachment_preview_size, format_attachment_meta,
+    prepare_pending_attachments, PendingAttachment,
 };
 use crate::ui::parsing;
 use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
@@ -40,7 +41,6 @@ const MATRIX_COLUMN_GAP: Pixels = px(8.0);
 const MIN_VISIBLE_QUADRANT_WIDTH: Pixels = px(280.0);
 const TASK_CARD_TITLE_LIMIT: usize = 24;
 const TASK_CARD_PREVIEW_LIMIT: usize = 44;
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskView {
     List,
@@ -154,6 +154,7 @@ pub struct TaskPanel {
     focus_handle: FocusHandle,
     input_state: Entity<InputState>,
     pending_attachments: Vec<PendingAttachment>,
+    active_attachment_preview: Option<PendingAttachment>,
     attachments_loading: bool,
     attachment_error: Option<String>,
     editing_task_id: Option<uuid::Uuid>,
@@ -223,6 +224,7 @@ impl TaskPanel {
             focus_handle,
             input_state,
             pending_attachments: Vec::new(),
+            active_attachment_preview: None,
             attachments_loading: false,
             attachment_error: None,
             editing_task_id: None,
@@ -935,6 +937,7 @@ impl TaskPanel {
                             });
                         }
                         panel.pending_attachments.clear();
+                        panel.active_attachment_preview = None;
                         panel.attachment_error = None;
                         eprintln!("[TaskPanel] About to call load_tasks from create_task callback");
                         panel.load_tasks(cx);
@@ -1015,7 +1018,14 @@ impl TaskPanel {
 
     fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx < self.pending_attachments.len() {
-            self.pending_attachments.remove(idx);
+            let removed = self.pending_attachments.remove(idx);
+            if self
+                .active_attachment_preview
+                .as_ref()
+                .is_some_and(|preview| preview.path == removed.path)
+            {
+                self.active_attachment_preview = None;
+            }
             if self.pending_attachments.is_empty()
                 && self
                     .attachment_error
@@ -1034,27 +1044,39 @@ impl TaskPanel {
         attachment: &PendingAttachment,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let meta = format_attachment_meta(attachment);
         let (preview_width, preview_height) = attachment_preview_size(attachment);
+        let can_preview = attachment.preview_image.is_some();
+        let preview_attachment = attachment.clone();
 
-        v_flex()
+        h_flex()
             .id(("task-pending-attachment", idx))
-            .gap(px(8.0))
-            .p(px(8.0))
+            .gap(px(4.0))
+            .items_center()
+            .px(px(4.0))
+            .py(px(4.0))
             .border_1()
             .border_color(rgb(0xf0f0f0))
-            .rounded(px(10.0))
+            .rounded(px(999.0))
             .bg(rgb(0xfcfcfc))
+            .when(can_preview, |el| el.cursor_pointer())
+            .when(can_preview, |el| {
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        this.open_pending_attachment_preview(preview_attachment.clone(), cx);
+                        cx.stop_propagation();
+                    }),
+                )
+            })
             .child(
                 attachment
                     .preview_image
                     .clone()
                     .map(|image| {
                         div()
-                            .w_full()
-                            .min_h(px(132.0))
-                            .py(px(6.0))
-                            .rounded(px(8.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(4.0))
                             .bg(rgb(0xf5f5f5))
                             .flex()
                             .items_center()
@@ -1064,36 +1086,141 @@ impl TaskPanel {
                     })
                     .unwrap_or_else(|| {
                         div()
-                            .w_full()
-                            .min_h(px(132.0))
-                            .rounded(px(8.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(4.0))
                             .bg(rgb(0xf5f5f5))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_sm()
+                            .text_xs()
                             .text_color(rgb(0x999999))
-                            .child("图片不可预览")
+                            .child("图")
                             .into_any_element()
                     }),
             )
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(div().text_xs().text_color(rgb(0x999999)).child(meta))
-                    .child(
-                        Button::new(format!("task-pending-attachment-delete-{}", idx))
-                            .child("移除")
-                            .text_color(rgb(0xff4d4f))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.remove_pending_attachment(idx, cx);
-                                cx.stop_propagation();
-                            })),
+                div()
+                    .cursor_pointer()
+                    .px(px(2.0))
+                    .text_xs()
+                    .text_color(rgb(0x999999))
+                    .hover(|style| style.text_color(rgb(0xff4d4f)))
+                    .child("×")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                            this.remove_pending_attachment(idx, cx);
+                            cx.stop_propagation();
+                        }),
                     ),
             )
             .into_any_element()
+    }
+
+    fn open_pending_attachment_preview(
+        &mut self,
+        preview: PendingAttachment,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_attachment_preview = Some(preview);
+        cx.notify();
+    }
+
+    fn close_pending_attachment_preview(&mut self, cx: &mut Context<Self>) {
+        self.active_attachment_preview = None;
+        cx.notify();
+    }
+
+    fn render_pending_attachment_lightbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let preview = self.active_attachment_preview.as_ref()?;
+        let image = preview.preview_image.clone()?;
+        let meta = format_attachment_meta(preview);
+        let (lightbox_width, lightbox_height) = attachment_lightbox_size(preview);
+
+        Some(
+            div()
+                .id("task-pending-attachment-lightbox")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000061))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.close_pending_attachment_preview(cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(
+                    v_flex()
+                        .w(px(960.0))
+                        .max_w(relative(0.9))
+                        .gap(px(12.0))
+                        .p(px(16.0))
+                        .rounded(px(14.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .shadow_lg()
+                        .cursor_default()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .gap(px(12.0))
+                                .child(
+                                    v_flex()
+                                        .gap(px(4.0))
+                                        .min_w(px(0.0))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0x262626))
+                                                .child(preview.file_name.clone()),
+                                        )
+                                        .child(
+                                            div().text_sm().text_color(rgb(0x666666)).child(meta),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("task-pending-attachment-lightbox-close")
+                                        .child("关闭")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.close_pending_attachment_preview(cx);
+                                            cx.stop_propagation();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .min_h(px(240.0))
+                                .max_h(px(760.0))
+                                .py(px(8.0))
+                                .rounded(px(10.0))
+                                .bg(rgb(0xf5f5f5))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .overflow_hidden()
+                                .child(img(image).w(lightbox_width).h(lightbox_height)),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn toggle_task_complete(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
@@ -2337,7 +2464,7 @@ impl Render for TaskPanel {
                                 el.child(div().text_sm().text_color(rgb(0xff4d4f)).child(err))
                             })
                             .when(!self.pending_attachments.is_empty(), |el| {
-                                el.child(v_flex().gap(px(8.0)).children(
+                                el.child(h_flex().gap(px(8.0)).flex_wrap().children(
                                     self.pending_attachments.iter().enumerate().map(
                                         |(idx, attachment)| {
                                             self.render_pending_attachment_card(idx, attachment, cx)
@@ -2479,6 +2606,11 @@ impl Render for TaskPanel {
             )
             .child(self.task_detail_sidebar.clone())
             .children(self.render_delete_confirmation(cx))
+            .when_some(
+                self.render_pending_attachment_lightbox(cx),
+                |el, overlay| el.child(overlay),
+            )
+            .into_any_element()
     }
 }
 
