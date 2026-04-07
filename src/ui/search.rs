@@ -256,7 +256,8 @@ impl SearchPanel {
     }
 
     fn get_filtered_results(&self) -> Vec<Record> {
-        self.results
+        let mut results: Vec<Record> = self
+            .results
             .iter()
             .filter(|r| self.filter_type.matches(&r.record_type))
             .filter(|r| {
@@ -275,7 +276,20 @@ impl SearchPanel {
                 }
             })
             .cloned()
-            .collect()
+            .collect();
+
+        Self::sort_results_by_created_at_desc(&mut results);
+        results
+    }
+
+    fn sort_results_by_created_at_desc(results: &mut [Record]) {
+        results.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| right.id.cmp(&left.id))
+        });
     }
 
     fn load_available_persons(&mut self, cx: &mut Context<Self>) {
@@ -1156,8 +1170,12 @@ impl SearchPanel {
         let browse_active = !has_query && self.has_active_browse_filters();
         let browse_filter = self.browse_filter.clone();
 
-        v_flex()
-            .flex_1()
+        div()
+            .id("search-results")
+            .size_full()
+            .flex()
+            .flex_col()
+            .pr(px(16.0))
             .overflow_y_scrollbar()
             .child(div().py(px(8.0)).child(if is_searching {
                 div()
@@ -1252,6 +1270,7 @@ impl Render for SearchPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
+            .overflow_hidden()
             .p(px(24.0))
             .gap(px(18.0))
             .child(
@@ -1264,7 +1283,7 @@ impl Render for SearchPanel {
             .child(self.render_search_input(cx))
             .child(self.render_type_filter(cx))
             .child(self.render_tag_filter(cx))
-            .child(self.render_results(cx))
+            .child(div().flex_1().min_h_0().overflow_hidden().child(self.render_results(cx)))
     }
 }
 
@@ -1278,6 +1297,7 @@ impl Focusable for SearchPanel {
 mod tests {
     use super::{AdvancedFilterMode, BrowseFilter, SearchPanel};
     use crate::models::{Priority, Record};
+    use chrono::{Duration, Utc};
     use std::collections::BTreeSet;
 
     #[test]
@@ -1392,5 +1412,45 @@ mod tests {
         assert!(selected_tags.is_empty());
         assert!(selected_persons.is_empty());
         assert_eq!(filter_mode, AdvancedFilterMode::And);
+    }
+
+    #[test]
+    fn test_sort_results_by_created_at_desc_keeps_latest_first() {
+        let now = Utc::now();
+
+        let mut oldest = Record::new_task(
+            "最早".to_string(),
+            "最早内容".to_string(),
+            Priority::Low,
+        );
+        oldest.created_at = now - Duration::days(3);
+        oldest.updated_at = oldest.created_at;
+
+        let mut newest = Record::new_task(
+            "最新".to_string(),
+            "最新内容".to_string(),
+            Priority::High,
+        );
+        newest.created_at = now;
+        newest.updated_at = newest.created_at;
+
+        let mut middle = Record::new_task(
+            "中间".to_string(),
+            "中间内容".to_string(),
+            Priority::Medium,
+        );
+        middle.created_at = now - Duration::days(1);
+        middle.updated_at = middle.created_at;
+
+        let mut results = vec![middle.clone(), oldest.clone(), newest.clone()];
+        SearchPanel::sort_results_by_created_at_desc(&mut results);
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|record| record.title.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["最新", "中间", "最早"]
+        );
     }
 }
