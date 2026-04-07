@@ -11,7 +11,7 @@ use crate::ui::tokenized_text::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex};
 use rfd::AsyncFileDialog;
@@ -35,6 +35,7 @@ pub struct NotePanel {
     pending_attachments: Vec<PendingAttachment>,
     attachments_loading: bool,
     attachment_error: Option<String>,
+    _input_subscription: Subscription,
     _window_activation_subscription: Subscription,
     pending_deletion: Option<PendingDeletion>,
     record_detail_sidebar: Entity<RecordDetailSidebar>,
@@ -47,8 +48,21 @@ impl NotePanel {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(1, 6)
-                .placeholder("输入记录，Cmd+Enter 换行后首行作为标题 | Enter 保存 | #标签 @人物")
+                .placeholder("输入记录，Enter 换行后首行作为标题 | Cmd+Enter 保存 | #标签 @人物")
         });
+
+        let _input_subscription = cx.subscribe_in(
+            &input_state,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { secondary } => {
+                    if *secondary {
+                        this.create_note(window, cx);
+                    }
+                }
+                _ => {}
+            },
+        );
 
         let mut panel = Self {
             store: store.clone(),
@@ -58,6 +72,7 @@ impl NotePanel {
             pending_attachments: Vec::new(),
             attachments_loading: false,
             attachment_error: None,
+            _input_subscription,
             _window_activation_subscription: cx.observe_window_activation(
                 window,
                 |this, window, cx| {
@@ -661,15 +676,6 @@ impl Render for NotePanel {
                                     .child(
                                         div()
                                             .flex_1()
-                                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                                                if event.keystroke.key == "enter"
-                                                    && !event.keystroke.modifiers.platform
-                                                {
-                                                    window.prevent_default();
-                                                    cx.stop_propagation();
-                                                    this.create_note(window, cx);
-                                                }
-                                            }))
                                             .child(Input::new(&self.input_state))
                                     )
                                     .child(

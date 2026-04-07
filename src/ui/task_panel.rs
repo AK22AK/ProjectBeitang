@@ -158,6 +158,7 @@ pub struct TaskPanel {
     attachment_error: Option<String>,
     editing_task_id: Option<uuid::Uuid>,
     task_input_states: HashMap<uuid::Uuid, Entity<InputState>>,
+    _input_subscription: Subscription,
     _edit_subscription: Option<Subscription>,
     context_menu_task_id: Option<uuid::Uuid>,
     context_menu_position: Option<Point<Pixels>>,
@@ -189,8 +190,21 @@ impl TaskPanel {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(1, 6)
-                .placeholder("输入任务标题，Cmd+Enter 换行添加正文 | !! 高优先级 | ! 普通优先级 | #标签 @人物")
+                .placeholder("输入任务标题，Enter 换行添加正文 | Cmd+Enter 保存 | !! 高优先级 | ! 普通优先级 | #标签 @人物")
         });
+
+        let _input_subscription = cx.subscribe_in(
+            &input_state,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { secondary } => {
+                    if *secondary {
+                        this.create_task(window, cx);
+                    }
+                }
+                _ => {}
+            },
+        );
 
         let _window_activation_subscription =
             cx.observe_window_activation(window, |this, window, cx| {
@@ -213,6 +227,7 @@ impl TaskPanel {
             attachment_error: None,
             editing_task_id: None,
             task_input_states: HashMap::new(),
+            _input_subscription,
             _edit_subscription: None,
             context_menu_task_id: None,
             context_menu_position: None,
@@ -2301,17 +2316,6 @@ impl Render for TaskPanel {
                                             .flex_1()
                                             .min_w(px(0.0))
                                             .overflow_hidden()
-                                            .on_key_down(cx.listener(
-                                                |this, event: &KeyDownEvent, window, cx| {
-                                                    if event.keystroke.key == "enter"
-                                                        && !event.keystroke.modifiers.platform
-                                                    {
-                                                        window.prevent_default();
-                                                        cx.stop_propagation();
-                                                        this.create_task(window, cx);
-                                                    }
-                                                },
-                                            ))
                                             .child(Input::new(&self.input_state).flex_1()),
                                     )
                                     .child(
