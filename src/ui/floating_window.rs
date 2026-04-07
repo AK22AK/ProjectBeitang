@@ -646,7 +646,15 @@ impl QuickAddWindow {
         preview: PendingAttachment,
         cx: &mut Context<Self>,
     ) {
-        self.active_attachment_preview = Some(preview);
+        self.active_attachment_preview = None;
+        match crate::system_preview::open_path(&preview.path) {
+            Ok(()) => {
+                self.attachment_error = None;
+            }
+            Err(err) => {
+                self.attachment_error = Some(err);
+            }
+        }
         cx.notify();
     }
 

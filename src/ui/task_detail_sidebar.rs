@@ -891,8 +891,32 @@ impl TaskDetailSidebar {
     }
 
     fn open_attachment_preview(&mut self, preview: AttachmentPreview, cx: &mut Context<Self>) {
-        self.active_attachment_preview = Some(preview);
-        cx.notify();
+        self.active_attachment_preview = None;
+        self.attachment_error = None;
+
+        let attachment = preview.attachment;
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let result = store.get_attachment_bytes(&attachment.id).await;
+            let _ = view.update(cx, |this, cx| {
+                match result {
+                    Ok(file_data) => {
+                        if let Err(err) =
+                            crate::system_preview::open_saved_attachment(&attachment, file_data)
+                        {
+                            this.attachment_error = Some(err);
+                        } else {
+                            this.attachment_error = None;
+                        }
+                    }
+                    Err(err) => {
+                        this.attachment_error = Some(format!("读取预览图片失败：{}", err));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn close_attachment_preview(&mut self, cx: &mut Context<Self>) {
