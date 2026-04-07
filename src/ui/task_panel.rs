@@ -1,3 +1,4 @@
+use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
 use crate::ui::attachment_draft::{
@@ -18,7 +19,6 @@ use gpui_component::date_picker::{DatePicker, DatePickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, IconName};
-use rfd::AsyncFileDialog;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -972,28 +972,19 @@ impl TaskPanel {
         .detach();
     }
 
-    fn import_pending_attachments(&mut self, cx: &mut Context<Self>) {
-        self.attachments_loading = true;
-        self.attachment_error = None;
-        cx.notify();
-
+    fn import_pending_attachments(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let picker = pick_image_files(ParentWindowHint::from_window(window));
         cx.spawn(async move |view, cx| {
-            let Some(handles) = AsyncFileDialog::new()
-                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
-                .pick_files()
-                .await
-            else {
-                let _ = view.update(cx, |panel, cx| {
-                    panel.attachments_loading = false;
-                    cx.notify();
-                });
+            let Some(paths) = picker.await else {
                 return;
             };
 
-            let paths = handles
-                .into_iter()
-                .map(|handle| handle.path().to_path_buf())
-                .collect();
+            let _ = view.update(cx, |panel, cx| {
+                panel.attachments_loading = true;
+                panel.attachment_error = None;
+                cx.notify();
+            });
+
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = prepare_pending_attachments(paths);
@@ -2322,8 +2313,8 @@ impl Render for TaskPanel {
                                         Button::new("task-add-image-btn")
                                             .child("添加图片")
                                             .on_click(cx.listener(
-                                                |this, _event: &ClickEvent, _window, cx| {
-                                                    this.import_pending_attachments(cx);
+                                                |this, _event: &ClickEvent, window, cx| {
+                                                    this.import_pending_attachments(window, cx);
                                                     cx.stop_propagation();
                                                 },
                                             )),

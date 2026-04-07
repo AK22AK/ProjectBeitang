@@ -2,6 +2,8 @@ pub mod app_shortcuts;
 pub mod attachment_image;
 pub mod config;
 pub mod db;
+pub mod file_dialog;
+pub mod file_dialog_prewarm;
 pub mod models;
 pub mod notifier;
 pub mod shortcut_manager;

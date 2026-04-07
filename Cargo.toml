@@ -30,6 +30,11 @@ dirs = "5.0"
 base64 = "0.22"
 image = "0.25"
 rfd = "0.15"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSOpenPanel", "NSSavePanel", "NSApplication", "NSWindow", "NSView"] }
+objc2-foundation = "0.3"
+block2 = "0.6"
+raw-window-handle = "0.6"
 
 # 全局快捷键
 global-hotkey = "0.4"

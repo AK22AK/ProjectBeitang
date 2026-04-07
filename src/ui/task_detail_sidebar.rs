@@ -8,10 +8,10 @@ use gpui_component::{
     scroll::ScrollableElement,
     v_flex,
 };
-use rfd::AsyncFileDialog;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::{Attachment, AttachmentStatus, Priority, Record, TaskStatus};
 use crate::store::Store;
 use crate::ui::parsing;
@@ -731,7 +731,7 @@ impl TaskDetailSidebar {
         .detach();
     }
 
-    fn import_attachments(&mut self, cx: &mut Context<Self>) {
+    fn import_attachments(&mut self, window: &Window, cx: &mut Context<Self>) {
         let Some(task_id) = self
             .current_task_id
             .as_deref()
@@ -741,18 +741,11 @@ impl TaskDetailSidebar {
         };
 
         let store = self.store.clone();
+        let picker = pick_image_files(ParentWindowHint::from_window(window));
         cx.spawn(async move |view, cx| {
-            let Some(handles) = AsyncFileDialog::new()
-                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
-                .pick_files()
-                .await
-            else {
+            let Some(paths) = picker.await else {
                 return;
             };
-            let paths = handles
-                .into_iter()
-                .map(|handle| handle.path().to_path_buf())
-                .collect();
             let result = store.import_image_attachments(task_id, paths).await;
             let _ = view.update(cx, |this, cx| match result {
                 Ok(_) => {
@@ -1545,8 +1538,8 @@ impl Render for TaskDetailSidebar {
                                                         Button::new("task-sidebar-add-attachment")
                                                             .child("添加图片")
                                                             .on_click(cx.listener(
-                                                                |this, _event, _window, cx| {
-                                                                    this.import_attachments(cx);
+                                                                |this, _event, window, cx| {
+                                                                    this.import_attachments(window, cx);
                                                                     cx.stop_propagation();
                                                                 },
                                                             )),

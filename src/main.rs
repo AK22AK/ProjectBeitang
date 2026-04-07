@@ -2,6 +2,7 @@ use beitang::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, SEARCH_KEYSTROKE, SETTINGS_KEYSTROKE,
 };
 use beitang::config::ShortcutConfig;
+use beitang::file_dialog_prewarm::prewarm_file_dialog;
 use beitang::store::{create_store, Store};
 use beitang::ui::dashboard::Dashboard;
 use beitang::ui::floating_window::{
@@ -217,6 +218,10 @@ fn main() {
             &store_for_run,
             Some(Panel::Dashboard),
         );
+
+        cx.defer(|_cx| {
+            prewarm_file_dialog();
+        });
 
         if let Ok(manager) = GlobalHotKeyManager::new() {
             let quick_capture = shortcuts.quick_capture_hotkey();
