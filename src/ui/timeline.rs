@@ -1,5 +1,8 @@
 use crate::models::{Record, RecordType, TaskStatus};
 use crate::store::Store;
+use crate::ui::tokenized_text::{
+    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
+};
 use chrono::{DateTime, Datelike, Duration, Local, Utc, Weekday};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -397,19 +400,16 @@ impl Timeline {
                             .text_base()
                             .text_color(rgb(0x262626))
                             .line_height(relative(1.35))
-                            .child(content),
+                            .child(render_tokenized_text(
+                                &content,
+                                TokenTextStyle::new(rgb(0x262626), FontWeight::NORMAL),
+                            )),
                     )
                     .child(h_flex().gap(px(6.0)).flex_wrap().children(
                         tags.into_iter().enumerate().map(|(idx, tag)| {
                             div()
                                 .id(("item-tag", idx))
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0xf5f5f5))
-                                .text_xs()
-                                .text_color(rgb(0x595959))
-                                .child(format!("#{}", tag))
+                                .child(render_metadata_chip(MetadataChipKind::Tag, &tag))
                         }),
                     )),
             )

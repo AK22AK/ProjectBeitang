@@ -2,6 +2,9 @@ use crate::models::Record;
 use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
+use crate::ui::tokenized_text::{
+    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
@@ -555,7 +558,13 @@ impl Render for NotePanel {
                                                             .text_sm()
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .text_color(rgb(0x333333))
-                                                            .child(title)
+                                                            .child(render_tokenized_text(
+                                                                &title,
+                                                                TokenTextStyle::new(
+                                                                    rgb(0x333333),
+                                                                    FontWeight::MEDIUM,
+                                                                ),
+                                                            ))
                                                     )
                                                     .child(
                                                         div()
@@ -563,7 +572,17 @@ impl Render for NotePanel {
                                                             .text_sm()
                                                             .text_color(rgb(0x888888))
                                                             .line_height(relative(1.35))
-                                                            .child(if preview.is_empty() { "...".to_string() } else { preview })
+                                                            .child(render_tokenized_text(
+                                                                if preview.is_empty() {
+                                                                    "..."
+                                                                } else {
+                                                                    &preview
+                                                                },
+                                                                TokenTextStyle::new(
+                                                                    rgb(0x888888),
+                                                                    FontWeight::NORMAL,
+                                                                ),
+                                                            ))
                                                     )
                                                     .when(has_metadata, |el| {
                                                         el.child(
@@ -577,24 +596,18 @@ impl Render for NotePanel {
                                                                 .children(note.tags.iter().enumerate().map(|(tag_idx, tag)| {
                                                                     div()
                                                                         .id(("note-tag", tag_idx))
-                                                                        .px(px(5.0))
-                                                                        .py(px(1.0))
-                                                                        .rounded(px(4.0))
-                                                                        .bg(rgb(0xf5f5f5))
-                                                                        .text_xs()
-                                                                        .text_color(rgb(0x595959))
-                                                                        .child(format!("#{}", tag))
+                                                                        .child(render_metadata_chip(
+                                                                            MetadataChipKind::Tag,
+                                                                            tag,
+                                                                        ))
                                                                 }))
                                                                 .children(note.persons.iter().enumerate().map(|(person_idx, person)| {
                                                                     div()
                                                                         .id(("note-person", person_idx))
-                                                                        .px(px(5.0))
-                                                                        .py(px(1.0))
-                                                                        .rounded(px(4.0))
-                                                                        .bg(rgb(0xe6f7ff))
-                                                                        .text_xs()
-                                                                        .text_color(rgb(0x1890ff))
-                                                                        .child(format!("@{}", person))
+                                                                        .child(render_metadata_chip(
+                                                                            MetadataChipKind::Person,
+                                                                            person,
+                                                                        ))
                                                                 }))
                                                         )
                                                     })

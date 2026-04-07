@@ -1,5 +1,9 @@
 use crate::models::{Record, RecordType, TaskStatus};
 use crate::store::Store;
+use crate::ui::tokenized_text::{
+    render_inline_token_text, render_metadata_chip, tokenize_text, MetadataChipKind,
+    TextTokenSegment, TokenTextStyle,
+};
 use chrono::{DateTime, Datelike, Duration, Local, Utc, Weekday};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -695,6 +699,43 @@ impl SearchPanel {
         h_flex().flex_wrap().children(elements).into_any_element()
     }
 
+    fn render_search_tokenized_text(
+        &self,
+        content: &str,
+        base_color: Rgba,
+        base_weight: FontWeight,
+    ) -> AnyElement {
+        let lines = tokenize_text(content);
+        let render_line = |line: &[TextTokenSegment]| {
+            h_flex()
+                .w_full()
+                .gap(px(0.0))
+                .flex_wrap()
+                .items_center()
+                .children(line.iter().map(|segment| match segment {
+                    TextTokenSegment::Plain(text) => {
+                        self.highlight_match_text(text, base_color, base_weight)
+                    }
+                    TextTokenSegment::Tag(_) | TextTokenSegment::Person(_) => {
+                        render_inline_token_text(
+                            segment,
+                            TokenTextStyle::new(base_color, base_weight),
+                        )
+                    }
+                }))
+        };
+
+        if lines.len() == 1 {
+            return render_line(&lines[0]).into_any_element();
+        }
+
+        v_flex()
+            .w_full()
+            .gap(px(4.0))
+            .children(lines.iter().map(|line| render_line(line)))
+            .into_any_element()
+    }
+
     fn first_match_char_index(&self, content: &str) -> Option<usize> {
         let content_lower = content.to_lowercase();
         self.query_terms()
@@ -1008,6 +1049,7 @@ impl SearchPanel {
         let title = self.excerpt_around_match(&record.display_title(), SEARCH_TITLE_PREVIEW_LIMIT);
         let body_preview = self.body_preview(record);
         let tags = record.tags.clone();
+        let persons = record.persons.clone();
 
         h_flex()
             .w_full()
@@ -1044,7 +1086,7 @@ impl SearchPanel {
                             .text_base()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x262626))
-                            .child(self.highlight_match_text(
+                            .child(self.render_search_tokenized_text(
                                 &title,
                                 rgb(0x262626),
                                 FontWeight::SEMIBOLD,
@@ -1052,22 +1094,29 @@ impl SearchPanel {
                     )
                     .when_some(body_preview, |el, body| {
                         el.child(div().text_sm().text_color(rgb(0x8c8c8c)).child(
-                            self.highlight_match_text(&body, rgb(0x8c8c8c), FontWeight::NORMAL),
+                            self.render_search_tokenized_text(
+                                &body,
+                                rgb(0x8c8c8c),
+                                FontWeight::NORMAL,
+                            ),
                         ))
                     })
                     .child(h_flex().gap(px(6.0)).flex_wrap().children(
                         tags.into_iter().enumerate().map(|(idx, tag)| {
                             div()
                                 .id(("result-tag", idx))
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0xf5f5f5))
-                                .text_xs()
-                                .text_color(rgb(0x595959))
-                                .child(format!("#{}", tag))
+                                .child(render_metadata_chip(MetadataChipKind::Tag, &tag))
                         }),
-                    )),
+                    ))
+                    .when(!persons.is_empty(), |el| {
+                        el.child(h_flex().gap(px(6.0)).flex_wrap().children(
+                            persons.into_iter().enumerate().map(|(idx, person)| {
+                                div()
+                                    .id(("result-person", idx))
+                                    .child(render_metadata_chip(MetadataChipKind::Person, &person))
+                            }),
+                        ))
+                    }),
             )
     }
 

@@ -3,6 +3,9 @@ use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
 use crate::ui::task_detail_sidebar::TaskDetailSidebar;
+use crate::ui::tokenized_text::{
+    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
+};
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::prelude::FluentBuilder as _;
 use gpui::StatefulInteractiveElement as _;
@@ -1525,7 +1528,17 @@ impl TaskPanel {
                                         } else {
                                             rgb(0x333333)
                                         })
-                                        .child(display_title.clone())
+                                        .child(render_tokenized_text(
+                                            &display_title,
+                                            TokenTextStyle::new(
+                                                if is_completed {
+                                                    rgb(0x999999)
+                                                } else {
+                                                    rgb(0x333333)
+                                                },
+                                                FontWeight::MEDIUM,
+                                            ),
+                                        ))
                                         .into_any_element()
                                 };
 
@@ -1558,7 +1571,13 @@ impl TaskPanel {
                                                 .text_sm()
                                                 .text_color(rgb(0x888888))
                                                 .line_height(relative(1.35))
-                                                .child(content_preview)
+                                                .child(render_tokenized_text(
+                                                    &content_preview,
+                                                    TokenTextStyle::new(
+                                                        rgb(0x888888),
+                                                        FontWeight::NORMAL,
+                                                    ),
+                                                ))
                                         )
                                     })
                             })
@@ -1586,24 +1605,18 @@ impl TaskPanel {
                                         .children(task.tags.iter().enumerate().map(|(idx, tag)| {
                                             div()
                                                 .id(("task-tag", idx))
-                                                .px(px(5.0))
-                                                .py(px(1.0))
-                                                .rounded(px(4.0))
-                                                .bg(rgb(0xf5f5f5))
-                                                .text_xs()
-                                                .text_color(rgb(0x595959))
-                                                .child(format!("#{}", tag))
+                                                .child(render_metadata_chip(
+                                                    MetadataChipKind::Tag,
+                                                    tag,
+                                                ))
                                         }))
                                         .children(task.persons.iter().enumerate().map(|(idx, person)| {
                                             div()
                                                 .id(("task-person", idx))
-                                                .px(px(5.0))
-                                                .py(px(1.0))
-                                                .rounded(px(4.0))
-                                                .bg(rgb(0xe6f7ff))
-                                                .text_xs()
-                                                .text_color(rgb(0x1890ff))
-                                                .child(format!("@{}", person))
+                                                .child(render_metadata_chip(
+                                                    MetadataChipKind::Person,
+                                                    person,
+                                                ))
                                         }))
                                 )
                             })

@@ -8,3 +8,4 @@ pub mod sidebar;
 pub mod task_detail_sidebar;
 pub mod task_panel;
 pub mod timeline;
+pub mod tokenized_text;

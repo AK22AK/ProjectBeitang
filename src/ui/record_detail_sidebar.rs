@@ -3,13 +3,16 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     button::Button,
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
     v_flex,
 };
 
 use crate::models::Record;
 use crate::ui::parsing;
+use crate::ui::tokenized_text::{
+    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
+};
 
 pub struct RecordDetailSidebar {
     current_record_id: Option<String>,
@@ -23,6 +26,10 @@ pub struct RecordDetailSidebar {
     inline_persons: Vec<String>,
     title_input: Option<Entity<InputState>>,
     content_input: Option<Entity<InputState>>,
+    title_input_subscription: Option<Subscription>,
+    content_input_subscription: Option<Subscription>,
+    editing_title: bool,
+    editing_content: bool,
     content_expanded: bool,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_delete: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
@@ -60,6 +67,10 @@ impl RecordDetailSidebar {
             inline_persons: Vec::new(),
             title_input: None,
             content_input: None,
+            title_input_subscription: None,
+            content_input_subscription: None,
+            editing_title: false,
+            editing_content: false,
             content_expanded: false,
             on_save: None,
             on_delete: None,
@@ -108,6 +119,8 @@ impl RecordDetailSidebar {
         let inline_fields = parsing::parse_record_fields(record.title.as_deref(), &record.content);
         self.inline_tags = inline_fields.tags;
         self.inline_persons = inline_fields.people;
+        self.editing_title = false;
+        self.editing_content = false;
 
         // 初始化或更新标题输入框
         let title_value = record.title.clone().unwrap_or_default();
@@ -121,7 +134,17 @@ impl RecordDetailSidebar {
                 input.set_value(&title_value, window, cx);
                 input
             });
+            let subscription = cx.subscribe_in(
+                &title_input,
+                window,
+                |this, _state, event: &InputEvent, window, cx| {
+                    if let InputEvent::Blur = event {
+                        this.cancel_title_edit(window, cx);
+                    }
+                },
+            );
             self.title_input = Some(title_input);
+            self.title_input_subscription = Some(subscription);
         }
 
         // 初始化或更新内容输入框（多行文本区域）
@@ -136,7 +159,17 @@ impl RecordDetailSidebar {
                 input.set_value(&content_value, window, cx);
                 input
             });
+            let subscription = cx.subscribe_in(
+                &content_input,
+                window,
+                |this, _state, event: &InputEvent, window, cx| {
+                    if let InputEvent::Blur = event {
+                        this.cancel_content_edit(window, cx);
+                    }
+                },
+            );
             self.content_input = Some(content_input);
+            self.content_input_subscription = Some(subscription);
         }
 
         cx.notify();
@@ -169,6 +202,48 @@ impl RecordDetailSidebar {
     /// 切换内容输入框的展开/收起状态
     fn toggle_content_expanded(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.content_expanded = !self.content_expanded;
+        cx.notify();
+    }
+
+    fn begin_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_title = true;
+        if let Some(ref input) = self.title_input {
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn begin_content_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_content = true;
+        if let Some(ref input) = self.content_input {
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_title = false;
+        if let Some(ref input) = self.title_input {
+            let title_value = self.record_title.clone().unwrap_or_default();
+            input.update(cx, |state, cx| {
+                state.set_value(&title_value, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_content_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_content = false;
+        if let Some(ref input) = self.content_input {
+            let content_value = self.record_content.clone();
+            input.update(cx, |state, cx| {
+                state.set_value(&content_value, window, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -229,6 +304,8 @@ impl RecordDetailSidebar {
             self.persons = next_persons.clone();
             self.inline_tags = parsed_fields.tags.clone();
             self.inline_persons = parsed_fields.people.clone();
+            self.editing_title = false;
+            self.editing_content = false;
 
             let payload = SavePayload {
                 record_id: record_id.clone(),
@@ -254,6 +331,8 @@ impl Render for RecordDetailSidebar {
 
         let content_input_clone = self.content_input.clone();
         let content_expanded = self.content_expanded;
+        let title_display = self.record_title.clone().unwrap_or_default();
+        let content_display = self.record_content.clone();
 
         div()
             .id("record-detail-sidebar")
@@ -337,26 +416,60 @@ impl Render for RecordDetailSidebar {
                                                     .text_color(rgb(0x666666))
                                                     .child("标题"),
                                             )
-                                            .when_some(self.title_input.clone(), |el, input| {
-                                                el.child(
-                                                    div()
-                                                        .on_mouse_down(
-                                                            gpui::MouseButton::Left,
-                                                            cx.listener(
-                                                                |_this, _event, _window, cx| {
-                                                                    cx.stop_propagation();
-                                                                },
-                                                            ),
-                                                        )
-                                                        .child(
-                                                            Input::new(&input)
-                                                                .appearance(false)
-                                                                .text_size(px(16.0))
-                                                                .font_weight(
-                                                                    gpui::FontWeight::SEMIBOLD,
+                                            .child(if self.editing_title {
+                                                self.title_input
+                                                    .clone()
+                                                    .map(|input| {
+                                                        div()
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                cx.listener(
+                                                                    |_this, _event, _window, cx| {
+                                                                        cx.stop_propagation();
+                                                                    },
                                                                 ),
+                                                            )
+                                                            .child(
+                                                                Input::new(&input)
+                                                                    .appearance(false)
+                                                                    .text_size(px(16.0))
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                    ),
+                                                            )
+                                                            .into_any_element()
+                                                    })
+                                                    .unwrap_or_else(|| div().into_any_element())
+                                            } else {
+                                                div()
+                                                    .w_full()
+                                                    .min_h(px(36.0))
+                                                    .px(px(2.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(8.0))
+                                                    .cursor_text()
+                                                    .hover(|style| style.bg(rgb(0xfafafa)))
+                                                    .on_mouse_down(
+                                                        gpui::MouseButton::Left,
+                                                        cx.listener(
+                                                        |this, _event: &MouseDownEvent, window, cx| {
+                                                            this.begin_title_edit(window, cx);
+                                                            cx.stop_propagation();
+                                                        },
                                                         ),
-                                                )
+                                                    )
+                                                    .child(render_tokenized_text(
+                                                        if title_display.is_empty() {
+                                                            "\u{00a0}"
+                                                        } else {
+                                                            &title_display
+                                                        },
+                                                        TokenTextStyle::new(
+                                                            rgb(0x262626),
+                                                            gpui::FontWeight::SEMIBOLD,
+                                                        ),
+                                                    ))
+                                                    .into_any_element()
                                             }),
                                     )
                                     // 内容输入（多行文本区域）
@@ -373,10 +486,17 @@ impl Render for RecordDetailSidebar {
                                                             .text_color(rgb(0x666666))
                                                             .child("内容"),
                                                     )
-                                                    .when(self.content_input.as_ref().map_or(false, |input| {
-                                                        let content = input.read(cx).value();
+                                                    .when({
+                                                        let content = if self.editing_content {
+                                                            self.content_input
+                                                                .as_ref()
+                                                                .map(|input| input.read(cx).value().to_string())
+                                                                .unwrap_or_else(|| content_display.clone())
+                                                        } else {
+                                                            content_display.clone()
+                                                        };
                                                         Self::estimate_line_count(&content) > 6
-                                                    }), |el| {
+                                                    }, |el| {
                                                         el.child(
                                                             Button::new("toggle-content-expand")
                                                                 .child(if content_expanded { "收起" } else { "展开" })
@@ -388,39 +508,94 @@ impl Render for RecordDetailSidebar {
                                                         )
                                                     }),
                                             )
-                                            .when_some(content_input_clone.clone(), |el, input| {
-                                                let content = input.read(cx).value();
-                                                let line_count = Self::estimate_line_count(&content);
+                                            .child(if self.editing_content {
+                                                content_input_clone
+                                                    .clone()
+                                                    .map(|input| {
+                                                        let content = input.read(cx).value();
+                                                        let line_count = Self::estimate_line_count(&content);
+                                                        let needs_scroll = line_count > 6 && !content_expanded;
+                                                        let is_expanded = content_expanded;
+
+                                                        div()
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                cx.listener(
+                                                                    |_this, _event, _window, cx| {
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .when(!needs_scroll && !is_expanded, |d| {
+                                                                d.h_auto()
+                                                            })
+                                                            .when(needs_scroll, |d| {
+                                                                d.h(px(144.0))
+                                                            })
+                                                            .when(is_expanded, |d| {
+                                                                let total_height = ((line_count as f32) * 20.0 + 16.0).max(144.0);
+                                                                d.h(px(total_height))
+                                                            })
+                                                            .child(
+                                                                Input::new(&input)
+                                                                    .appearance(false)
+                                                                    .text_size(px(14.0))
+                                                                    .when(needs_scroll || is_expanded, |i| i.h_full()),
+                                                            )
+                                                            .into_any_element()
+                                                    })
+                                                    .unwrap_or_else(|| div().into_any_element())
+                                            } else {
+                                                let line_count = Self::estimate_line_count(&content_display);
                                                 let needs_scroll = line_count > 6 && !content_expanded;
                                                 let is_expanded = content_expanded;
-
-                                                el.child(
-                                                    div()
-                                                        .on_mouse_down(
-                                                            gpui::MouseButton::Left,
-                                                            cx.listener(
-                                                                |_this, _event, _window, cx| {
-                                                                    cx.stop_propagation();
-                                                                },
-                                                            ),
-                                                        )
-                                                        .when(!needs_scroll && !is_expanded, |d| {
-                                                            d.h_auto()
-                                                        })
-                                                        .when(needs_scroll, |d| {
-                                                            d.h(px(144.0))
-                                                        })
-                                                        .when(is_expanded, |d| {
-                                                            let total_height = ((line_count as f32) * 20.0 + 16.0).max(144.0);
-                                                            d.h(px(total_height))
-                                                        })
-                                                        .child(
-                                                            Input::new(&input)
-                                                                .appearance(false)
-                                                                .text_size(px(14.0))
-                                                                .when(needs_scroll || is_expanded, |i| i.h_full()),
+                                                let mut display = div()
+                                                    .w_full()
+                                                    .min_h(px(32.0))
+                                                    .px(px(2.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(8.0))
+                                                    .cursor_text()
+                                                    .hover(|style| style.bg(rgb(0xfafafa)))
+                                                    .on_mouse_down(
+                                                        gpui::MouseButton::Left,
+                                                        cx.listener(
+                                                        |this, _event: &MouseDownEvent, window, cx| {
+                                                            this.begin_content_edit(window, cx);
+                                                            cx.stop_propagation();
+                                                        },
                                                         ),
-                                                )
+                                                    );
+
+                                                if !needs_scroll && !is_expanded {
+                                                    display = display.h_auto();
+                                                } else if needs_scroll {
+                                                    display = display.h(px(144.0)).overflow_hidden();
+                                                } else if is_expanded {
+                                                    let total_height =
+                                                        ((line_count as f32) * 20.0 + 16.0).max(144.0);
+                                                    display = display.h(px(total_height));
+                                                }
+
+                                                display
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(0x595959))
+                                                            .line_height(relative(1.45))
+                                                            .child(render_tokenized_text(
+                                                                if content_display.is_empty() {
+                                                                    "\u{00a0}"
+                                                                } else {
+                                                                    &content_display
+                                                                },
+                                                                TokenTextStyle::new(
+                                                                    rgb(0x595959),
+                                                                    FontWeight::NORMAL,
+                                                                ),
+                                                            )),
+                                                    )
+                                                    .into_any_element()
                                             }),
                                     )
                                     // 创建时间
@@ -483,13 +658,10 @@ impl Render for RecordDetailSidebar {
                                                         |(idx, tag)| {
                                                             div()
                                                                 .id(("record-sidebar-tag", idx))
-                                                                .px(px(8.0))
-                                                                .py(px(4.0))
-                                                                .rounded(px(12.0))
-                                                                .bg(rgb(0xf5f5f5))
-                                                                .text_sm()
-                                                                .text_color(rgb(0x595959))
-                                                                .child(format!("#{}", tag))
+                                                                .child(render_metadata_chip(
+                                                                    MetadataChipKind::Tag,
+                                                                    tag,
+                                                                ))
                                                         },
                                                     ),
                                                 )),
@@ -511,13 +683,10 @@ impl Render for RecordDetailSidebar {
                                                         |(idx, person)| {
                                                             div()
                                                                 .id(("record-sidebar-person", idx))
-                                                                .px(px(8.0))
-                                                                .py(px(4.0))
-                                                                .rounded(px(12.0))
-                                                                .bg(rgb(0xe6f7ff))
-                                                                .text_sm()
-                                                                .text_color(rgb(0x1890ff))
-                                                                .child(format!("@{}", person))
+                                                                .child(render_metadata_chip(
+                                                                    MetadataChipKind::Person,
+                                                                    person,
+                                                                ))
                                                         },
                                                     ),
                                                 )),
