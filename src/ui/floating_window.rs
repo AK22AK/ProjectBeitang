@@ -1,9 +1,16 @@
+use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::Record;
 use crate::store::Store;
+use crate::ui::attachment_draft::{
+    attachment_lightbox_size, attachment_preview_size, format_attachment_meta,
+    prepare_pending_attachments, PendingAttachment,
+};
 use crate::ui::parsing;
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Escape, IndentInline, Input, InputEvent, InputState};
 use gpui_component::IconName;
+use gpui_component::{h_flex, v_flex};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -59,9 +66,18 @@ pub fn quick_add_window_size() -> Size<Pixels> {
     size(px(520.0), px(244.0))
 }
 
-fn quick_add_window_size_for_rows(rows: usize) -> Size<Pixels> {
-    let extra_rows = rows.saturating_sub(1).min(5) as f32;
-    size(px(520.0), px(244.0 + extra_rows * 28.0))
+fn quick_add_window_size_for_content(
+    input_rows: usize,
+    attachment_rows: usize,
+    status_lines: usize,
+) -> Size<Pixels> {
+    let input_extra_rows = input_rows.saturating_sub(1).min(5) as f32;
+    let attachment_extra_height = attachment_rows as f32 * 28.0;
+    let status_extra_height = status_lines as f32 * 22.0;
+    size(
+        px(520.0),
+        px(244.0 + input_extra_rows * 28.0 + attachment_extra_height + status_extra_height),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,6 +99,7 @@ pub enum QuickAddSessionStatus {
 pub struct QuickAddSessionController {
     pub handle: Option<AnyWindowHandle>,
     pub draft_text: String,
+    pub pending_attachments: Vec<PendingAttachment>,
     pub mode: InputMode,
     pub status: QuickAddSessionStatus,
     pub hide_app_on_close: bool,
@@ -90,7 +107,7 @@ pub struct QuickAddSessionController {
 
 impl QuickAddSessionController {
     pub fn has_draft(&self) -> bool {
-        !self.draft_text.trim().is_empty()
+        !self.draft_text.trim().is_empty() || !self.pending_attachments.is_empty()
     }
 
     pub fn mark_visible(&mut self) {
@@ -100,6 +117,7 @@ impl QuickAddSessionController {
     pub fn clear(&mut self) {
         self.handle = None;
         self.draft_text.clear();
+        self.pending_attachments.clear();
         self.mode = InputMode::Record;
         self.status = QuickAddSessionStatus::Closed;
         self.hide_app_on_close = false;
@@ -119,6 +137,10 @@ pub struct QuickAddWindow {
     session: Rc<RefCell<QuickAddSessionController>>,
     open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
     input_state: Entity<InputState>,
+    pending_attachments: Vec<PendingAttachment>,
+    active_attachment_preview: Option<PendingAttachment>,
+    attachments_loading: bool,
+    attachment_error: Option<String>,
     _subscription: Subscription,
     mode: InputMode,
     focus_handle: FocusHandle,
@@ -139,6 +161,7 @@ impl QuickAddWindow {
         let snapshot = session.borrow().clone();
         let mode = snapshot.mode;
         let initial_text = snapshot.draft_text;
+        let pending_attachments = snapshot.pending_attachments;
 
         let input_state = cx.new(|cx| {
             let mut input = InputState::new(window, cx)
@@ -186,6 +209,10 @@ impl QuickAddWindow {
             session,
             open_destination,
             input_state,
+            pending_attachments,
+            active_attachment_preview: None,
+            attachments_loading: false,
+            attachment_error: None,
             _subscription,
             mode,
             focus_handle,
@@ -228,7 +255,11 @@ impl QuickAddWindow {
     }
 
     fn sync_window_size(&self, window: &mut Window, cx: &Context<Self>) {
-        window.resize(quick_add_window_size_for_rows(self.visible_input_rows(cx)));
+        window.resize(quick_add_window_size_for_content(
+            self.visible_input_rows(cx),
+            self.visible_attachment_rows(),
+            self.visible_status_lines(),
+        ));
     }
 
     fn input_text(&self, cx: &Context<Self>) -> String {
@@ -239,9 +270,33 @@ impl QuickAddWindow {
         !self.input_text(cx).trim().is_empty()
     }
 
+    fn has_draft(&self, cx: &Context<Self>) -> bool {
+        self.has_input(cx) || !self.pending_attachments.is_empty()
+    }
+
+    fn pending_attachment_paths(&self) -> Vec<std::path::PathBuf> {
+        self.pending_attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect()
+    }
+
+    fn visible_attachment_rows(&self) -> usize {
+        if self.pending_attachments.is_empty() {
+            0
+        } else {
+            self.pending_attachments.len().div_ceil(12)
+        }
+    }
+
+    fn visible_status_lines(&self) -> usize {
+        usize::from(self.attachments_loading) + usize::from(self.attachment_error.is_some())
+    }
+
     fn sync_session_state(&self, cx: &Context<Self>) {
         let mut session = self.session.borrow_mut();
         session.draft_text = self.input_text(cx);
+        session.pending_attachments = self.pending_attachments.clone();
         session.mode = self.mode;
         session.status = QuickAddSessionStatus::Visible;
     }
@@ -254,6 +309,7 @@ impl QuickAddWindow {
         let mut session = self.session.borrow_mut();
         session.handle = None;
         session.draft_text = self.input_text(cx);
+        session.pending_attachments = self.pending_attachments.clone();
         session.mode = self.mode;
         session.status = QuickAddSessionStatus::Dormant;
     }
@@ -301,6 +357,12 @@ impl QuickAddWindow {
             return;
         }
 
+        if self.attachments_loading {
+            self.attachment_error = Some("图片仍在处理中，请稍候".to_string());
+            cx.notify();
+            return;
+        }
+
         self.submit_text_and_close(&text, window, cx);
     }
 
@@ -327,6 +389,12 @@ impl QuickAddWindow {
             return;
         }
 
+        if self.attachments_loading {
+            self.attachment_error = Some("图片仍在处理中，请稍候".to_string());
+            cx.notify();
+            return;
+        }
+
         self.clear_transient_feedback(cx);
         self.submit_text(&text, cx);
         self.clear_session();
@@ -341,7 +409,7 @@ impl QuickAddWindow {
         cx: &mut Context<Self>,
     ) {
         self.clear_transient_feedback(cx);
-        if self.has_input(cx) {
+        if self.has_draft(cx) {
             self.mark_session_dormant(cx);
         } else {
             self.clear_session();
@@ -384,7 +452,7 @@ impl QuickAddWindow {
     }
 
     fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.has_input(cx) {
+        if !self.has_draft(cx) {
             self.close_window(window, cx);
             return;
         }
@@ -456,6 +524,8 @@ impl QuickAddWindow {
 
         let parsed = parsing::parse_task_draft(text);
         let mut task = Record::new_task(parsed.title, parsed.content, parsed.priority);
+        let task_id = task.id;
+        let pending_paths = self.pending_attachment_paths();
 
         for tag in parsed.tags {
             task.tags.push(tag);
@@ -468,6 +538,13 @@ impl QuickAddWindow {
         cx.spawn(async move |_view, _cx| {
             if let Err(e) = store.create_record(task).await {
                 eprintln!("[QuickAdd] Failed to create task: {}", e);
+            } else if !pending_paths.is_empty() {
+                if let Err(e) = store
+                    .enqueue_record_attachment_import(task_id, pending_paths)
+                    .await
+                {
+                    eprintln!("[QuickAdd] Failed to import task attachments: {}", e);
+                }
             }
         })
         .detach();
@@ -480,6 +557,8 @@ impl QuickAddWindow {
 
         let parsed = parsing::parse_record_draft(text);
         let mut record = Record::new_note_with_title(parsed.title, parsed.content);
+        let record_id = record.id;
+        let pending_paths = self.pending_attachment_paths();
 
         for tag in parsed.tags {
             record.tags.push(tag);
@@ -492,9 +571,269 @@ impl QuickAddWindow {
         cx.spawn(async move |_view, _cx| {
             if let Err(e) = store.create_record(record).await {
                 eprintln!("[QuickAdd] Failed to create record: {}", e);
+            } else if !pending_paths.is_empty() {
+                if let Err(e) = store
+                    .enqueue_record_attachment_import(record_id, pending_paths)
+                    .await
+                {
+                    eprintln!("[QuickAdd] Failed to import record attachments: {}", e);
+                }
             }
         })
         .detach();
+    }
+
+    fn import_pending_attachments(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let picker = pick_image_files(ParentWindowHint::from_window(window));
+        cx.spawn(async move |view, cx| {
+            let Some(paths) = picker.await else {
+                return;
+            };
+
+            let _ = view.update(cx, |this, cx| {
+                this.attachments_loading = true;
+                this.attachment_error = None;
+                cx.notify();
+            });
+
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = prepare_pending_attachments(paths);
+                let _ = tx.send_blocking(result);
+            });
+
+            let result = rx
+                .recv()
+                .await
+                .map_err(|err| format!("图片处理任务失败: {}", err))
+                .and_then(|result| result);
+
+            let _ = view.update(cx, |this, cx| {
+                this.attachments_loading = false;
+                match result {
+                    Ok(mut attachments) => {
+                        this.pending_attachments.append(&mut attachments);
+                        this.attachment_error = None;
+                        this.sync_session_state(cx);
+                    }
+                    Err(err) => {
+                        this.attachment_error = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.pending_attachments.len() {
+            let removed = self.pending_attachments.remove(idx);
+            if self
+                .active_attachment_preview
+                .as_ref()
+                .is_some_and(|preview| preview.path == removed.path)
+            {
+                self.active_attachment_preview = None;
+            }
+            self.sync_session_state(cx);
+            cx.notify();
+        }
+    }
+
+    fn open_pending_attachment_preview(
+        &mut self,
+        preview: PendingAttachment,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_attachment_preview = Some(preview);
+        cx.notify();
+    }
+
+    fn close_pending_attachment_preview(&mut self, cx: &mut Context<Self>) {
+        self.active_attachment_preview = None;
+        cx.notify();
+    }
+
+    fn render_pending_attachment_card(
+        &self,
+        idx: usize,
+        attachment: &PendingAttachment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (preview_width, preview_height) = attachment_preview_size(attachment);
+        let can_preview = attachment.preview_image.is_some();
+        let preview_attachment = attachment.clone();
+
+        h_flex()
+            .id(("quick-add-pending-attachment", idx))
+            .gap(px(4.0))
+            .items_center()
+            .px(px(4.0))
+            .py(px(4.0))
+            .border_1()
+            .border_color(rgb(0xf0f0f0))
+            .rounded(px(999.0))
+            .bg(rgb(0xfcfcfc))
+            .when(can_preview, |el| el.cursor_pointer())
+            .when(can_preview, |el| {
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        this.open_pending_attachment_preview(preview_attachment.clone(), cx);
+                        cx.stop_propagation();
+                    }),
+                )
+            })
+            .child(
+                attachment
+                    .preview_image
+                    .clone()
+                    .map(|image| {
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(img(image).w(preview_width).h(preview_height))
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|| {
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(0xf5f5f5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(rgb(0x999999))
+                            .child("图")
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .cursor_pointer()
+                    .px(px(2.0))
+                    .text_xs()
+                    .text_color(rgb(0x999999))
+                    .hover(|style| style.text_color(rgb(0xff4d4f)))
+                    .child("×")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                            this.remove_pending_attachment(idx, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_pending_attachment_lightbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let preview = self.active_attachment_preview.as_ref()?;
+        let image = preview.preview_image.clone()?;
+        let meta = format_attachment_meta(preview);
+        let (lightbox_width, lightbox_height) = attachment_lightbox_size(preview);
+
+        Some(
+            div()
+                .id("quick-add-pending-attachment-lightbox")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000061))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.close_pending_attachment_preview(cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(
+                    v_flex()
+                        .w(px(960.0))
+                        .max_w(relative(0.9))
+                        .gap(px(12.0))
+                        .p(px(16.0))
+                        .rounded(px(14.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .shadow_lg()
+                        .cursor_default()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .gap(px(12.0))
+                                .child(
+                                    v_flex()
+                                        .gap(px(4.0))
+                                        .min_w(px(0.0))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0x262626))
+                                                .child(preview.file_name.clone()),
+                                        )
+                                        .child(
+                                            div().text_sm().text_color(rgb(0x666666)).child(meta),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(8.0))
+                                        .hover(|style| style.bg(rgb(0xf5f5f5)))
+                                        .child("关闭")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                |this, _event: &MouseDownEvent, _window, cx| {
+                                                    this.close_pending_attachment_preview(cx);
+                                                    cx.stop_propagation();
+                                                },
+                                            ),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .min_h(px(240.0))
+                                .max_h(px(760.0))
+                                .py(px(8.0))
+                                .rounded(px(10.0))
+                                .bg(rgb(0xf5f5f5))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .overflow_hidden()
+                                .child(img(image).w(lightbox_width).h(lightbox_height)),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_submit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -584,6 +923,28 @@ impl QuickAddWindow {
             .child(self.render_submit_button(cx))
             .child(self.render_mode_switch_button(next_mode, cx))
     }
+
+    fn render_inline_attachment_trigger(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("quick-add-inline-attachment-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(28.0))
+            .h(px(28.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(0xf5f5f5)))
+            .child(
+                gpui_component::Icon::new(IconName::Plus)
+                    .size(px(14.0))
+                    .text_color(rgb(0x595959)),
+            )
+            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                this.import_pending_attachments(window, cx);
+                cx.stop_propagation();
+            }))
+    }
 }
 
 impl Focusable for QuickAddWindow {
@@ -594,6 +955,7 @@ impl Focusable for QuickAddWindow {
 
 impl Render for QuickAddWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_window_size(window, cx);
         self.input_state
             .update(cx, |input, cx| input.focus(window, cx));
 
@@ -660,6 +1022,7 @@ impl Render for QuickAddWindow {
             .child(
                 div()
                     .rounded(px(12.0))
+                    .w_full()
                     .border_1()
                     .border_color(
                         feedback_style
@@ -670,8 +1033,43 @@ impl Render for QuickAddWindow {
                         .map(|(_, bg_color, _, _)| bg_color)
                         .unwrap_or_else(transparent_white))
                     .p(px(2.0))
-                    .child(Input::new(&self.input_state)),
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .child(Input::new(&self.input_state).flex_1()),
+                            )
+                            .child(self.render_inline_attachment_trigger(cx)),
+                    ),
             )
+            .when(self.attachments_loading, |el| {
+                el.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x999999))
+                        .child("正在处理图片…"),
+                )
+            })
+            .when_some(self.attachment_error.clone(), |el, err| {
+                el.child(div().text_sm().text_color(rgb(0xff4d4f)).child(err))
+            })
+            .when(!self.pending_attachments.is_empty(), |el| {
+                el.child(
+                    h_flex().gap(px(8.0)).flex_wrap().children(
+                        self.pending_attachments
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, attachment)| {
+                                self.render_pending_attachment_card(idx, attachment, cx)
+                            }),
+                    ),
+                )
+            })
             .children(self.render_feedback_message())
             .child(
                 div()
@@ -682,5 +1080,9 @@ impl Render for QuickAddWindow {
                     .child(self.render_mode_switcher(cx)),
             )
             .child(self.render_shortcut_hints())
+            .when_some(
+                self.render_pending_attachment_lightbox(cx),
+                |el, overlay| el.child(overlay),
+            )
     }
 }
