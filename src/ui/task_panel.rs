@@ -42,6 +42,28 @@ const MATRIX_COLUMN_GAP: Pixels = px(8.0);
 const MIN_VISIBLE_QUADRANT_WIDTH: Pixels = px(280.0);
 const TASK_CARD_TITLE_LIMIT: usize = 24;
 const TASK_CARD_PREVIEW_LIMIT: usize = 44;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TaskFocusPreset {
+    None,
+    DueToday,
+    DueTomorrow,
+    Overdue,
+    HighPriorityOpen,
+}
+
+impl TaskFocusPreset {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "全部任务",
+            Self::DueToday => "今天到期",
+            Self::DueTomorrow => "明天到期",
+            Self::Overdue => "已逾期",
+            Self::HighPriorityOpen => "高优先级未完成",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskView {
     List,
@@ -177,6 +199,7 @@ pub struct TaskPanel {
     matrix_stack_scroll_handle: ScrollHandle,
     pending_stack_scroll_target: Option<usize>,
     priority_filter: PriorityFilter,
+    focus_preset: TaskFocusPreset,
     selected_tags: HashSet<String>,
     available_tags: Vec<String>,
     tag_filter_mode: TagFilterMode,
@@ -247,6 +270,7 @@ impl TaskPanel {
             matrix_stack_scroll_handle: ScrollHandle::new(),
             pending_stack_scroll_target: None,
             priority_filter: PriorityFilter::All,
+            focus_preset: TaskFocusPreset::None,
             selected_tags: HashSet::new(),
             available_tags: Vec::new(),
             tag_filter_mode: TagFilterMode::And,
@@ -316,6 +340,19 @@ impl TaskPanel {
         self.load_tasks(cx);
     }
 
+    pub fn apply_focus_preset(
+        &mut self,
+        preset: TaskFocusPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_preset = preset;
+        self.current_view = TaskView::List;
+        self.show_completed = false;
+        self.sync_matrix_layout_mode(window, cx, false);
+        cx.notify();
+    }
+
     fn handle_sidebar_save(
         &mut self,
         payload: &crate::ui::task_detail_sidebar::SavePayload,
@@ -380,9 +417,27 @@ impl TaskPanel {
             .iter()
             .filter(|t| self.priority_filter.matches(t.priority.clone()))
             .filter(|t| t.completed_at.is_none() || self.show_completed)
+            .filter(|t| self.matches_focus_preset(t))
             .filter(|t| self.matches_tag_filter(t))
             .cloned()
             .collect()
+    }
+
+    fn matches_focus_preset(&self, task: &Record) -> bool {
+        let today = Local::now().date_naive();
+        let tomorrow = today + Duration::days(1);
+        let is_open = task.completed_at.is_none();
+        let due_local = task.due_date.map(|dt| dt.with_timezone(&Local).date_naive());
+
+        match self.focus_preset {
+            TaskFocusPreset::None => true,
+            TaskFocusPreset::DueToday => is_open && due_local == Some(today),
+            TaskFocusPreset::DueTomorrow => is_open && due_local == Some(tomorrow),
+            TaskFocusPreset::Overdue => is_open && due_local.is_some_and(|due| due < today),
+            TaskFocusPreset::HighPriorityOpen => {
+                is_open && matches!(task.priority, Some(Priority::High))
+            }
+        }
     }
 
     fn matches_tag_filter(&self, task: &Record) -> bool {
@@ -1662,6 +1717,30 @@ impl TaskPanel {
         v_flex()
             .w_full()
             .gap(px(8.0))
+            .when(self.focus_preset != TaskFocusPreset::None, |el| {
+                el.child(
+                    h_flex()
+                        .gap(px(8.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(px(999.0))
+                                .bg(rgb(0xe6f4ff))
+                                .text_color(rgb(0x1677ff))
+                                .text_sm()
+                                .child(format!("首页筛选：{}", self.focus_preset.label())),
+                        )
+                        .child(
+                            Button::new("clear-task-focus-preset")
+                                .child("清除")
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.apply_focus_preset(TaskFocusPreset::None, window, cx);
+                                })),
+                        ),
+                )
+            })
             .child(self.render_view_switcher(cx))
             .child(self.render_priority_filter(cx))
     }
@@ -2268,12 +2347,7 @@ impl TaskPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let filtered_tasks: Vec<_> = self
-            .tasks
-            .iter()
-            .filter(|t| self.priority_filter.matches(t.priority.clone()))
-            .cloned()
-            .collect();
+        let filtered_tasks = self.get_filtered_tasks();
         let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = filtered_tasks
             .iter()
             .cloned()

@@ -663,20 +663,14 @@ impl MainView {
         cx: &mut Context<Self>,
     ) {
         match action {
-            DashboardAction::OpenTask(task_id) => {
+            DashboardAction::OpenTaskPreset(preset) => {
                 self.switch_to_panel(Panel::Tasks, window, cx);
                 self.task_panel.update(cx, |panel, cx| {
-                    panel.open_task(task_id, window, cx);
+                    panel.apply_focus_preset(preset, window, cx);
                 });
             }
-            DashboardAction::OpenRecord(record_id) => {
+            DashboardAction::OpenTimeline => {
                 self.switch_to_panel(Panel::Timeline, window, cx);
-                self.timeline_panel.update(cx, |panel, cx| {
-                    panel.open_record(record_id, window, cx);
-                });
-            }
-            DashboardAction::OpenTasksPanel => {
-                self.switch_to_panel(Panel::Tasks, window, cx);
             }
             DashboardAction::FilterByTag(tag) => {
                 self.switch_to_panel(Panel::Timeline, window, cx);

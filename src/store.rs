@@ -10,18 +10,41 @@ use crate::data_management::{
 use crate::db::Database;
 use crate::models::{Attachment, Person, Record, Tag, TaskStatus, TimelineQuery};
 use async_channel::{unbounded, Receiver, Sender};
+use chrono::{DateTime, Duration, Local};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct DashboardData {
-    pub in_progress: Vec<Record>,     // 进行中任务
-    pub pending_tasks: Vec<Record>,   // 待办任务（按四象限排序）
-    pub recent_records: Vec<Record>,  // 最近记录（用于回顾）
-    pub common_tags: Vec<String>,     // 常用标签
-    pub common_persons: Vec<String>,  // 常用人物
-    pub total_pending: usize,         // 待办总数
-    pub total_in_progress: usize,     // 进行中总数
-    pub total_completed_today: usize, // 今日完成数
+    pub in_progress: Vec<Record>,
+    pub today_tasks: Vec<Record>,
+    pub due_today_count: usize,
+    pub due_tomorrow_count: usize,
+    pub overdue_count: usize,
+    pub high_priority_open_count: usize,
+    pub total_open_count: usize,
+    pub total_in_progress: usize,
+    pub completed_today_count: usize,
+    pub recent_review_items: Vec<Record>,
+    pub common_tags: Vec<String>,
+    pub common_persons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StatsData {
+    pub total_open_count: usize,
+    pub total_in_progress: usize,
+    pub completed_today_count: usize,
+    pub overdue_count: usize,
+    pub due_today_count: usize,
+    pub due_tomorrow_count: usize,
+    pub high_priority_open_count: usize,
+    pub last_7_days_completed: Vec<DailyCompletedCount>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DailyCompletedCount {
+    pub label: String,
+    pub count: usize,
 }
 
 #[derive(Clone)]
@@ -77,6 +100,9 @@ pub enum StoreCommand {
     // 看板数据
     GetDashboard {
         respond_to: Sender<Result<DashboardData, String>>,
+    },
+    GetStats {
+        respond_to: Sender<Result<StatsData, String>>,
     },
     // 任务状态变更
     StartTask {
@@ -174,6 +200,87 @@ pub struct StoreRuntime {
     receiver: Receiver<StoreCommand>,
     db: Option<Database>,
     db_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DerivedTaskStats {
+    total_open_count: usize,
+    total_in_progress: usize,
+    completed_today_count: usize,
+    overdue_count: usize,
+    due_today_count: usize,
+    due_tomorrow_count: usize,
+    high_priority_open_count: usize,
+    last_7_days_completed: Vec<DailyCompletedCount>,
+}
+
+fn is_open_task(record: &Record) -> bool {
+    matches!(
+        record.status,
+        Some(TaskStatus::Todo) | Some(TaskStatus::InProgress)
+    ) && record.completed_at.is_none()
+}
+
+fn derive_task_stats(tasks: &[Record], now: DateTime<Local>) -> DerivedTaskStats {
+    let today = now.date_naive();
+    let tomorrow = today + Duration::days(1);
+    let mut last_7_days_completed = (0..7)
+        .map(|offset| {
+            let date = today - Duration::days((6 - offset) as i64);
+            DailyCompletedCount {
+                label: if date == today {
+                    "今天".to_string()
+                } else {
+                    date.format("%m/%d").to_string()
+                },
+                count: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut stats = DerivedTaskStats::default();
+
+    for task in tasks {
+        if is_open_task(task) {
+            stats.total_open_count += 1;
+
+            if task.status == Some(TaskStatus::InProgress) {
+                stats.total_in_progress += 1;
+            }
+
+            if matches!(task.priority, Some(crate::models::Priority::High)) {
+                stats.high_priority_open_count += 1;
+            }
+
+            if let Some(due_date) = task.due_date.map(|due| due.with_timezone(&Local).date_naive()) {
+                if due_date < today {
+                    stats.overdue_count += 1;
+                } else if due_date == today {
+                    stats.due_today_count += 1;
+                } else if due_date == tomorrow {
+                    stats.due_tomorrow_count += 1;
+                }
+            }
+        }
+
+        if let Some(completed_at) = task.completed_at {
+            let completed_date = completed_at.with_timezone(&Local).date_naive();
+            if completed_date == today {
+                stats.completed_today_count += 1;
+            }
+
+            let days_from_start = completed_date.signed_duration_since(today - Duration::days(6));
+            if (0..=6).contains(&days_from_start.num_days()) {
+                let idx = days_from_start.num_days() as usize;
+                if let Some(bucket) = last_7_days_completed.get_mut(idx) {
+                    bucket.count += 1;
+                }
+            }
+        }
+    }
+
+    stats.last_7_days_completed = last_7_days_completed;
+    stats
 }
 
 impl StoreRuntime {
@@ -311,6 +418,10 @@ impl StoreRuntime {
                 }
                 StoreCommand::GetDashboard { respond_to } => {
                     let result = self.handle_get_dashboard().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetStats { respond_to } => {
+                    let result = self.handle_get_stats().await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::StartTask { id, respond_to } => {
@@ -652,12 +763,16 @@ impl StoreRuntime {
                     .get_dashboard_in_progress_tasks()
                     .map_err(|e| format!("Database error: {}", e))?;
 
-                let pending_tasks = db
+                let today_tasks = db
                     .get_dashboard_pending_tasks()
-                    .map_err(|e| format!("Database error: {}", e))?;
+                    .map_err(|e| format!("Database error: {}", e))?
+                    .into_iter()
+                    .filter(|task| task.status == Some(TaskStatus::Todo))
+                    .take(5)
+                    .collect::<Vec<_>>();
 
-                let recent_records = db
-                    .get_dashboard_recent_records(20)
+                let recent_review_items = db
+                    .get_dashboard_recent_records(2)
                     .map_err(|e| format!("Database error: {}", e))?;
 
                 let common_tags = db
@@ -668,27 +783,43 @@ impl StoreRuntime {
                     .get_dashboard_common_persons(5)
                     .map_err(|e| format!("Database error: {}", e))?;
 
-                let total_completed_today = tasks
-                    .iter()
-                    .filter(|t| {
-                        t.completed_at
-                            .map(|dt| {
-                                let today = chrono::Local::now().date_naive();
-                                dt.with_timezone(&chrono::Local).date_naive() == today
-                            })
-                            .unwrap_or(false)
-                    })
-                    .count();
+                let stats = derive_task_stats(&tasks, Local::now());
 
                 Ok(DashboardData {
-                    total_pending: pending_tasks.len(),
-                    total_in_progress: in_progress.len(),
-                    total_completed_today,
                     in_progress,
-                    pending_tasks,
-                    recent_records,
+                    today_tasks,
+                    due_today_count: stats.due_today_count,
+                    due_tomorrow_count: stats.due_tomorrow_count,
+                    overdue_count: stats.overdue_count,
+                    high_priority_open_count: stats.high_priority_open_count,
+                    total_open_count: stats.total_open_count,
+                    total_in_progress: stats.total_in_progress,
+                    completed_today_count: stats.completed_today_count,
+                    recent_review_items,
                     common_tags,
                     common_persons,
+                })
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_stats(&self) -> Result<StatsData, String> {
+        match &self.db {
+            Some(db) => {
+                let tasks = db
+                    .get_tasks(false)
+                    .map_err(|e| format!("Database error: {}", e))?;
+                let derived = derive_task_stats(&tasks, Local::now());
+                Ok(StatsData {
+                    total_open_count: derived.total_open_count,
+                    total_in_progress: derived.total_in_progress,
+                    completed_today_count: derived.completed_today_count,
+                    overdue_count: derived.overdue_count,
+                    due_today_count: derived.due_today_count,
+                    due_tomorrow_count: derived.due_tomorrow_count,
+                    high_priority_open_count: derived.high_priority_open_count,
+                    last_7_days_completed: derived.last_7_days_completed,
                 })
             }
             None => Err("Database not initialized".to_string()),
@@ -1210,6 +1341,17 @@ impl Store {
             .unwrap_or_else(|_| Err("Failed to get dashboard".to_string()))
     }
 
+    pub async fn get_stats(&self) -> Result<StatsData, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetStats { respond_to: tx })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get stats".to_string()))
+    }
+
     pub async fn get_attachments(&self, record_id: uuid::Uuid) -> Result<Vec<Attachment>, String> {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
@@ -1551,5 +1693,103 @@ impl Store {
             })
             .await;
         rx.recv().await.unwrap_or(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_task_stats;
+    use crate::models::{Priority, Record, RecordType, TaskStatus};
+    use chrono::{Duration, Local, TimeZone, Utc};
+    use uuid::Uuid;
+
+    fn make_task(
+        status: TaskStatus,
+        priority: Option<Priority>,
+        due_offset_days: Option<i64>,
+        completed_offset_days: Option<i64>,
+        now_local: chrono::DateTime<Local>,
+    ) -> Record {
+        let now_utc = now_local.with_timezone(&Utc);
+        let due_date = due_offset_days.map(|offset| {
+            now_local
+                .date_naive()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .single()
+                .unwrap()
+                .checked_add_signed(Duration::days(offset))
+                .unwrap()
+                .with_timezone(&Utc)
+        });
+        let completed_at = completed_offset_days
+            .map(|offset| now_local + Duration::days(offset))
+            .map(|dt| dt.with_timezone(&Utc));
+
+        Record {
+            id: Uuid::new_v4(),
+            title: Some("task".to_string()),
+            content: String::new(),
+            priority,
+            status: Some(status),
+            created_at: now_utc,
+            updated_at: now_utc,
+            started_at: None,
+            completed_at,
+            scheduled_for: None,
+            due_date,
+            notified_at: None,
+            cancelled_reason: None,
+            record_type: RecordType::Task,
+            tags: Vec::new(),
+            persons: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn derive_task_stats_counts_open_risk_and_completion_buckets() {
+        let now = Local.with_ymd_and_hms(2026, 4, 8, 9, 30, 0).unwrap();
+        let tasks = vec![
+            make_task(TaskStatus::Todo, Some(Priority::High), Some(0), None, now),
+            make_task(TaskStatus::InProgress, Some(Priority::Medium), Some(1), None, now),
+            make_task(TaskStatus::Todo, Some(Priority::Low), Some(-1), None, now),
+            make_task(TaskStatus::Done, Some(Priority::High), Some(0), Some(0), now),
+            make_task(TaskStatus::Done, Some(Priority::Medium), None, Some(-3), now),
+            make_task(TaskStatus::Cancelled, Some(Priority::High), Some(2), Some(-6), now),
+        ];
+
+        let stats = derive_task_stats(&tasks, now);
+
+        assert_eq!(stats.total_open_count, 3);
+        assert_eq!(stats.total_in_progress, 1);
+        assert_eq!(stats.due_today_count, 1);
+        assert_eq!(stats.due_tomorrow_count, 1);
+        assert_eq!(stats.overdue_count, 1);
+        assert_eq!(stats.high_priority_open_count, 1);
+        assert_eq!(stats.completed_today_count, 1);
+        assert_eq!(stats.last_7_days_completed.len(), 7);
+        assert_eq!(stats.last_7_days_completed[0].count, 1);
+        assert_eq!(stats.last_7_days_completed[3].count, 1);
+        assert_eq!(stats.last_7_days_completed[6].count, 1);
+    }
+
+    #[test]
+    fn derive_task_stats_excludes_done_and_cancelled_from_open_counts() {
+        let now = Local.with_ymd_and_hms(2026, 4, 8, 9, 30, 0).unwrap();
+        let tasks = vec![
+            make_task(TaskStatus::Done, Some(Priority::High), Some(-2), Some(-1), now),
+            make_task(TaskStatus::Cancelled, Some(Priority::High), Some(0), Some(0), now),
+        ];
+
+        let stats = derive_task_stats(&tasks, now);
+
+        assert_eq!(stats.total_open_count, 0);
+        assert_eq!(stats.total_in_progress, 0);
+        assert_eq!(stats.due_today_count, 0);
+        assert_eq!(stats.due_tomorrow_count, 0);
+        assert_eq!(stats.overdue_count, 0);
+        assert_eq!(stats.high_priority_open_count, 0);
+        assert_eq!(stats.completed_today_count, 1);
     }
 }
