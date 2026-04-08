@@ -1,3 +1,6 @@
+use crate::data_management::{
+    AttachmentHealthSummary, AttachmentListItem, AttachmentStorageBackend, StorageUsageSummary,
+};
 use crate::models::{
     Attachment, AttachmentStatus, Person, Priority, Record, RecordType, Tag, TaskStatus,
 };
@@ -50,6 +53,10 @@ impl Database {
         db.init_tables()?;
         db.run_migrations()?;
         Ok(db)
+    }
+
+    pub fn schema_version(&self) -> i64 {
+        SCHEMA_VERSION
     }
 
     fn init_tables(&self) -> Result<()> {
@@ -645,6 +652,105 @@ impl Database {
         Ok(result)
     }
 
+    pub fn get_storage_usage_summary(&self) -> Result<StorageUsageSummary> {
+        let text_bytes: i64 = self.conn.query_row(
+            "SELECT
+                COALESCE(SUM(length(CAST(COALESCE(title, '') AS BLOB))), 0) +
+                COALESCE(SUM(length(CAST(COALESCE(content, '') AS BLOB))), 0) +
+                COALESCE(SUM(length(CAST(COALESCE(cancelled_reason, '') AS BLOB))), 0)
+             FROM records",
+            [],
+            |row| row.get(0),
+        )?;
+        let tag_text_bytes: i64 = self.conn.query_row(
+            "SELECT
+                COALESCE(SUM(length(CAST(COALESCE(name, '') AS BLOB))), 0) +
+                COALESCE(SUM(length(CAST(COALESCE(color, '') AS BLOB))), 0)
+             FROM tags",
+            [],
+            |row| row.get(0),
+        )?;
+        let person_text_bytes: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(length(CAST(COALESCE(name, '') AS BLOB))), 0)
+             FROM persons",
+            [],
+            |row| row.get(0),
+        )?;
+        let attachment_bytes: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(
+                CASE
+                    WHEN status = 'ready' AND file_data IS NOT NULL THEN length(file_data)
+                    WHEN status = 'ready' THEN file_size
+                    ELSE 0
+                END
+             ), 0)
+             FROM attachments",
+            [],
+            |row| row.get(0),
+        )?;
+        let record_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM records", [], |row| row.get(0))?;
+        let tag_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))?;
+        let person_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?;
+        let attachment_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))?;
+
+        let text_bytes = text_bytes + tag_text_bytes + person_text_bytes;
+        let total_bytes = text_bytes + attachment_bytes;
+
+        Ok(StorageUsageSummary {
+            text_bytes: text_bytes.max(0) as u64,
+            attachment_bytes: attachment_bytes.max(0) as u64,
+            total_bytes: total_bytes.max(0) as u64,
+            record_count: record_count.max(0) as usize,
+            tag_count: tag_count.max(0) as usize,
+            person_count: person_count.max(0) as usize,
+            attachment_count: attachment_count.max(0) as usize,
+        })
+    }
+
+    pub fn get_attachment_health_summary(&self) -> Result<AttachmentHealthSummary> {
+        let ready_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE status = 'ready'",
+            [],
+            |row| row.get(0),
+        )?;
+        let processing_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE status = 'processing'",
+            [],
+            |row| row.get(0),
+        )?;
+        let failed_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE status = 'failed'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(AttachmentHealthSummary {
+            ready_count: ready_count.max(0) as usize,
+            processing_count: processing_count.max(0) as usize,
+            failed_count: failed_count.max(0) as usize,
+        })
+    }
+
+    pub fn clear_business_data(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM attachments", [])?;
+        tx.execute("DELETE FROM record_tags", [])?;
+        tx.execute("DELETE FROM record_persons", [])?;
+        tx.execute("DELETE FROM tags", [])?;
+        tx.execute("DELETE FROM persons", [])?;
+        tx.execute("DELETE FROM records", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_pending_reminders(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
@@ -832,6 +938,20 @@ impl Database {
         })
     }
 
+    pub fn upsert_tag_metadata(&self, tag: &Tag) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tags (name, color, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET
+                color = COALESCE(tags.color, excluded.color)",
+            [
+                &tag.name as &dyn rusqlite::ToSql,
+                &tag.color as &dyn rusqlite::ToSql,
+                &tag.created_at.to_rfc3339() as &dyn rusqlite::ToSql,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn get_tags(&self) -> Result<Vec<Tag>> {
         let mut stmt = self
             .conn
@@ -932,6 +1052,15 @@ impl Database {
             name: name.to_string(),
             created_at: now,
         })
+    }
+
+    pub fn upsert_person_metadata(&self, person: &Person) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO persons (name, created_at) VALUES (?1, ?2)
+             ON CONFLICT(name) DO NOTHING",
+            [&person.name, &person.created_at.to_rfc3339()],
+        )?;
+        Ok(())
     }
 
     pub fn get_persons(&self) -> Result<Vec<Person>> {
@@ -1055,6 +1184,70 @@ impl Database {
         self.create_attachment_with_data(attachment, None)
     }
 
+    pub fn get_all_attachments_metadata(&self) -> Result<Vec<Attachment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, record_id, file_name, file_path, file_size, mime_type, width, height, status, error_message, source_path, created_at
+             FROM attachments
+             ORDER BY created_at DESC",
+        )?;
+
+        let attachments = stmt.query_map([], |row| self.attachment_from_row(row))?;
+        attachments.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_all_attachment_items(&self) -> Result<Vec<AttachmentListItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                a.id, a.record_id, a.file_name, a.file_path, a.file_size, a.mime_type,
+                a.width, a.height, a.status, a.error_message, a.source_path, a.created_at,
+                CASE
+                    WHEN a.file_data IS NOT NULL THEN length(a.file_data)
+                    WHEN a.status = 'ready' THEN a.file_size
+                    ELSE 0
+                END AS payload_bytes,
+                CASE
+                    WHEN a.file_data IS NOT NULL THEN 'db_blob'
+                    WHEN a.status = 'ready' THEN 'file_path_fallback'
+                    ELSE 'no_payload'
+                END AS storage_backend,
+                r.title,
+                r.content,
+                r.record_type
+             FROM attachments a
+             JOIN records r ON r.id = a.record_id
+             ORDER BY a.created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let attachment = self.attachment_from_row(row)?;
+            let payload_bytes: i64 = row.get(12)?;
+            let storage_backend: String = row.get(13)?;
+            let title: Option<String> = row.get(14)?;
+            let content: String = row.get(15)?;
+            let record_type_str: String = row.get(16)?;
+            let record_type = match record_type_str.as_str() {
+                "note" => RecordType::Note,
+                "event" => RecordType::Event,
+                "idea" => RecordType::Idea,
+                _ => RecordType::Task,
+            };
+
+            Ok(AttachmentListItem {
+                attachment,
+                record_title: display_title_from_fields(record_type.clone(), title, content),
+                record_type,
+                payload_bytes: payload_bytes.max(0) as usize,
+                storage_backend: match storage_backend.as_str() {
+                    "db_blob" => AttachmentStorageBackend::DatabaseBlob,
+                    "file_path_fallback" => AttachmentStorageBackend::FilePathFallback,
+                    _ => AttachmentStorageBackend::NoPayload,
+                },
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>>>()
+    }
+
     pub fn mark_attachment_ready(&self, attachment: &Attachment, file_data: &[u8]) -> Result<()> {
         self.create_attachment_with_data(attachment, Some(file_data))
     }
@@ -1079,35 +1272,7 @@ impl Database {
         )?;
 
         let attachments = stmt.query_map([&record_id.to_string()], |row| {
-            let id: String = row.get(0)?;
-            let record_id: String = row.get(1)?;
-            let file_name: String = row.get(2)?;
-            let file_path: String = row.get(3)?;
-            let file_size: i64 = row.get(4)?;
-            let mime_type: String = row.get(5)?;
-            let width: Option<i64> = row.get(6)?;
-            let height: Option<i64> = row.get(7)?;
-            let status: String = row.get(8)?;
-            let error_message: Option<String> = row.get(9)?;
-            let source_path: Option<String> = row.get(10)?;
-            let created_at_str: String = row.get(11)?;
-
-            Ok(Attachment {
-                id,
-                record_id,
-                file_name,
-                file_path,
-                file_size: file_size as usize,
-                mime_type,
-                width: width.unwrap_or_default() as u32,
-                height: height.unwrap_or_default() as u32,
-                created_at: DateTime::parse_from_rfc3339(&created_at_str)
-                    .unwrap_or_else(|_| chrono::Local::now().into())
-                    .with_timezone(&Utc),
-                status: AttachmentStatus::from_db(&status),
-                error_message,
-                source_path,
-            })
+            self.attachment_from_row(row)
         })?;
 
         attachments.collect::<Result<Vec<_>>>()
@@ -1154,6 +1319,14 @@ impl Database {
         Ok(())
     }
 
+    pub fn delete_attachments_for_record(&self, record_id: Uuid) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM attachments WHERE record_id = ?1",
+            [&record_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn add_tag_to_record(&self, record_id: Uuid, tag_id: i64) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO record_tags (record_id, tag_id) VALUES (?1, ?2)",
@@ -1184,6 +1357,38 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    fn attachment_from_row(&self, row: &rusqlite::Row) -> Result<Attachment> {
+        let id: String = row.get(0)?;
+        let record_id: String = row.get(1)?;
+        let file_name: String = row.get(2)?;
+        let file_path: String = row.get(3)?;
+        let file_size: i64 = row.get(4)?;
+        let mime_type: String = row.get(5)?;
+        let width: Option<i64> = row.get(6)?;
+        let height: Option<i64> = row.get(7)?;
+        let status: String = row.get(8)?;
+        let error_message: Option<String> = row.get(9)?;
+        let source_path: Option<String> = row.get(10)?;
+        let created_at_str: String = row.get(11)?;
+
+        Ok(Attachment {
+            id,
+            record_id,
+            file_name,
+            file_path,
+            file_size: file_size as usize,
+            mime_type,
+            width: width.unwrap_or_default() as u32,
+            height: height.unwrap_or_default() as u32,
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc),
+            status: AttachmentStatus::from_db(&status),
+            error_message,
+            source_path,
+        })
     }
 
     fn row_to_record(&self, row: &rusqlite::Row) -> Result<Record> {
@@ -1265,6 +1470,31 @@ impl Database {
         record.persons = self.get_record_persons(record.id)?;
         Ok(())
     }
+}
+
+fn display_title_from_fields(
+    record_type: RecordType,
+    title: Option<String>,
+    content: String,
+) -> String {
+    let record = Record {
+        id: Uuid::nil(),
+        title,
+        content,
+        priority: None,
+        status: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        completed_at: None,
+        scheduled_for: None,
+        due_date: None,
+        notified_at: None,
+        cancelled_reason: None,
+        record_type,
+        tags: Vec::new(),
+        persons: Vec::new(),
+    };
+    record.display_title()
 }
 
 #[cfg(test)]

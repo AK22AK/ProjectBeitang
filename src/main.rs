@@ -5,6 +5,7 @@ use beitang::config::ShortcutConfig;
 use beitang::file_dialog_prewarm::prewarm_file_dialog;
 use beitang::store::{create_store, Store};
 use beitang::ui::dashboard::Dashboard;
+use beitang::ui::data_management::DataManagementPanel;
 use beitang::ui::floating_window::{
     quick_add_window_size, QuickAddDestination, QuickAddSessionController, QuickAddSessionStatus,
     QuickAddWindow,
@@ -61,6 +62,7 @@ impl MainWindowController {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
+    DataManagement,
     General,
     Shortcuts,
     About,
@@ -69,6 +71,7 @@ enum SettingsSection {
 impl SettingsSection {
     fn label(self) -> &'static str {
         match self {
+            Self::DataManagement => "数据管理",
             Self::General => "通用",
             Self::Shortcuts => "快捷键",
             Self::About => "关于",
@@ -77,6 +80,7 @@ impl SettingsSection {
 
     fn title(self) -> &'static str {
         match self {
+            Self::DataManagement => "数据管理",
             Self::General => "通用",
             Self::Shortcuts => "快捷键",
             Self::About => "关于",
@@ -85,18 +89,20 @@ impl SettingsSection {
 
     fn description(self) -> &'static str {
         match self {
+            Self::DataManagement => "本地数据统计、附件健康状态和导入导出能力统一放在这里。",
             Self::General => "应用级偏好、显示方式等通用设置将在这里集中管理。",
             Self::Shortcuts => "这里区分展示应用内快捷键和全局快捷键，避免混淆触发范围。",
             Self::About => "版本信息、更新说明和相关说明将在这里统一展示。",
         }
     }
 
-    fn is_implemented(self) -> bool {
-        matches!(self, Self::Shortcuts)
-    }
-
-    fn all() -> [Self; 3] {
-        [Self::General, Self::Shortcuts, Self::About]
+    fn all() -> [Self; 4] {
+        [
+            Self::DataManagement,
+            Self::General,
+            Self::Shortcuts,
+            Self::About,
+        ]
     }
 }
 
@@ -595,6 +601,7 @@ pub struct MainView {
     current_panel: Panel,
     current_settings_section: SettingsSection,
     dashboard_panel: Entity<Dashboard>,
+    data_management_panel: Entity<DataManagementPanel>,
     search_panel: Entity<SearchPanel>,
     task_panel: Entity<TaskPanel>,
     timeline_panel: Entity<Timeline>,
@@ -614,6 +621,8 @@ impl MainView {
     ) -> Self {
         let store_for_panels = store.clone();
         let dashboard_panel = cx.new(|cx| Dashboard::new(store_for_panels.clone(), window, cx));
+        let data_management_panel =
+            cx.new(|cx| DataManagementPanel::new(store_for_panels.clone(), window, cx));
         let search_panel = cx.new(|cx| SearchPanel::new(store_for_panels.clone(), window, cx));
         let task_panel = cx.new(|cx| TaskPanel::new(store_for_panels.clone(), window, cx));
         let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels.clone(), window, cx));
@@ -625,8 +634,9 @@ impl MainView {
 
         Self {
             current_panel: initial_panel,
-            current_settings_section: SettingsSection::General,
+            current_settings_section: SettingsSection::DataManagement,
             dashboard_panel,
+            data_management_panel,
             search_panel,
             task_panel,
             timeline_panel,
@@ -662,7 +672,9 @@ impl MainView {
 
     pub fn switch_to_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
         if panel == Panel::Settings && self.current_panel != Panel::Settings {
-            self.current_settings_section = SettingsSection::General;
+            self.current_settings_section = SettingsSection::DataManagement;
+            self.data_management_panel
+                .update(cx, |panel, cx| panel.refresh(cx));
         }
 
         if self.current_panel != panel {
@@ -743,6 +755,10 @@ impl MainView {
             )
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 this.current_settings_section = section;
+                if section == SettingsSection::DataManagement {
+                    this.data_management_panel
+                        .update(cx, |panel, cx| panel.refresh(cx));
+                }
                 cx.notify();
             }))
     }
@@ -882,11 +898,17 @@ impl MainView {
     }
 
     fn render_settings_content(&self) -> impl IntoElement {
-        if self.current_settings_section.is_implemented() {
-            self.render_shortcuts_settings().into_any_element()
-        } else {
-            self.render_settings_placeholder(self.current_settings_section)
-                .into_any_element()
+        match self.current_settings_section {
+            SettingsSection::DataManagement => {
+                self.data_management_panel.clone().into_any_element()
+            }
+            SettingsSection::General => self
+                .render_settings_placeholder(self.current_settings_section)
+                .into_any_element(),
+            SettingsSection::Shortcuts => self.render_shortcuts_settings().into_any_element(),
+            SettingsSection::About => self
+                .render_settings_placeholder(self.current_settings_section)
+                .into_any_element(),
         }
     }
 

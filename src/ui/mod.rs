@@ -1,5 +1,6 @@
 pub mod attachment_draft;
 pub mod dashboard;
+pub mod data_management;
 pub mod floating_window;
 pub mod note_panel;
 pub mod parsing;

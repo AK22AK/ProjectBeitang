@@ -5,10 +5,13 @@ use std::sync::{Mutex, OnceLock};
 
 use gpui::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+use rfd::AsyncFileDialog;
 
 type FileDialogFuture = Pin<Box<dyn Future<Output = Option<Vec<PathBuf>>> + Send>>;
+type SingleFileDialogFuture = Pin<Box<dyn Future<Output = Option<PathBuf>> + Send>>;
 
 static LAST_IMAGE_DIRECTORY: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static LAST_ARCHIVE_DIRECTORY: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 pub struct ParentWindowHint {
@@ -40,8 +43,55 @@ pub fn pick_image_files(parent_window_hint: Option<ParentWindowHint>) -> FileDia
     }
 }
 
+pub fn pick_archive_file(parent_window_hint: Option<ParentWindowHint>) -> SingleFileDialogFuture {
+    let mut dialog = AsyncFileDialog::new().add_filter("Beitang Export", &["zip"]);
+    if let Some(directory) = last_archive_directory() {
+        dialog = dialog.set_directory(directory);
+    }
+    if let Some(parent_window_hint) = parent_window_hint {
+        dialog = dialog.set_parent(&RawParentWindow(parent_window_hint));
+    }
+
+    Box::pin(async move {
+        let handle = dialog.pick_file().await?;
+        let path = handle.path().to_path_buf();
+        update_last_archive_directory(&path);
+        Some(path)
+    })
+}
+
+pub fn save_archive_file(
+    parent_window_hint: Option<ParentWindowHint>,
+    file_name: &str,
+) -> SingleFileDialogFuture {
+    let mut dialog = AsyncFileDialog::new()
+        .add_filter("Beitang Export", &["zip"])
+        .set_file_name(file_name);
+    if let Some(directory) = last_archive_directory() {
+        dialog = dialog.set_directory(directory);
+    }
+    if let Some(parent_window_hint) = parent_window_hint {
+        dialog = dialog.set_parent(&RawParentWindow(parent_window_hint));
+    }
+
+    Box::pin(async move {
+        let handle = dialog.save_file().await?;
+        let path = handle.path().to_path_buf();
+        update_last_archive_directory(&path);
+        Some(path)
+    })
+}
+
 fn last_image_directory() -> Option<PathBuf> {
     LAST_IMAGE_DIRECTORY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+fn last_archive_directory() -> Option<PathBuf> {
+    LAST_ARCHIVE_DIRECTORY
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
@@ -59,6 +109,37 @@ fn update_last_image_directory(paths: &[PathBuf]) {
 
     if let Ok(mut guard) = LAST_IMAGE_DIRECTORY.get_or_init(|| Mutex::new(None)).lock() {
         *guard = Some(parent);
+    }
+}
+
+fn update_last_archive_directory(path: &Path) {
+    let Some(parent) = path.parent().map(Path::to_path_buf) else {
+        return;
+    };
+
+    if let Ok(mut guard) = LAST_ARCHIVE_DIRECTORY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = Some(parent);
+    }
+}
+
+struct RawParentWindow(ParentWindowHint);
+
+impl HasWindowHandle for RawParentWindow {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0.raw_window_handle) })
+    }
+}
+
+impl HasDisplayHandle for RawParentWindow {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.0.raw_display_handle) })
     }
 }
 
@@ -175,9 +256,7 @@ mod macos {
 mod fallback {
     use super::{
         last_image_directory, update_last_image_directory, FileDialogFuture, ParentWindowHint,
-    };
-    use raw_window_handle::{
-        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
+        RawParentWindow,
     };
     use rfd::AsyncFileDialog;
     use std::path::PathBuf;
@@ -203,19 +282,5 @@ mod fallback {
             update_last_image_directory(&paths);
             Some(paths)
         })
-    }
-
-    struct RawParentWindow(ParentWindowHint);
-
-    impl HasWindowHandle for RawParentWindow {
-        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-            Ok(unsafe { WindowHandle::borrow_raw(self.0.raw_window_handle) })
-        }
-    }
-
-    impl HasDisplayHandle for RawParentWindow {
-        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-            Ok(unsafe { DisplayHandle::borrow_raw(self.0.raw_display_handle) })
-        }
     }
 }

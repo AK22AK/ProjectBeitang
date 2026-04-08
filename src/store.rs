@@ -2,6 +2,11 @@ use crate::attachment_image::{
     build_attachment_import_jobs, prepare_attachment_for_existing_id, prepare_image_attachments,
     PreparedImageAttachment,
 };
+use crate::data_management::{
+    app_data_dir, apply_import_archive, export_archive, preview_import_archive,
+    AttachmentHealthSummary, AttachmentListItem, ConflictResolution, ExportResult, ImportMode,
+    ImportPreview, ImportResult, StorageUsageSummary,
+};
 use crate::db::Database;
 use crate::models::{Attachment, Person, Record, Tag};
 use async_channel::{unbounded, Receiver, Sender};
@@ -135,16 +140,44 @@ pub enum StoreCommand {
         attachment_id: String,
         respond_to: Sender<Result<(), String>>,
     },
+    GetStorageUsageSummary {
+        respond_to: Sender<Result<StorageUsageSummary, String>>,
+    },
+    GetAttachmentHealthSummary {
+        respond_to: Sender<Result<AttachmentHealthSummary, String>>,
+    },
+    GetAllAttachments {
+        respond_to: Sender<Result<Vec<AttachmentListItem>, String>>,
+    },
+    ExportData {
+        destination: PathBuf,
+        respond_to: Sender<Result<ExportResult, String>>,
+    },
+    PreviewImport {
+        archive_path: PathBuf,
+        respond_to: Sender<Result<ImportPreview, String>>,
+    },
+    ApplyImport {
+        archive_path: PathBuf,
+        mode: ImportMode,
+        resolutions: Vec<ConflictResolution>,
+        respond_to: Sender<Result<ImportResult, String>>,
+    },
 }
 
 pub struct StoreRuntime {
     receiver: Receiver<StoreCommand>,
     db: Option<Database>,
+    db_path: Option<PathBuf>,
 }
 
 impl StoreRuntime {
     pub fn new(receiver: Receiver<StoreCommand>) -> Self {
-        Self { receiver, db: None }
+        Self {
+            receiver,
+            db: None,
+            db_path: None,
+        }
     }
 
     pub async fn run(&mut self, db_path: PathBuf) {
@@ -152,6 +185,7 @@ impl StoreRuntime {
         match Database::new(&db_path) {
             Ok(db) => {
                 self.db = Some(db);
+                self.db_path = Some(db_path.clone());
                 println!("[Store] Database initialized at {:?}", db_path);
             }
             Err(e) => {
@@ -349,6 +383,43 @@ impl StoreRuntime {
                     respond_to,
                 } => {
                     let result = self.handle_delete_attachment(attachment_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetStorageUsageSummary { respond_to } => {
+                    let result = self.handle_get_storage_usage_summary().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetAttachmentHealthSummary { respond_to } => {
+                    let result = self.handle_get_attachment_health_summary().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetAllAttachments { respond_to } => {
+                    let result = self.handle_get_all_attachments().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::ExportData {
+                    destination,
+                    respond_to,
+                } => {
+                    let result = self.handle_export_data(destination).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::PreviewImport {
+                    archive_path,
+                    respond_to,
+                } => {
+                    let result = self.handle_preview_import(archive_path).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::ApplyImport {
+                    archive_path,
+                    mode,
+                    resolutions,
+                    respond_to,
+                } => {
+                    let result = self
+                        .handle_apply_import(archive_path, mode, resolutions)
+                        .await;
                     let _ = respond_to.send(result).await;
                 }
             }
@@ -840,6 +911,67 @@ impl StoreRuntime {
             None => Err("Database not initialized".to_string()),
         }
     }
+
+    async fn handle_get_storage_usage_summary(&self) -> Result<StorageUsageSummary, String> {
+        match &self.db {
+            Some(db) => db
+                .get_storage_usage_summary()
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_attachment_health_summary(
+        &self,
+    ) -> Result<AttachmentHealthSummary, String> {
+        match &self.db {
+            Some(db) => db
+                .get_attachment_health_summary()
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_all_attachments(&self) -> Result<Vec<AttachmentListItem>, String> {
+        match &self.db {
+            Some(db) => db
+                .get_all_attachment_items()
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_export_data(&self, destination: PathBuf) -> Result<ExportResult, String> {
+        match &self.db {
+            Some(db) => export_archive(db, &destination),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_preview_import(&self, archive_path: PathBuf) -> Result<ImportPreview, String> {
+        match &self.db {
+            Some(db) => preview_import_archive(db, &archive_path),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_apply_import(
+        &self,
+        archive_path: PathBuf,
+        mode: ImportMode,
+        resolutions: Vec<ConflictResolution>,
+    ) -> Result<ImportResult, String> {
+        let backup_dir = self
+            .db_path
+            .as_ref()
+            .and_then(|db_path| db_path.parent().map(|path| path.join("backups")))
+            .unwrap_or_else(|| app_data_dir().join("backups"));
+
+        match &self.db {
+            Some(db) => apply_import_archive(db, &archive_path, mode, &resolutions, &backup_dir),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
 }
 
 pub fn create_store() -> (Store, StoreRuntime) {
@@ -1148,6 +1280,86 @@ impl Store {
             })
             .await;
         rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn get_storage_usage_summary(&self) -> Result<StorageUsageSummary, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetStorageUsageSummary { respond_to: tx })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get storage usage summary".to_string()))
+    }
+
+    pub async fn get_attachment_health_summary(&self) -> Result<AttachmentHealthSummary, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetAttachmentHealthSummary { respond_to: tx })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get attachment health summary".to_string()))
+    }
+
+    pub async fn get_all_attachments(&self) -> Result<Vec<AttachmentListItem>, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetAllAttachments { respond_to: tx })
+            .await;
+        rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn export_data(&self, destination: PathBuf) -> Result<ExportResult, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::ExportData {
+                destination,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to export data".to_string()))
+    }
+
+    pub async fn preview_import(&self, archive_path: PathBuf) -> Result<ImportPreview, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::PreviewImport {
+                archive_path,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to preview import".to_string()))
+    }
+
+    pub async fn apply_import(
+        &self,
+        archive_path: PathBuf,
+        mode: ImportMode,
+        resolutions: Vec<ConflictResolution>,
+    ) -> Result<ImportResult, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::ApplyImport {
+                archive_path,
+                mode,
+                resolutions,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to apply import".to_string()))
     }
 
     pub async fn start_task(&self, id: uuid::Uuid) -> Result<(), String> {
