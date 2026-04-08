@@ -163,6 +163,18 @@ impl Timeline {
         cx.notify();
     }
 
+    pub fn apply_filters(
+        &mut self,
+        tags: Vec<String>,
+        persons: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_tags = tags.into_iter().collect();
+        self.selected_persons = persons.into_iter().collect();
+        self.close_detail_sidebars(cx);
+        self.refresh_data(cx);
+    }
+
     fn load_data(&mut self, cx: &mut Context<Self>) {
         if self.is_loading || !self.has_more {
             return;
@@ -389,6 +401,24 @@ impl Timeline {
         cx.notify();
     }
 
+    pub fn open_record(&mut self, record_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(record) = self
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .cloned()
+        {
+            self.select_record(&record, window, cx);
+            return;
+        }
+
+        eprintln!(
+            "[Timeline] open_record could not find record {}, refreshing timeline",
+            record_id
+        );
+        self.refresh_data(cx);
+    }
+
     fn sync_open_detail_visibility(&mut self, cx: &mut Context<Self>) {
         let current_task_id = self.selected_task_id(cx);
         let current_record_id = self.selected_record_id(cx);
@@ -435,6 +465,7 @@ impl Timeline {
             .iter_mut()
             .find(|record| record.id.to_string() == payload.task_id)
         {
+            let previous_status = task.status.clone();
             metadata_changed = task.tags != payload.tags || task.persons != payload.persons;
             task.title = payload.title.clone();
             task.content = payload.content.clone();
@@ -445,18 +476,9 @@ impl Timeline {
             task.cancelled_reason = payload.cancel_reason.clone();
             task.tags = payload.tags.clone();
             task.persons = payload.persons.clone();
-            task.updated_at = chrono::Utc::now();
-
-            match payload.status {
-                TaskStatus::Done | TaskStatus::Cancelled => {
-                    if task.completed_at.is_none() {
-                        task.completed_at = Some(chrono::Utc::now());
-                    }
-                }
-                _ => {
-                    task.completed_at = None;
-                }
-            }
+            let now = chrono::Utc::now();
+            task.updated_at = now;
+            task.sync_task_lifecycle_fields(previous_status, now);
 
             updated_task = Some(task.clone());
         }

@@ -28,6 +28,7 @@ pub struct Record {
     pub status: Option<TaskStatus>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub scheduled_for: Option<DateTime<Utc>>,
     pub due_date: Option<DateTime<Utc>>,
@@ -135,6 +136,7 @@ impl Record {
             status: Some(TaskStatus::Todo),
             created_at: now,
             updated_at: now,
+            started_at: None,
             completed_at: None,
             scheduled_for: None,
             due_date: None,
@@ -159,6 +161,7 @@ impl Record {
             status: None,
             created_at: now,
             updated_at: now,
+            started_at: None,
             completed_at: None,
             scheduled_for: None,
             due_date: None,
@@ -181,6 +184,7 @@ impl Record {
             status: None,
             created_at: now,
             updated_at: now,
+            started_at: None,
             completed_at: None,
             scheduled_for: None,
             due_date: None,
@@ -204,6 +208,7 @@ impl Record {
             status: None,
             created_at: now,
             updated_at: now,
+            started_at: None,
             completed_at: None,
             scheduled_for: None,
             due_date: None,
@@ -250,6 +255,35 @@ impl Record {
     /// 获取内容预览（用于列表显示）
     pub fn content_preview(&self, max_len: usize) -> String {
         self.content.chars().take(max_len).collect()
+    }
+
+    pub fn sync_task_lifecycle_fields(
+        &mut self,
+        previous_status: Option<TaskStatus>,
+        now: DateTime<Utc>,
+    ) {
+        if self.record_type != RecordType::Task {
+            return;
+        }
+
+        match self.status {
+            Some(TaskStatus::InProgress) => {
+                if previous_status != Some(TaskStatus::InProgress) || self.started_at.is_none() {
+                    self.started_at = Some(now);
+                }
+                self.completed_at = None;
+            }
+            Some(TaskStatus::Todo) => {
+                self.started_at = None;
+                self.completed_at = None;
+            }
+            Some(TaskStatus::Done) | Some(TaskStatus::Cancelled) => {
+                if self.completed_at.is_none() {
+                    self.completed_at = Some(now);
+                }
+            }
+            None => {}
+        }
     }
 
     pub fn complete(&mut self) {

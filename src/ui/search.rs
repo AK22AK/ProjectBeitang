@@ -861,6 +861,7 @@ impl SearchPanel {
             .iter_mut()
             .find(|record| record.id.to_string() == payload.task_id)
         {
+            let previous_status = task.status.clone();
             task.title = payload.title.clone();
             task.content = payload.content.clone();
             task.priority = Some(payload.priority.clone());
@@ -870,18 +871,9 @@ impl SearchPanel {
             task.cancelled_reason = payload.cancel_reason.clone();
             task.tags = payload.tags.clone();
             task.persons = payload.persons.clone();
-            task.updated_at = chrono::Utc::now();
-
-            match payload.status {
-                TaskStatus::Done | TaskStatus::Cancelled => {
-                    if task.completed_at.is_none() {
-                        task.completed_at = Some(chrono::Utc::now());
-                    }
-                }
-                _ => {
-                    task.completed_at = None;
-                }
-            }
+            let now = chrono::Utc::now();
+            task.updated_at = now;
+            task.sync_task_lifecycle_fields(previous_status, now);
 
             let updated_task = task.clone();
             let store = self.store.clone();

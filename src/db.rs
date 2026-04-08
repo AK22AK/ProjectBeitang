@@ -10,7 +10,7 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, Result};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const SEARCH_RANK_FALLBACK: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Clone)]
@@ -78,6 +78,7 @@ impl Database {
                 status TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                started_at TEXT,
                 completed_at TEXT,
                 scheduled_for TEXT,
                 due_date TEXT,
@@ -297,13 +298,26 @@ impl Database {
             self.migrate_v5_to_v6()?;
         }
 
+        if version < 7 {
+            self.migrate_v6_to_v7()?;
+        }
+
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO schema_version (version, updated_at) VALUES (?1, ?2)
              ON CONFLICT(version) DO UPDATE SET updated_at = excluded.updated_at",
             [&SCHEMA_VERSION.to_string(), &now],
         )?;
+        self.create_started_at_index()?;
 
+        Ok(())
+    }
+
+    fn create_started_at_index(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_records_started_at ON records(started_at DESC)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -407,6 +421,21 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v6_to_v7(&self) -> Result<()> {
+        let _ = self
+            .conn
+            .execute("ALTER TABLE records ADD COLUMN started_at TEXT", []);
+        let _ = self.conn.execute(
+            "UPDATE records
+             SET started_at = updated_at
+             WHERE record_type = 'task'
+               AND status = 'in_progress'
+               AND started_at IS NULL",
+            [],
+        );
+        Ok(())
+    }
+
     pub fn create_record(&self, record: &Record) -> Result<()> {
         let priority_val = record.priority.as_ref().map(|p| match p {
             Priority::High => 0i64,
@@ -436,13 +465,14 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO records (id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO records (id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 content = excluded.content,
                 priority = excluded.priority,
                 status = excluded.status,
+                started_at = excluded.started_at,
                 completed_at = excluded.completed_at,
                 scheduled_for = excluded.scheduled_for,
                 due_date = excluded.due_date,
@@ -457,6 +487,7 @@ impl Database {
                 &status_str as &dyn rusqlite::ToSql,
                 &record.created_at.to_rfc3339() as &dyn rusqlite::ToSql,
                 &record.updated_at.to_rfc3339() as &dyn rusqlite::ToSql,
+                &record.started_at.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
                 &record.completed_at.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
                 &record.scheduled_for.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
                 &record.due_date.map(|t| t.to_rfc3339()) as &dyn rusqlite::ToSql,
@@ -534,7 +565,7 @@ impl Database {
     pub fn get_tasks(&self, _completed: bool) -> Result<Vec<Record>> {
         eprintln!("[DB] get_tasks called");
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              WHERE record_type = 'task'
              ORDER BY created_at DESC"
@@ -556,7 +587,7 @@ impl Database {
     pub fn get_notes(&self) -> Result<Vec<Record>> {
         eprintln!("[DB] get_notes called");
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              WHERE record_type = 'note'
              ORDER BY created_at DESC"
@@ -575,11 +606,122 @@ impl Database {
         Ok(result)
     }
 
+    pub fn get_dashboard_in_progress_tasks(&self) -> Result<Vec<Record>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+             FROM records
+             WHERE record_type = 'task'
+               AND status = 'in_progress'
+             ORDER BY started_at DESC, updated_at DESC",
+        )?;
+
+        let records = stmt.query_map([], |row| self.row_to_record(row))?;
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    pub fn get_dashboard_pending_tasks(&self) -> Result<Vec<Record>> {
+        let tomorrow_end = chrono::Local::now()
+            .date_naive()
+            .succ_opt()
+            .and_then(|date| date.and_hms_opt(23, 59, 59))
+            .and_then(|naive| naive.and_local_timezone(chrono::Local).single())
+            .unwrap_or_else(chrono::Local::now)
+            .with_timezone(&Utc)
+            .to_rfc3339();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+             FROM records
+             WHERE record_type = 'task'
+               AND status IN ('todo', 'in_progress')
+             ORDER BY CASE
+                    WHEN priority = 0 AND due_date IS NOT NULL AND due_date <= ?1 THEN 1
+                    WHEN priority = 0 THEN 2
+                    WHEN due_date IS NOT NULL AND due_date <= ?1 THEN 3
+                    ELSE 4
+                 END ASC,
+                 CASE WHEN due_date IS NULL THEN 1 ELSE 0 END ASC,
+                 due_date ASC,
+                 CASE priority
+                    WHEN 0 THEN 0
+                    WHEN 1 THEN 1
+                    ELSE 2
+                 END ASC,
+                 created_at DESC",
+        )?;
+
+        let records = stmt.query_map([&tomorrow_end], |row| self.row_to_record(row))?;
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    pub fn get_dashboard_recent_records(&self, limit: usize) -> Result<Vec<Record>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+             FROM records
+             WHERE record_type != 'task'
+                OR status IN ('done', 'cancelled')
+             ORDER BY CASE
+                    WHEN record_type = 'task' AND completed_at IS NOT NULL THEN completed_at
+                    ELSE created_at
+                 END DESC
+             LIMIT ?1",
+        )?;
+
+        let records = stmt.query_map([limit as i64], |row| self.row_to_record(row))?;
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    pub fn get_dashboard_common_tags(&self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name
+             FROM tags t
+             JOIN record_tags rt ON rt.tag_id = t.id
+             GROUP BY t.id, t.name
+             ORDER BY COUNT(rt.record_id) DESC, t.name ASC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map([limit as i64], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_dashboard_common_persons(&self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.name
+             FROM persons p
+             JOIN record_persons rp ON rp.person_id = p.id
+             GROUP BY p.id, p.name
+             ORDER BY COUNT(rp.record_id) DESC, p.name ASC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map([limit as i64], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>>>()
+    }
+
     pub fn get_records_by_tag(&self, tag: &str) -> Result<Vec<Record>> {
         eprintln!("[DB] get_records_by_tag called with tag='{}'", tag);
         let mut stmt = self.conn.prepare(
             "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
-                    r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
+                    r.started_at, r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
                     r.cancelled_reason, r.record_type
              FROM records r
              JOIN record_tags rt ON r.id = rt.record_id
@@ -605,7 +747,7 @@ impl Database {
         eprintln!("[DB] get_records_by_person called with person='{}'", person);
         let mut stmt = self.conn.prepare(
             "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
-                    r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
+                    r.started_at, r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
                     r.cancelled_reason, r.record_type
              FROM records r
              JOIN record_persons rp ON r.id = rp.record_id
@@ -634,7 +776,7 @@ impl Database {
         eprintln!("[DB] get_all_records called");
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at,
-                    completed_at, scheduled_for, due_date, notified_at,
+                    started_at, completed_at, scheduled_for, due_date, notified_at,
                     cancelled_reason, record_type
              FROM records
              ORDER BY updated_at DESC",
@@ -754,7 +896,7 @@ impl Database {
 
     pub fn get_pending_reminders(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records
              WHERE completed_at IS NULL
                AND notified_at IS NULL
@@ -795,7 +937,12 @@ impl Database {
     pub fn mark_task_completed(&self, id: Uuid, completed_at: DateTime<Utc>) -> Result<()> {
         eprintln!("[DB] mark_task_completed called for id: {}", id);
         self.conn.execute(
-            "UPDATE records SET completed_at = ?1, status = 'done', updated_at = ?2 WHERE id = ?3",
+            "UPDATE records
+             SET completed_at = ?1,
+                 status = 'done',
+                 started_at = COALESCE(started_at, updated_at),
+                 updated_at = ?2
+             WHERE id = ?3",
             [
                 &completed_at.to_rfc3339() as &dyn rusqlite::ToSql,
                 &Utc::now().to_rfc3339() as &dyn rusqlite::ToSql,
@@ -807,7 +954,7 @@ impl Database {
 
     pub fn get_timeline(&self, query: &TimelineQuery) -> Result<Vec<Record>> {
         let mut sql = String::from(
-            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records r",
         );
         let mut where_clauses = Vec::new();
@@ -932,7 +1079,7 @@ impl Database {
 
         let sql = format!(
             "SELECT r.id, r.title, r.content, r.priority, r.status, r.created_at, r.updated_at,
-                    r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
+                    r.started_at, r.completed_at, r.scheduled_for, r.due_date, r.notified_at,
                     r.cancelled_reason, r.record_type,
                     ({title_score_expr}) AS title_match_count,
                     ({fts_rank_expr}) AS fts_rank
@@ -1382,7 +1529,7 @@ impl Database {
 
     pub fn get_record_by_id(&self, id: Uuid) -> Result<Option<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
              FROM records WHERE id = ?1"
         )?;
 
@@ -1436,12 +1583,13 @@ impl Database {
         let status_str: Option<String> = row.get(4)?;
         let created_at_str: String = row.get(5)?;
         let updated_at_str: String = row.get(6)?;
-        let completed_at_str: Option<String> = row.get(7)?;
-        let scheduled_for_str: Option<String> = row.get(8)?;
-        let due_date_str: Option<String> = row.get(9)?;
-        let notified_at_str: Option<String> = row.get(10)?;
-        let cancelled_reason: Option<String> = row.get(11)?;
-        let record_type_str: String = row.get(12)?;
+        let started_at_str: Option<String> = row.get(7)?;
+        let completed_at_str: Option<String> = row.get(8)?;
+        let scheduled_for_str: Option<String> = row.get(9)?;
+        let due_date_str: Option<String> = row.get(10)?;
+        let notified_at_str: Option<String> = row.get(11)?;
+        let cancelled_reason: Option<String> = row.get(12)?;
+        let record_type_str: String = row.get(13)?;
 
         eprintln!(
             "[DB] Row: id={}, title={:?}, content='{}', priority_int={:?}",
@@ -1470,6 +1618,11 @@ impl Database {
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)
                 .unwrap_or_else(|_| chrono::Local::now().into())
                 .with_timezone(&Utc),
+            started_at: started_at_str.filter(|s| !s.is_empty()).and_then(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }),
             completed_at: completed_at_str.filter(|s| !s.is_empty()).and_then(|s| {
                 DateTime::parse_from_rfc3339(&s)
                     .ok()
@@ -1522,6 +1675,7 @@ fn display_title_from_fields(
         status: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        started_at: None,
         completed_at: None,
         scheduled_for: None,
         due_date: None,
@@ -2005,5 +2159,204 @@ mod tests {
             })
             .unwrap();
         assert_eq!(timeline2.len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_v6_to_v7_adds_started_at_and_backfills_in_progress_tasks() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("migration-v6.db");
+        let task_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE records (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    priority INTEGER,
+                    status TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    scheduled_for TEXT,
+                    due_date TEXT,
+                    notified_at TEXT,
+                    cancelled_reason TEXT,
+                    record_type TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    color TEXT,
+                    created_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE record_tags (
+                    record_id TEXT NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    PRIMARY KEY (record_id, tag_id)
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE persons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE record_persons (
+                    record_id TEXT NOT NULL,
+                    person_id INTEGER NOT NULL,
+                    PRIMARY KEY (record_id, person_id)
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE attachments (
+                    id TEXT PRIMARY KEY,
+                    record_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    file_data BLOB,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    error_message TEXT,
+                    source_path TEXT,
+                    created_at TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO records (
+                    id, title, content, priority, status, created_at, updated_at,
+                    completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+                ) VALUES (?1, '进行中任务', '详情', 0, 'in_progress', ?2, ?2, NULL, NULL, NULL, NULL, NULL, 'task')",
+                [&task_id.to_string(), &now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO schema_version (version, updated_at) VALUES (6, ?1)",
+                [&now],
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&db_path).unwrap();
+
+        let started_at_exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('records') WHERE name = 'started_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(started_at_exists, 1);
+
+        let started_at: String = db
+            .conn
+            .query_row(
+                "SELECT started_at FROM records WHERE id = ?1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(started_at, now);
+    }
+
+    #[test]
+    fn test_dashboard_queries_match_expected_semantics() {
+        let (db, _temp) = setup_test_db();
+        let now = Utc::now();
+
+        let mut in_progress = Record::new_task("进行中".to_string(), "".to_string(), Priority::High);
+        in_progress.status = Some(TaskStatus::InProgress);
+        in_progress.started_at = Some(now - chrono::Duration::hours(2));
+        in_progress.updated_at = now - chrono::Duration::minutes(10);
+        in_progress.tags = vec!["开发".to_string()];
+        in_progress.persons = vec!["张三".to_string()];
+
+        let mut todo = Record::new_task("待办".to_string(), "".to_string(), Priority::Medium);
+        todo.status = Some(TaskStatus::Todo);
+        todo.tags = vec!["开发".to_string()];
+
+        let mut done = Record::new_task("已完成任务".to_string(), "".to_string(), Priority::Low);
+        done.status = Some(TaskStatus::Done);
+        done.completed_at = Some(now - chrono::Duration::minutes(5));
+        done.tags = vec!["复盘".to_string()];
+        done.persons = vec!["李四".to_string()];
+
+        let mut note = Record::new_note("普通记录".to_string());
+        note.created_at = now - chrono::Duration::minutes(1);
+        note.updated_at = note.created_at;
+        note.tags = vec!["开发".to_string()];
+        note.persons = vec!["张三".to_string()];
+
+        db.create_record(&in_progress).unwrap();
+        db.create_record(&todo).unwrap();
+        db.create_record(&done).unwrap();
+        db.create_record(&note).unwrap();
+
+        let pending_titles = db
+            .get_dashboard_pending_tasks()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.display_title())
+            .collect::<Vec<_>>();
+        assert!(pending_titles.contains(&"进行中".to_string()));
+        assert!(pending_titles.contains(&"待办".to_string()));
+        assert!(!pending_titles.contains(&"已完成任务".to_string()));
+
+        let in_progress_titles = db
+            .get_dashboard_in_progress_tasks()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.display_title())
+            .collect::<Vec<_>>();
+        assert_eq!(in_progress_titles, vec!["进行中".to_string()]);
+
+        let recent_titles = db
+            .get_dashboard_recent_records(10)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.display_title())
+            .collect::<Vec<_>>();
+        assert!(recent_titles.contains(&"普通记录".to_string()));
+        assert!(recent_titles.contains(&"已完成任务".to_string()));
+        assert!(!recent_titles.contains(&"进行中".to_string()));
+        assert!(!recent_titles.contains(&"待办".to_string()));
+
+        let common_tags = db.get_dashboard_common_tags(5).unwrap();
+        assert_eq!(common_tags.first().map(String::as_str), Some("开发"));
+
+        let common_persons = db.get_dashboard_common_persons(5).unwrap();
+        assert_eq!(common_persons.first().map(String::as_str), Some("张三"));
     }
 }

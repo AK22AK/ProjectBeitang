@@ -8,7 +8,7 @@ use crate::data_management::{
     ImportPreview, ImportResult, StorageUsageSummary,
 };
 use crate::db::Database;
-use crate::models::{Attachment, Person, Record, Tag, TimelineQuery};
+use crate::models::{Attachment, Person, Record, Tag, TaskStatus, TimelineQuery};
 use async_channel::{unbounded, Receiver, Sender};
 use std::path::PathBuf;
 
@@ -17,6 +17,8 @@ pub struct DashboardData {
     pub in_progress: Vec<Record>,     // 进行中任务
     pub pending_tasks: Vec<Record>,   // 待办任务（按四象限排序）
     pub recent_records: Vec<Record>,  // 最近记录（用于回顾）
+    pub common_tags: Vec<String>,     // 常用标签
+    pub common_persons: Vec<String>,  // 常用人物
     pub total_pending: usize,         // 待办总数
     pub total_in_progress: usize,     // 进行中总数
     pub total_completed_today: usize, // 今日完成数
@@ -59,6 +61,10 @@ pub enum StoreCommand {
     },
     GetAllRecords {
         respond_to: Sender<Result<Vec<Record>, String>>,
+    },
+    GetRecordById {
+        id: uuid::Uuid,
+        respond_to: Sender<Result<Option<Record>, String>>,
     },
     GetRecordsByTag {
         tag: String,
@@ -179,6 +185,30 @@ impl StoreRuntime {
         }
     }
 
+    fn normalize_record_for_persistence(&self, mut record: Record) -> Result<Record, String> {
+        if record.record_type != crate::models::RecordType::Task {
+            return Ok(record);
+        }
+
+        let existing = match &self.db {
+            Some(db) => db
+                .get_record_by_id(record.id)
+                .map_err(|e| format!("Database error: {}", e))?,
+            None => return Err("Database not initialized".to_string()),
+        };
+
+        let previous_status = existing.as_ref().and_then(|stored| stored.status.clone());
+        if record.started_at.is_none() {
+            record.started_at = existing.as_ref().and_then(|stored| stored.started_at);
+        }
+        if record.completed_at.is_none() {
+            record.completed_at = existing.as_ref().and_then(|stored| stored.completed_at);
+        }
+
+        record.sync_task_lifecycle_fields(previous_status, chrono::Utc::now());
+        Ok(record)
+    }
+
     pub async fn run(&mut self, db_path: PathBuf) {
         // 初始化数据库连接
         match Database::new(&db_path) {
@@ -265,6 +295,10 @@ impl StoreRuntime {
                 }
                 StoreCommand::GetAllRecords { respond_to } => {
                     let result = self.handle_get_all_records().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetRecordById { id, respond_to } => {
+                    let result = self.handle_get_record_by_id(id).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetRecordsByTag { tag, respond_to } => {
@@ -446,18 +480,22 @@ impl StoreRuntime {
 
     async fn handle_create_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
-            Some(db) => db
-                .create_record(&record)
-                .map_err(|e| format!("Database error: {}", e)),
+            Some(db) => {
+                let record = self.normalize_record_for_persistence(record)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
             None => Err("Database not initialized".to_string()),
         }
     }
 
     async fn handle_update_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
-            Some(db) => db
-                .create_record(&record)
-                .map_err(|e| format!("Database error: {}", e)),
+            Some(db) => {
+                let record = self.normalize_record_for_persistence(record)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -552,6 +590,15 @@ impl StoreRuntime {
         }
     }
 
+    async fn handle_get_record_by_id(&self, id: uuid::Uuid) -> Result<Option<Record>, String> {
+        match &self.db {
+            Some(db) => db
+                .get_record_by_id(id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
     async fn handle_get_records_by_tag(&self, tag: String) -> Result<Vec<Record>, String> {
         eprintln!(
             "[Store] handle_get_records_by_tag called with tag='{}'",
@@ -601,32 +648,25 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
-                let in_progress: Vec<Record> = tasks
-                    .iter()
-                    .filter(|t| {
-                        t.status
-                            .as_ref()
-                            .map(|s| matches!(s, crate::models::TaskStatus::InProgress))
-                            .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect();
+                let in_progress = db
+                    .get_dashboard_in_progress_tasks()
+                    .map_err(|e| format!("Database error: {}", e))?;
 
-                let pending_tasks: Vec<Record> = tasks
-                    .iter()
-                    .filter(|t| {
-                        t.status
-                            .as_ref()
-                            .map(|s| matches!(s, crate::models::TaskStatus::Todo))
-                            .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect();
+                let pending_tasks = db
+                    .get_dashboard_pending_tasks()
+                    .map_err(|e| format!("Database error: {}", e))?;
 
-                let recent_records = match db.get_timeline(&TimelineQuery::new(20, 0)) {
-                    Ok(records) => records,
-                    Err(e) => return Err(format!("Database error: {}", e)),
-                };
+                let recent_records = db
+                    .get_dashboard_recent_records(20)
+                    .map_err(|e| format!("Database error: {}", e))?;
+
+                let common_tags = db
+                    .get_dashboard_common_tags(5)
+                    .map_err(|e| format!("Database error: {}", e))?;
+
+                let common_persons = db
+                    .get_dashboard_common_persons(5)
+                    .map_err(|e| format!("Database error: {}", e))?;
 
                 let total_completed_today = tasks
                     .iter()
@@ -647,6 +687,8 @@ impl StoreRuntime {
                     in_progress,
                     pending_tasks,
                     recent_records,
+                    common_tags,
+                    common_persons,
                 })
             }
             None => Err("Database not initialized".to_string()),
@@ -663,8 +705,9 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
-                record.status = Some(crate::models::TaskStatus::InProgress);
+                record.status = Some(TaskStatus::InProgress);
                 record.updated_at = chrono::Utc::now();
+                record = self.normalize_record_for_persistence(record)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -675,9 +718,19 @@ impl StoreRuntime {
     async fn handle_complete_task(&self, id: uuid::Uuid) -> Result<(), String> {
         eprintln!("[Store] handle_complete_task called for id: {}", id);
         match &self.db {
-            Some(db) => db
-                .mark_task_completed(id, chrono::Utc::now())
-                .map_err(|e| format!("Database error: {}", e)),
+            Some(db) => {
+                let mut record = match db.get_record_by_id(id) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => return Err("Task not found".to_string()),
+                    Err(e) => return Err(format!("Database error: {}", e)),
+                };
+
+                record.status = Some(TaskStatus::Done);
+                record.updated_at = chrono::Utc::now();
+                record = self.normalize_record_for_persistence(record)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -696,9 +749,10 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
-                record.status = Some(crate::models::TaskStatus::Cancelled);
+                record.status = Some(TaskStatus::Cancelled);
                 record.cancelled_reason = reason;
                 record.updated_at = chrono::Utc::now();
+                record = self.normalize_record_for_persistence(record)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -1092,6 +1146,17 @@ impl Store {
             result.as_ref().map(|v| v.len())
         );
         result
+    }
+
+    pub async fn get_record_by_id(&self, id: uuid::Uuid) -> Result<Option<Record>, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetRecordById { id, respond_to: tx })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get record".to_string()))
     }
 
     pub async fn get_records_by_tag(&self, tag: &str) -> Result<Vec<Record>, String> {

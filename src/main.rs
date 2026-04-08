@@ -4,7 +4,7 @@ use beitang::app_shortcuts::{
 use beitang::config::ShortcutConfig;
 use beitang::file_dialog_prewarm::prewarm_file_dialog;
 use beitang::store::{create_store, Store};
-use beitang::ui::dashboard::Dashboard;
+use beitang::ui::dashboard::{Dashboard, DashboardAction};
 use beitang::ui::data_management::DataManagementPanel;
 use beitang::ui::floating_window::{
     quick_add_window_size, QuickAddDestination, QuickAddSessionController, QuickAddSessionStatus,
@@ -632,6 +632,15 @@ impl MainView {
 
         window_state.borrow_mut().current_panel = initial_panel;
 
+        let handle = cx.entity().clone();
+        dashboard_panel.update(cx, |panel, _cx| {
+            panel.on_action(move |action, window, cx| {
+                handle.update(cx, |this, cx| {
+                    this.handle_dashboard_action(action, window, cx);
+                });
+            });
+        });
+
         Self {
             current_panel: initial_panel,
             current_settings_section: SettingsSection::DataManagement,
@@ -644,6 +653,43 @@ impl MainView {
             shortcut_config: ShortcutConfig::load(),
             window_state,
             focus_handle,
+        }
+    }
+
+    fn handle_dashboard_action(
+        &mut self,
+        action: DashboardAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            DashboardAction::OpenTask(task_id) => {
+                self.switch_to_panel(Panel::Tasks, window, cx);
+                self.task_panel.update(cx, |panel, cx| {
+                    panel.open_task(task_id, window, cx);
+                });
+            }
+            DashboardAction::OpenRecord(record_id) => {
+                self.switch_to_panel(Panel::Timeline, window, cx);
+                self.timeline_panel.update(cx, |panel, cx| {
+                    panel.open_record(record_id, window, cx);
+                });
+            }
+            DashboardAction::OpenTasksPanel => {
+                self.switch_to_panel(Panel::Tasks, window, cx);
+            }
+            DashboardAction::FilterByTag(tag) => {
+                self.switch_to_panel(Panel::Timeline, window, cx);
+                self.timeline_panel.update(cx, |panel, cx| {
+                    panel.apply_filters(vec![tag], Vec::new(), cx);
+                });
+            }
+            DashboardAction::FilterByPerson(person) => {
+                self.switch_to_panel(Panel::Timeline, window, cx);
+                self.timeline_panel.update(cx, |panel, cx| {
+                    panel.apply_filters(Vec::new(), vec![person], cx);
+                });
+            }
         }
     }
 

@@ -303,6 +303,19 @@ impl TaskPanel {
         });
     }
 
+    pub fn open_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(task) = self.tasks.iter().find(|task| task.id == task_id).cloned() {
+            self.select_task(&task, window, cx);
+            return;
+        }
+
+        eprintln!(
+            "[TaskPanel] open_task could not find task {}, reloading tasks",
+            task_id
+        );
+        self.load_tasks(cx);
+    }
+
     fn handle_sidebar_save(
         &mut self,
         payload: &crate::ui::task_detail_sidebar::SavePayload,
@@ -313,6 +326,7 @@ impl TaskPanel {
             .iter_mut()
             .find(|t| t.id.to_string() == payload.task_id)
         {
+            let previous_status = task.status.clone();
             task.title = payload.title.clone();
             task.content = payload.content.clone();
             task.priority = Some(payload.priority.clone());
@@ -322,23 +336,9 @@ impl TaskPanel {
             task.cancelled_reason = payload.cancel_reason.clone();
             task.tags = payload.tags.clone();
             task.persons = payload.persons.clone();
-            task.updated_at = chrono::Utc::now();
-
-            match payload.status {
-                TaskStatus::Done => {
-                    if task.completed_at.is_none() {
-                        task.completed_at = Some(chrono::Utc::now());
-                    }
-                }
-                TaskStatus::Cancelled => {
-                    if task.completed_at.is_none() {
-                        task.completed_at = Some(chrono::Utc::now());
-                    }
-                }
-                _ => {
-                    task.completed_at = None;
-                }
-            }
+            let now = chrono::Utc::now();
+            task.updated_at = now;
+            task.sync_task_lifecycle_fields(previous_status, now);
 
             let updated_task = task.clone();
             let store = self.store.clone();
@@ -1294,6 +1294,7 @@ impl TaskPanel {
 
     fn toggle_task_complete(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
         if let Some(task) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+            let previous_status = task.status.clone();
             if task.completed_at.is_some() {
                 task.completed_at = None;
                 task.status = Some(TaskStatus::Todo);
@@ -1301,6 +1302,9 @@ impl TaskPanel {
                 task.completed_at = Some(chrono::Utc::now());
                 task.status = Some(TaskStatus::Done);
             }
+            let now = chrono::Utc::now();
+            task.updated_at = now;
+            task.sync_task_lifecycle_fields(previous_status, now);
             let updated_task = task.clone();
             let store = self.store.clone();
 
