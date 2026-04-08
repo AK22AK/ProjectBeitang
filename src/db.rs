@@ -3,6 +3,7 @@ use crate::data_management::{
 };
 use crate::models::{
     Attachment, AttachmentStatus, Person, Priority, Record, RecordType, Tag, TaskStatus,
+    TimelineQuery,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
@@ -804,15 +805,51 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_timeline(&self, limit: i64, offset: i64) -> Result<Vec<Record>> {
-        let mut stmt = self.conn.prepare(
+    pub fn get_timeline(&self, query: &TimelineQuery) -> Result<Vec<Record>> {
+        let mut sql = String::from(
             "SELECT id, title, content, priority, status, created_at, updated_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
-             FROM records
-             ORDER BY created_at DESC
-             LIMIT ?1 OFFSET ?2"
-        )?;
+             FROM records r",
+        );
+        let mut where_clauses = Vec::new();
+        let mut params = Vec::new();
 
-        let records = stmt.query_map([limit, offset], |row| self.row_to_record(row))?;
+        for tag in &query.tags {
+            where_clauses.push(
+                "EXISTS (
+                    SELECT 1
+                    FROM record_tags rt
+                    JOIN tags t ON t.id = rt.tag_id
+                    WHERE rt.record_id = r.id AND t.name = ?
+                )"
+                .to_string(),
+            );
+            params.push(Value::Text(tag.clone()));
+        }
+
+        for person in &query.persons {
+            where_clauses.push(
+                "EXISTS (
+                    SELECT 1
+                    FROM record_persons rp
+                    JOIN persons p ON p.id = rp.person_id
+                    WHERE rp.record_id = r.id AND p.name = ?
+                )"
+                .to_string(),
+            );
+            params.push(Value::Text(person.clone()));
+        }
+
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+
+        sql.push_str(" ORDER BY r.created_at DESC LIMIT ? OFFSET ?");
+        params.push(Value::Integer(query.limit as i64));
+        params.push(Value::Integer(query.offset as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let records = stmt.query_map(params_from_iter(params), |row| self.row_to_record(row))?;
 
         let mut result = Vec::new();
         for record in records {
@@ -1956,10 +1993,17 @@ mod tests {
             db.create_record(&record).unwrap();
         }
 
-        let timeline = db.get_timeline(3, 0).unwrap();
+        let timeline = db.get_timeline(&TimelineQuery::new(3, 0)).unwrap();
         assert_eq!(timeline.len(), 3);
 
-        let timeline2 = db.get_timeline(3, 3).unwrap();
+        let timeline2 = db
+            .get_timeline(&TimelineQuery {
+                limit: 3,
+                offset: 3,
+                tags: Vec::new(),
+                persons: Vec::new(),
+            })
+            .unwrap();
         assert_eq!(timeline2.len(), 2);
     }
 }

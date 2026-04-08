@@ -63,6 +63,25 @@ pub struct Person {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimelineQuery {
+    pub limit: usize,
+    pub offset: usize,
+    pub tags: Vec<String>,
+    pub persons: Vec<String>,
+}
+
+impl TimelineQuery {
+    pub fn new(limit: usize, offset: usize) -> Self {
+        Self {
+            limit,
+            offset,
+            tags: Vec::new(),
+            persons: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: String, // UUID

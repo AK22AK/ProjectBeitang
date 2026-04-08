@@ -8,7 +8,7 @@ use crate::data_management::{
     ImportPreview, ImportResult, StorageUsageSummary,
 };
 use crate::db::Database;
-use crate::models::{Attachment, Person, Record, Tag};
+use crate::models::{Attachment, Person, Record, Tag, TimelineQuery};
 use async_channel::{unbounded, Receiver, Sender};
 use std::path::PathBuf;
 
@@ -49,8 +49,7 @@ pub enum StoreCommand {
     },
     // 时间线查询
     GetTimeline {
-        limit: usize,
-        offset: usize,
+        query: TimelineQuery,
         respond_to: Sender<Result<Vec<Record>, String>>,
     },
     // 全文搜索
@@ -256,12 +255,8 @@ impl StoreRuntime {
                     let result = self.handle_delete_record(id).await;
                     let _ = respond_to.send(result).await;
                 }
-                StoreCommand::GetTimeline {
-                    limit,
-                    offset,
-                    respond_to,
-                } => {
-                    let result = self.handle_get_timeline(limit, offset).await;
+                StoreCommand::GetTimeline { query, respond_to } => {
+                    let result = self.handle_get_timeline(query).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::SearchRecords { query, respond_to } => {
@@ -500,17 +495,13 @@ impl StoreRuntime {
         }
     }
 
-    async fn handle_get_timeline(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<Record>, String> {
+    async fn handle_get_timeline(&self, query: TimelineQuery) -> Result<Vec<Record>, String> {
         eprintln!(
-            "[Store] handle_get_timeline called with limit={}, offset={}",
-            limit, offset
+            "[Store] handle_get_timeline called with limit={}, offset={}, tags={:?}, persons={:?}",
+            query.limit, query.offset, query.tags, query.persons
         );
         match &self.db {
-            Some(db) => match db.get_timeline(limit as i64, offset as i64) {
+            Some(db) => match db.get_timeline(&query) {
                 Ok(records) => {
                     eprintln!("[Store] Found {} timeline records", records.len());
                     Ok(records)
@@ -632,7 +623,7 @@ impl StoreRuntime {
                     .cloned()
                     .collect();
 
-                let recent_records = match db.get_timeline(20, 0) {
+                let recent_records = match db.get_timeline(&TimelineQuery::new(20, 0)) {
                     Ok(records) => records,
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
@@ -1049,17 +1040,16 @@ impl Store {
         rx.recv().await.unwrap_or(Ok(()))
     }
 
-    pub async fn get_timeline(&self, limit: usize, offset: usize) -> Result<Vec<Record>, String> {
+    pub async fn get_timeline(&self, query: TimelineQuery) -> Result<Vec<Record>, String> {
         eprintln!(
-            "[Store] get_timeline called with limit={}, offset={}",
-            limit, offset
+            "[Store] get_timeline called with limit={}, offset={}, tags={:?}, persons={:?}",
+            query.limit, query.offset, query.tags, query.persons
         );
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
             .send(StoreCommand::GetTimeline {
-                limit,
-                offset,
+                query,
                 respond_to: tx,
             })
             .await;

@@ -1,5 +1,5 @@
 use beitang::db::Database;
-use beitang::models::{Priority, Record, RecordType};
+use beitang::models::{Priority, Record, RecordType, TimelineQuery};
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
@@ -131,6 +131,92 @@ fn test_complete_task() {
     assert_eq!(tasks.len(), 1);
     assert!(tasks[0].is_completed());
     assert!(tasks[0].completed_at.is_some());
+}
+
+#[test]
+fn test_timeline_query_filters_by_tags_with_and_semantics() {
+    let (db, _temp) = setup_test_db();
+
+    let mut both = Record::new_note("同时命中".to_string());
+    both.tags = vec!["工作".to_string(), "紧急".to_string()];
+
+    let mut only_work = Record::new_note("只命中工作".to_string());
+    only_work.tags = vec!["工作".to_string()];
+
+    let mut only_urgent = Record::new_note("只命中紧急".to_string());
+    only_urgent.tags = vec!["紧急".to_string()];
+
+    db.create_record(&both).unwrap();
+    db.create_record(&only_work).unwrap();
+    db.create_record(&only_urgent).unwrap();
+
+    let results = db
+        .get_timeline(&TimelineQuery {
+            limit: 20,
+            offset: 0,
+            tags: vec!["工作".to_string(), "紧急".to_string()],
+            persons: Vec::new(),
+        })
+        .unwrap();
+
+    assert_eq!(titles(&results), vec!["同时命中".to_string()]);
+}
+
+#[test]
+fn test_timeline_query_filters_by_persons_with_and_semantics() {
+    let (db, _temp) = setup_test_db();
+
+    let mut both = Record::new_note("同时命中人物".to_string());
+    both.persons = vec!["张三".to_string(), "李四".to_string()];
+
+    let mut only_zhang = Record::new_note("只命中张三".to_string());
+    only_zhang.persons = vec!["张三".to_string()];
+
+    db.create_record(&both).unwrap();
+    db.create_record(&only_zhang).unwrap();
+
+    let results = db
+        .get_timeline(&TimelineQuery {
+            limit: 20,
+            offset: 0,
+            tags: Vec::new(),
+            persons: vec!["张三".to_string(), "李四".to_string()],
+        })
+        .unwrap();
+
+    assert_eq!(titles(&results), vec!["同时命中人物".to_string()]);
+}
+
+#[test]
+fn test_timeline_query_filters_by_tags_and_persons_together() {
+    let (db, _temp) = setup_test_db();
+
+    let mut matched = Record::new_note("标签人物都命中".to_string());
+    matched.tags = vec!["工作".to_string()];
+    matched.persons = vec!["张三".to_string()];
+
+    let mut wrong_tag = Record::new_note("标签不命中".to_string());
+    wrong_tag.tags = vec!["生活".to_string()];
+    wrong_tag.persons = vec!["张三".to_string()];
+
+    let mut wrong_person = Record::new_note("人物不命中".to_string());
+    wrong_person.tags = vec!["工作".to_string()];
+    wrong_person.persons = vec!["李四".to_string()];
+
+    db.create_record(&matched).unwrap();
+    db.create_record(&wrong_tag).unwrap();
+    db.create_record(&wrong_person).unwrap();
+
+    let results = db
+        .get_timeline(&TimelineQuery {
+            limit: 20,
+            offset: 0,
+            tags: vec!["工作".to_string()],
+            persons: vec!["张三".to_string()],
+        })
+        .unwrap();
+
+    assert_eq!(titles(&results), vec!["标签人物都命中".to_string()]);
 }
 
 #[test]
