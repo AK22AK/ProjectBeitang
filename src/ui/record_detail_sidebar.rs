@@ -492,22 +492,47 @@ impl RecordDetailSidebar {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
-
-        match crate::clipboard_attachment::extract_image_paths_from_clipboard(&clipboard) {
-            Ok(paths) if !paths.is_empty() => {
-                window.prevent_default();
-                cx.stop_propagation();
-                self.import_attachment_paths(record_id, paths, cx);
-            }
-            Ok(_) => {}
-            Err(err) => {
-                window.prevent_default();
-                cx.stop_propagation();
-                self.attachments_loading = false;
-                self.attachment_error = Some(err);
-                cx.notify();
-            }
+        if !crate::clipboard_attachment::clipboard_has_image_candidate(&clipboard) {
+            return;
         }
+
+        window.prevent_default();
+        cx.stop_propagation();
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result =
+                    crate::clipboard_attachment::extract_image_paths_from_clipboard(&clipboard);
+                let _ = tx.send_blocking(result);
+            });
+
+            let result = rx
+                .recv()
+                .await
+                .map_err(|err| format!("剪贴板图片处理任务失败: {}", err))
+                .and_then(|result| result);
+
+            let _ = view.update(cx, |this, cx| match result {
+                Ok(paths) if !paths.is_empty() => {
+                    this.import_attachment_paths(record_id, paths, cx)
+                }
+                Ok(_) => {
+                    this.attachments_loading = false;
+                    this.attachment_error = None;
+                    cx.notify();
+                }
+                Err(err) => {
+                    this.attachments_loading = false;
+                    this.attachment_error = Some(err);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn delete_attachment(&mut self, attachment_id: String, cx: &mut Context<Self>) {

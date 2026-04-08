@@ -23,6 +23,29 @@ pub fn prepare_pending_attachments(paths: Vec<PathBuf>) -> Result<Vec<PendingAtt
         .collect()
 }
 
+pub fn pending_attachment_from_data(
+    path: PathBuf,
+    file_name: String,
+    mime_type: String,
+    width: u32,
+    height: u32,
+    source_bytes: Vec<u8>,
+) -> Result<PendingAttachment, String> {
+    let format = image_format_from_mime_type(&mime_type)
+        .ok_or_else(|| format!("暂不支持的图片格式: {}", path.display()))?;
+    ensure_supported_format(format, &path)?;
+
+    Ok(PendingAttachment {
+        path,
+        file_name,
+        file_size: source_bytes.len(),
+        mime_type: mime_type.clone(),
+        width,
+        height,
+        preview_image: preview_image_from_bytes(&mime_type, source_bytes),
+    })
+}
+
 pub fn format_attachment_meta(attachment: &PendingAttachment) -> String {
     format!(
         "{} × {} · {}",

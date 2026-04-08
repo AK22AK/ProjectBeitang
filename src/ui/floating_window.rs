@@ -638,22 +638,53 @@ impl QuickAddWindow {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
-
-        match crate::clipboard_attachment::extract_image_paths_from_clipboard(&clipboard) {
-            Ok(paths) if !paths.is_empty() => {
-                window.prevent_default();
-                cx.stop_propagation();
-                self.append_pending_attachment_paths(paths, cx);
-            }
-            Ok(_) => {}
-            Err(err) => {
-                window.prevent_default();
-                cx.stop_propagation();
-                self.attachments_loading = false;
-                self.attachment_error = Some(err);
-                cx.notify();
-            }
+        if !crate::clipboard_attachment::clipboard_has_image_candidate(&clipboard) {
+            return;
         }
+
+        window.prevent_default();
+        cx.stop_propagation();
+        self.attachments_loading = true;
+        self.attachment_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result =
+                    crate::clipboard_attachment::prepare_pending_attachments_from_clipboard(
+                        &clipboard,
+                    );
+                let _ = tx.send_blocking(result);
+            });
+
+            let result = rx
+                .recv()
+                .await
+                .map_err(|err| format!("剪贴板图片处理任务失败: {}", err))
+                .and_then(|result| result);
+
+            let _ = view.update(cx, |this, cx| match result {
+                Ok(mut attachments) if !attachments.is_empty() => {
+                    this.attachments_loading = false;
+                    this.pending_attachments.append(&mut attachments);
+                    this.attachment_error = None;
+                    this.sync_session_state(cx);
+                    cx.notify();
+                }
+                Ok(_) => {
+                    this.attachments_loading = false;
+                    this.attachment_error = None;
+                    cx.notify();
+                }
+                Err(err) => {
+                    this.attachments_loading = false;
+                    this.attachment_error = Some(err);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
