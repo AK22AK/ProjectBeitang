@@ -1,36 +1,32 @@
 # Robinne
 
-一个使用 GPUI 框架开发的桌面任务/笔记管理应用。
+一个面向 macOS 的本地优先桌面任务/记录应用，使用 GPUI 构建，数据默认保存在本地 SQLite。
 
-## 功能特性
+## 当前能力
 
-- 📝 快速任务捕获（支持 `!!` 高优先级、`!` 普通优先级语法）
-- 🏷️ **标签系统**（支持 `#标签` 标记任务和记录）
-- 👤 **人物关联**（支持 `@人物` 关联相关人物）
-- 📊 任务管理（创建、完成、优先级标记）
-- 🔍 **标签筛选**（支持按标签筛选任务和搜索结果）
-- 🗂️ 多面板导航（任务、记录、时间线、AI）
-- 💾 本地 SQLite 数据存储
+- 看板首页：汇总任务、记录和统计信息，支持从看板直接进入详情
+- 多面板工作区：看板、任务、记录、时间线、搜索、设置
+- 快捷输入：支持全局快捷键呼出，任务/记录双模式快速录入
+- 任务语法：支持 `!!`、`!` 标记优先级，支持 `#标签` 和 `@人物`
+- 附件支持：任务和记录可添加附件，并在详情侧栏中查看
+- 数据管理：查看容量概览、附件健康状态，并执行导入/导出
+- 搜索与筛选：支持全文搜索，以及按标签/人物筛选
+- AI 面板：当前仍为占位态，尚未提供完整交互
 
 ## 技术栈
 
-- **UI 框架**: [GPUI](https://github.com/zed-industries/zed) (Zed 编辑器同款)
-- **组件库**: [gpui-component](https://github.com/longbridge/gpui-component)
-- **数据库**: SQLite (rusqlite)
-- **异步运行时**: Tokio
+- UI 框架：[GPUI](https://github.com/zed-industries/zed)
+- 组件库：[gpui-component](https://github.com/longbridge/gpui-component)
+- 数据存储：SQLite（`rusqlite`）
+- 异步运行时：Tokio
 
-## 重要依赖配置
+## 平台与依赖说明
 
-⚠️ **关键**：在 macOS 上必须启用 `font-kit` feature，否则文字无法显示！
+- 当前主要面向 macOS 开发和运行
+- 需要本地 Rust/Cargo 环境
+- 仓库当前已启用 `gpui_platform` 的 `font-kit` feature；如果后续调整依赖配置，需继续保留该 feature，否则可能出现文字无法显示的问题
 
-```toml
-[dependencies]
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }  # ← 必须有 font-kit
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-```
-
-详见 [docs/DEBUGGING_TEXT_RENDERING.md](docs/DEBUGGING_TEXT_RENDERING.md)
+详见 [docs/DEBUGGING_TEXT_RENDERING.md](docs/DEBUGGING_TEXT_RENDERING.md)。
 
 ## 快速开始
 
@@ -39,55 +35,90 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 git clone <repository-url>
 cd Robinne
 
-# 编译运行
+# 开发运行
 cargo run
+
+# 运行测试
+cargo test
+
+# 打包 macOS App
+./build_mac_app.sh
 ```
 
 ## 使用说明
 
-### 创建任务
+### 快捷输入
 
-在输入框中输入：
-- `!! 任务内容` → 高优先级任务（红色）
-- `! 任务内容` → 普通优先级任务（黄色）
-- `任务内容` → 低优先级任务（绿色）
-- `!! 任务内容 #工作 @张三` → 高优先级任务，带"工作"标签，关联"张三"
+- 通过全局快捷键呼出快捷输入窗口，支持“任务”和“记录”两种模式
+- 任务模式下：
+  `Enter` 换行补充正文，`Cmd+Enter` 保存，`Shift+Cmd+Enter` 保存并打开任务面板
+- 记录模式下：
+  `Enter` 换行补充正文，`Cmd+Enter` 保存，`Shift+Cmd+Enter` 保存并打开记录面板
+- 快捷输入支持添加附件
 
-### 标签和人物
+### 任务与记录语法
 
-- **标签**：使用 `#标签名` 标记任务或记录，如 `#工作 #紧急`
-- **人物**：使用 `@人物名` 关联相关人物，如 `@张三 @李四`
-- **筛选**：在任务面板和搜索面板可以按标签筛选（支持 AND/OR 切换）
+- `!! 任务内容`：高优先级任务
+- `! 任务内容`：普通优先级任务
+- `任务内容`：普通录入，不额外设置优先级语法
+- `!! 跟进方案 #工作 @张三`：高优先级任务，同时带标签和人物关联
+- `记录内容 #会议 @李四`：创建记录时同样支持 `#标签` 和 `@人物`
 
-### 完成任务
+### 标签、人物与筛选
 
-点击任务左侧的复选框标记完成。
+- 使用 `#标签名` 标记任务或记录，例如 `#工作 #紧急`
+- 使用 `@人物名` 关联相关人物，例如 `@张三 @李四`
+- 在看板、任务列表、搜索等场景可按标签或人物继续筛选内容
 
-### 切换面板
+### 默认快捷键
 
-点击左侧边栏的选项切换不同功能面板。
+以下为当前默认值：
+
+- 全局快捷键
+  - `Cmd+Shift+T`：打开快捷输入
+  - `Cmd+0`：打开主窗口
+  - `Cmd+2`：直接打开任务面板
+  - `Cmd+3`：直接打开记录面板
+- 应用内快捷键
+  - `Cmd+1`：看板
+  - `Cmd+2`：任务
+  - `Cmd+3`：记录
+  - `Cmd+4`：时间线
+  - `Cmd+5`：AI 面板
+  - `Cmd+K`：搜索
+  - `Cmd+,`：设置
+
+当前 README 仅记录默认行为，不表示这些快捷键已经具备完整的持久化自定义配置能力。
 
 ## 项目结构
 
-```
+```text
 Robinne/
 ├── src/
-│   ├── main.rs          # 应用入口
-│   ├── models.rs        # 数据模型
-│   ├── store.rs         # 状态管理
-│   ├── db.rs            # 数据库操作
-│   └── ui/
-│       ├── mod.rs
-│       ├── sidebar.rs   # 侧边栏
-│       └── task_panel.rs # 任务面板
+│   ├── main.rs                 # 应用入口、窗口装配、菜单与快捷键注册
+│   ├── lib.rs                  # 模块导出与基础测试
+│   ├── store.rs                # 状态层与异步命令分发
+│   ├── db.rs                   # SQLite 数据访问
+│   ├── data_management.rs      # 数据导入导出与附件归档逻辑
+│   ├── config.rs               # 快捷键默认配置
+│   ├── models.rs               # 数据模型
+│   └── ui/                     # 各功能面板与 UI 组件
 ├── docs/
-│   └── DEBUGGING_TEXT_RENDERING.md  # 调试记录
+│   ├── DEBUGGING_TEXT_RENDERING.md
+│   └── plans/
+├── assets/                     # 图标与静态资源
+├── scripts/                    # 打包与资源生成脚本
+├── build_mac_app.sh            # macOS App 打包脚本
 └── Cargo.toml
 ```
 
-## 开发记录
+## 相关文档
 
-- [docs/DEBUGGING_TEXT_RENDERING.md](docs/DEBUGGING_TEXT_RENDERING.md) - GPUI 文字渲染问题调试过程
+- [docs/DEBUGGING_TEXT_RENDERING.md](docs/DEBUGGING_TEXT_RENDERING.md)：GPUI 文字渲染问题调试记录
+- [docs/plans/roadmap.md](docs/plans/roadmap.md)：项目路线图
+- [docs/plans/product-design.md](docs/plans/product-design.md)：产品设计说明
+- [docs/plans/ui-ux-design.md](docs/plans/ui-ux-design.md)：UI / UX 设计文档
+- [docs/plans/data-model.md](docs/plans/data-model.md)：数据模型设计
 
 ## 许可证
 
