@@ -325,8 +325,8 @@ git commit -m "feat: add shortcut manager with global-hotkey integration"
 3. 根据事件类型显示不同窗口
 
 ```rust
-use beitang::shortcut_manager::{ShortcutManager, ShortcutEvent};
-use beitang::ui::floating_window::QuickAddWindow;
+use robinne::shortcut_manager::{ShortcutManager, ShortcutEvent};
+use robinne::ui::floating_window::QuickAddWindow;
 // ... 其他导入
 
 fn main() {
@@ -342,7 +342,7 @@ fn main() {
         cx.spawn(|_cx: &mut AsyncApp| async move {
             let data_dir = dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("beitang");
+                .join("robinne");
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("data.db");
             runtime.run(db_path).await;

@@ -1,4 +1,4 @@
-# Project Beitang 重建实现计划
+# Robinne 重建实现计划
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -21,13 +21,13 @@
 
 **Step 1: 初始化 Cargo 项目**
 
-Run: `cargo init --name beitang`
+Run: `cargo init --name robinne`
 
 **Step 2: 编辑 Cargo.toml 添加依赖**
 
 ```toml
 [package]
-name = "beitang"
+name = "robinne"
 version = "0.1.0"
 edition = "2021"
 
@@ -61,7 +61,7 @@ tempfile = "3.0"
 
 ```rust
 fn main() {
-    println!("Hello, Beitang!");
+    println!("Hello, Robinne!");
 }
 ```
 
@@ -703,7 +703,7 @@ fn main() {
         cx.spawn(|_| async move {
             let data_dir = dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("beitang");
+                .join("robinne");
             std::fs::create_dir_all(&data_dir).ok();
 
             let db_path = data_dir.join("data.db");
@@ -742,7 +742,7 @@ impl Render for MainView {
         div()
             .size_full()
             .bg(rgb(0x1a1a1a))
-            .child("Hello, Beitang!")
+            .child("Hello, Robinne!")
     }
 }
 ```
@@ -1898,7 +1898,7 @@ impl Config {
     fn config_path() -> anyhow::Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("beitang");
+            .join("robinne");
         Ok(config_dir.join("config.json"))
     }
 }
@@ -2003,8 +2003,8 @@ git commit -m "feat: add settings panel with config persistence"
 ```toml
 # Add to Cargo.toml
 [package.metadata.bundle]
-name = "Beitang"
-identifier = "com.yourname.beitang"
+name = "Robinne"
+identifier = "com.ak22ak.robinne"
 version = "0.1.0"
 resources = ["assets"]
 icon = ["assets/icon.png"]

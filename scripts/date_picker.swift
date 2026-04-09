@@ -29,7 +29,7 @@ datePicker.minDate = Date()
 
 // 创建弹窗
 let alert = NSAlert()
-alert.messageText = "Beitang 提醒设置"
+alert.messageText = "Robinne 提醒设置"
 alert.informativeText = taskName.isEmpty ? "请选择提醒日期和时间" : "为任务「\(taskName)」设置提醒时间"
 alert.addButton(withTitle: "设定")
 alert.addButton(withTitle: "取消")

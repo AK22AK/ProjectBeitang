@@ -1,4 +1,4 @@
-# 北堂 (Beitang) - 数据模型设计文档
+# Robinne - 数据模型设计文档
 
 **文档日期**: 2026-03-22  
 **版本**: 1.0  
@@ -166,10 +166,10 @@ CREATE TABLE attachments (
 
 **物理存储路径**:
 ```
-~/Library/Application Support/Beitang/
-├── beitang.db                 # SQLite 主数据库
-├── beitang.db-shm             # WAL 模式文件
-├── beitang.db-wal
+~/Library/Application Support/robinne/
+├── data.db                    # SQLite 主数据库
+├── data.db-shm                # WAL 模式文件
+├── data.db-wal
 └── attachments/               # 附件目录
     ├── 2026/
     │   ├── 03/

@@ -121,7 +121,7 @@ fn clipboard_cache_dir() -> Result<PathBuf, String> {
         .or_else(dirs::data_local_dir)
         .or_else(dirs::data_dir)
         .ok_or_else(|| "无法确定剪贴板图片缓存目录".to_string())?;
-    let dir = base.join("beitang").join("clipboard-images");
+    let dir = base.join("robinne").join("clipboard-images");
     std::fs::create_dir_all(&dir)
         .map_err(|err| format!("创建剪贴板图片缓存目录失败 {}: {}", dir.display(), err))?;
     Ok(dir)

@@ -4,13 +4,13 @@ pub struct Notifier;
 
 impl Notifier {
     pub fn send_reminder(task: &Record) -> Result<(), String> {
-        let title = "Beitang 提醒";
+        let title = "Robinne 提醒";
         let body = format!("时间到了！\n{}", task.content);
 
         let mut n = notify_rust::Notification::new();
         n.summary(title)
             .body(&body)
-            .appname("Beitang")
+            .appname("Robinne")
             .timeout(notify_rust::Timeout::Milliseconds(10000));
 
         #[cfg(target_os = "macos")]

@@ -1,20 +1,20 @@
-use beitang::app_shortcuts::{
+use robinne::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, SEARCH_KEYSTROKE, SETTINGS_KEYSTROKE,
 };
-use beitang::config::ShortcutConfig;
-use beitang::file_dialog_prewarm::prewarm_file_dialog;
-use beitang::store::{create_store, Store};
-use beitang::ui::dashboard::{Dashboard, DashboardAction};
-use beitang::ui::data_management::DataManagementPanel;
-use beitang::ui::floating_window::{
+use robinne::config::ShortcutConfig;
+use robinne::file_dialog_prewarm::prewarm_file_dialog;
+use robinne::store::{create_store, Store};
+use robinne::ui::dashboard::{Dashboard, DashboardAction};
+use robinne::ui::data_management::DataManagementPanel;
+use robinne::ui::floating_window::{
     quick_add_window_size, QuickAddDestination, QuickAddSessionController, QuickAddSessionStatus,
     QuickAddWindow,
 };
-use beitang::ui::note_panel::NotePanel;
-use beitang::ui::search::SearchPanel;
-use beitang::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, Sidebar};
-use beitang::ui::task_panel::TaskPanel;
-use beitang::ui::timeline::Timeline;
+use robinne::ui::note_panel::NotePanel;
+use robinne::ui::search::SearchPanel;
+use robinne::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, Sidebar};
+use robinne::ui::task_panel::TaskPanel;
+use robinne::ui::timeline::Timeline;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::*;
 use gpui_component::scroll::ScrollableElement;
@@ -148,13 +148,13 @@ fn install_app_shortcuts_and_menus(
 
     cx.set_menus(vec![
         Menu {
-            name: "Beitang".into(),
+            name: "Robinne".into(),
             items: vec![
                 MenuItem::os_submenu("服务", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("设置...", OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("退出 Beitang", QuitApp),
+                MenuItem::action("退出 Robinne", QuitApp),
             ],
         },
         Menu {
@@ -210,7 +210,7 @@ fn main() {
         cx.spawn(|_cx: &mut AsyncApp| async move {
             let data_dir = dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("beitang");
+                .join("robinne");
             std::fs::create_dir_all(&data_dir).ok();
 
             let db_path = data_dir.join("data.db");
@@ -867,7 +867,7 @@ impl MainView {
             )
             .child(self.render_shortcut_group(
                 "应用内快捷键",
-                "仅在 Beitang 前台时生效，并显示在系统菜单中。",
+                "仅在 Robinne 前台时生效，并显示在系统菜单中。",
                 app_shortcut_entries,
             ))
             .child(self.render_shortcut_group(

@@ -1,5 +1,5 @@
-use beitang::models::Priority;
-use beitang::ui::parsing::{
+use robinne::models::Priority;
+use robinne::ui::parsing::{
     parse_person_list, parse_priority, parse_record_draft, parse_record_fields, parse_record_input,
     parse_tag_list, parse_tags_and_people, parse_task_draft, parse_task_input, reconcile_metadata,
 };

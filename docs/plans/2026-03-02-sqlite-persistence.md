@@ -213,7 +213,7 @@ let (store, mut runtime) = create_store();  // mut runtime
 cx.spawn(|_cx: &mut AsyncApp| async move {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("beitang");
+        .join("robinne");
     std::fs::create_dir_all(&data_dir).ok();
 
     let db_path = data_dir.join("data.db");
@@ -375,7 +375,7 @@ git commit -m "chore: 添加存储层日志"
 - [ ] 任务优先级正确显示（🔴🟡🟢）
 - [ ] 重启应用后任务仍然存在
 - [ ] 完成任务后状态被保存
-- [ ] 数据库文件创建在 `~/Library/Application Support/beitang/data.db`
+- [ ] 数据库文件创建在 `~/Library/Application Support/robinne/data.db`
 
 ---
 

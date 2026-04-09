@@ -1,5 +1,5 @@
-use beitang::db::Database;
-use beitang::models::{Priority, Record, RecordType, TimelineQuery};
+use robinne::db::Database;
+use robinne::models::{Priority, Record, RecordType, TimelineQuery};
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 

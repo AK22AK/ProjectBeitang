@@ -1,4 +1,4 @@
-# 北堂 (Beitang)
+# Robinne
 
 一个使用 GPUI 框架开发的桌面任务/笔记管理应用。
 
@@ -37,7 +37,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 ```bash
 # 克隆项目
 git clone <repository-url>
-cd ProjectBeitang
+cd Robinne
 
 # 编译运行
 cargo run
@@ -70,7 +70,7 @@ cargo run
 ## 项目结构
 
 ```
-ProjectBeitang/
+Robinne/
 ├── src/
 │   ├── main.rs          # 应用入口
 │   ├── models.rs        # 数据模型

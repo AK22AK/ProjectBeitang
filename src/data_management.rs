@@ -242,12 +242,12 @@ struct ImportBundle {
 pub fn app_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("beitang")
+        .join("robinne")
 }
 
 pub fn default_export_file_name() -> String {
     format!(
-        "beitang-export-{}.zip",
+        "robinne-export-{}.zip",
         Local::now().format("%Y%m%d-%H%M%S")
     )
 }

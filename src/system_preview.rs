@@ -20,7 +20,7 @@ mod macos {
             .or_else(dirs::data_local_dir)
             .or_else(dirs::data_dir)
             .ok_or_else(|| "无法确定预览缓存目录".to_string())?;
-        let dir = base.join("beitang").join("quicklook");
+        let dir = base.join("robinne").join("quicklook");
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("创建预览缓存目录失败 {}: {}", dir.display(), err))?;
         Ok(dir)

@@ -1,8 +1,8 @@
-# Project Beitang 重建设计文档
+# Robinne 重建设计文档
 
 ## 一、产品定义
 
-**Project Beitang** —— 工作中的闪念大脑
+**Robinne** —— 工作中的闪念大脑
 
 核心价值：超快记录工作事务（任务、想法、事件），方便追溯、搜索、AI 总结。
 

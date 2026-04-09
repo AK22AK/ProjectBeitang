@@ -1,8 +1,8 @@
-use beitang::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
-use beitang::config::{parse_hotkey, ShortcutConfig};
-use beitang::models::{Priority, Record};
-use beitang::shortcut_manager::ShortcutEvent;
-use beitang::ui::sidebar::{
+use robinne::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
+use robinne::config::{parse_hotkey, ShortcutConfig};
+use robinne::models::{Priority, Record};
+use robinne::shortcut_manager::ShortcutEvent;
+use robinne::ui::sidebar::{
     main_sidebar_layout_mode, main_sidebar_width, Panel, SidebarLayoutMode,
 };
 use gpui::px;
@@ -128,7 +128,7 @@ fn test_new_note_creates_note_without_priority() {
     let note = Record::new_note("Test note".to_string());
     assert_eq!(note.content, "Test note");
     assert_eq!(note.priority, None);
-    assert_eq!(note.record_type, beitang::models::RecordType::Note);
+    assert_eq!(note.record_type, robinne::models::RecordType::Note);
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_new_task_creates_task_with_priority() {
     assert_eq!(task.title, Some("Test Title".to_string()));
     assert_eq!(task.content, "Test content");
     assert_eq!(task.priority, Some(Priority::High));
-    assert_eq!(task.record_type, beitang::models::RecordType::Task);
+    assert_eq!(task.record_type, robinne::models::RecordType::Task);
 }
 
 #[test]

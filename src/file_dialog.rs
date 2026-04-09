@@ -44,7 +44,7 @@ pub fn pick_image_files(parent_window_hint: Option<ParentWindowHint>) -> FileDia
 }
 
 pub fn pick_archive_file(parent_window_hint: Option<ParentWindowHint>) -> SingleFileDialogFuture {
-    let mut dialog = AsyncFileDialog::new().add_filter("Beitang Export", &["zip"]);
+    let mut dialog = AsyncFileDialog::new().add_filter("Robinne Export", &["zip"]);
     if let Some(directory) = last_archive_directory() {
         dialog = dialog.set_directory(directory);
     }
@@ -65,7 +65,7 @@ pub fn save_archive_file(
     file_name: &str,
 ) -> SingleFileDialogFuture {
     let mut dialog = AsyncFileDialog::new()
-        .add_filter("Beitang Export", &["zip"])
+        .add_filter("Robinne Export", &["zip"])
         .set_file_name(file_name);
     if let Some(directory) = last_archive_directory() {
         dialog = dialog.set_directory(directory);

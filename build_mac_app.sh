@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="Beitang"
-BUNDLE_ID="com.jiangzhengjie.beitang"
+APP_NAME="Robinne"
+BUNDLE_ID="com.ak22ak.robinne"
 TARGET_DIR="${ROOT_DIR}/target/debug"
 APP_DIR="${ROOT_DIR}/${APP_NAME}.app/Contents"
 ICON_SCRIPT="${ROOT_DIR}/scripts/generate_app_icon.sh"
@@ -22,7 +22,7 @@ if [[ -x "${ICON_SCRIPT}" ]]; then
 fi
 
 echo "Copying binary..."
-cp "${TARGET_DIR}/beitang" "${APP_DIR}/MacOS/${APP_NAME}"
+cp "${TARGET_DIR}/robinne" "${APP_DIR}/MacOS/${APP_NAME}"
 
 if [[ -f "${ICON_FILE}" ]]; then
     echo "Copying app icon..."
