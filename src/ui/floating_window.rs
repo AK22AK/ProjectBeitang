@@ -5,10 +5,16 @@ use crate::ui::attachment_draft::{
     attachment_lightbox_size, attachment_preview_size, format_attachment_meta,
     prepare_pending_attachments, PendingAttachment,
 };
+use crate::ui::metadata_autocomplete::{
+    apply_completion_to_input, autocomplete_item, render_autocomplete_menu,
+    MetadataAutocompleteAction, MetadataAutocompleteState, MetadataCatalog,
+};
 use crate::ui::parsing;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Escape, IndentInline, Input, InputEvent, InputState, Paste};
+use gpui_component::input::{
+    Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Paste,
+};
 use gpui_component::IconName;
 use gpui_component::{h_flex, v_flex};
 use std::cell::RefCell;
@@ -47,10 +53,10 @@ impl InputMode {
     fn placeholder(&self) -> &'static str {
         match self {
             InputMode::Task => {
-                "输入任务标题，Enter 换行添加正文 (Cmd+Enter 保存, Shift+Cmd+Enter 打开任务)"
+                "输入任务标题，Enter 换行添加正文 (Cmd+Enter 保存, Shift+Cmd+Enter 打开任务, #标签 @人物)"
             }
             InputMode::Record => {
-                "输入记录，Enter 换行后首行作为标题 (Cmd+Enter 保存, Shift+Cmd+Enter 打开记录)"
+                "输入记录，Enter 换行后首行作为标题 (Cmd+Enter 保存, Shift+Cmd+Enter 打开记录, #标签 @人物)"
             }
         }
     }
@@ -71,13 +77,19 @@ fn quick_add_window_size_for_content(
     input_rows: usize,
     attachment_rows: usize,
     status_lines: usize,
+    autocomplete_rows: usize,
 ) -> Size<Pixels> {
     let input_extra_rows = input_rows.saturating_sub(1).min(5) as f32;
     let attachment_extra_height = attachment_rows as f32 * 28.0;
     let status_extra_height = status_lines as f32 * 22.0;
+    let autocomplete_extra_height = autocomplete_rows as f32 * 32.0;
     size(
         px(520.0),
-        px(244.0 + input_extra_rows * 28.0 + attachment_extra_height + status_extra_height),
+        px(244.0
+            + input_extra_rows * 28.0
+            + attachment_extra_height
+            + status_extra_height
+            + autocomplete_extra_height),
     )
 }
 
@@ -147,6 +159,9 @@ pub struct QuickAddWindow {
     focus_handle: FocusHandle,
     feedback: QuickAddFeedback,
     esc_confirm_generation: u64,
+    metadata_autocomplete: MetadataAutocompleteState,
+    metadata_catalog_loading: bool,
+    metadata_catalog_loaded: bool,
     pub hide_app_on_close: bool,
 }
 
@@ -179,6 +194,19 @@ impl QuickAddWindow {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.ensure_metadata_catalog(cx);
+                    this.sync_session_state(cx);
+                    this.clear_transient_feedback(cx);
+                    this.sync_metadata_autocomplete(window, cx);
+                }
+                InputEvent::Focus => {
+                    this.ensure_metadata_catalog(cx);
+                    this.sync_metadata_autocomplete(window, cx);
+                }
+                InputEvent::Blur => {
+                    this.clear_metadata_autocomplete(window, cx);
+                }
                 InputEvent::PressEnter { secondary } => {
                     if *secondary {
                         let draft_text = this.session.borrow().draft_text.clone();
@@ -194,12 +222,6 @@ impl QuickAddWindow {
                         }
                     }
                 }
-                InputEvent::Change => {
-                    this.sync_session_state(cx);
-                    this.clear_transient_feedback(cx);
-                    this.sync_window_size(window, cx);
-                }
-                InputEvent::Focus | InputEvent::Blur => {}
             },
         );
 
@@ -219,8 +241,13 @@ impl QuickAddWindow {
             focus_handle,
             feedback: QuickAddFeedback::Idle,
             esc_confirm_generation: 0,
+            metadata_autocomplete: MetadataAutocompleteState::default(),
+            metadata_catalog_loading: false,
+            metadata_catalog_loaded: false,
             hide_app_on_close: false,
         };
+        let mut view = view;
+        view.load_metadata_catalog(cx);
         view.sync_window_size(window, cx);
         view
     }
@@ -260,6 +287,7 @@ impl QuickAddWindow {
             self.visible_input_rows(cx),
             self.visible_attachment_rows(),
             self.visible_status_lines(),
+            self.visible_autocomplete_rows(),
         ));
     }
 
@@ -275,11 +303,168 @@ impl QuickAddWindow {
         self.has_input(cx) || !self.pending_attachments.is_empty()
     }
 
+    fn visible_autocomplete_rows(&self) -> usize {
+        self.metadata_autocomplete.visible_match_count()
+    }
+
     fn pending_attachment_paths(&self) -> Vec<std::path::PathBuf> {
         self.pending_attachments
             .iter()
             .map(|attachment| attachment.path.clone())
             .collect()
+    }
+
+    fn load_metadata_catalog(&mut self, cx: &mut Context<Self>) {
+        if self.metadata_catalog_loading {
+            return;
+        }
+
+        self.metadata_catalog_loading = true;
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let tags = store.get_tag_catalog().await;
+            let persons = store.get_person_catalog().await;
+            let _ = view.update(cx, |this, cx| {
+                this.metadata_catalog_loading = false;
+
+                match (tags, persons) {
+                    (Ok(tags), Ok(persons)) => {
+                        this.metadata_catalog_loaded = true;
+                        this.metadata_autocomplete
+                            .set_catalog(MetadataCatalog { tags, persons });
+                        this.sync_metadata_autocomplete_state(cx);
+                    }
+                    (tags_result, persons_result) => {
+                        this.metadata_catalog_loaded = false;
+
+                        if let Err(err) = tags_result {
+                            eprintln!("[QuickAdd] Failed to load tag catalog: {}", err);
+                        }
+                        if let Err(err) = persons_result {
+                            eprintln!("[QuickAdd] Failed to load person catalog: {}", err);
+                        }
+
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn ensure_metadata_catalog(&mut self, cx: &mut Context<Self>) {
+        if !self.metadata_catalog_loaded && !self.metadata_catalog_loading {
+            self.load_metadata_catalog(cx);
+        }
+    }
+
+    fn sync_metadata_autocomplete_state(&mut self, cx: &mut Context<Self>) {
+        let input = self.input_state.read(cx);
+        self.metadata_autocomplete.sync_from_input(&input);
+        cx.notify();
+    }
+
+    fn sync_metadata_autocomplete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_metadata_autocomplete_state(cx);
+        self.sync_window_size(window, cx);
+    }
+
+    fn clear_metadata_autocomplete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.metadata_autocomplete.clear();
+        self.sync_window_size(window, cx);
+        cx.notify();
+    }
+
+    fn handle_metadata_keydown(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let text = self.input_text(cx);
+        match self
+            .metadata_autocomplete
+            .handle_key(event.keystroke.key.as_str(), &text)
+        {
+            MetadataAutocompleteAction::Ignored => false,
+            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.sync_window_size(window, cx);
+                cx.notify();
+                true
+            }
+            MetadataAutocompleteAction::Applied(edit) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                apply_completion_to_input(&self.input_state, &edit, window, cx);
+                self.sync_metadata_autocomplete(window, cx);
+                true
+            }
+        }
+    }
+
+    fn handle_metadata_action(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let text = self.input_text(cx);
+        match self.metadata_autocomplete.handle_key(key, &text) {
+            MetadataAutocompleteAction::Ignored => false,
+            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                window.prevent_default();
+                cx.stop_propagation();
+                self.sync_window_size(window, cx);
+                cx.notify();
+                true
+            }
+            MetadataAutocompleteAction::Applied(edit) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                apply_completion_to_input(&self.input_state, &edit, window, cx);
+                self.sync_metadata_autocomplete(window, cx);
+                true
+            }
+        }
+    }
+
+    fn apply_metadata_candidate(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.input_text(cx);
+        if let Some(edit) = self.metadata_autocomplete.apply_index(&text, index) {
+            apply_completion_to_input(&self.input_state, &edit, window, cx);
+            self.sync_metadata_autocomplete(window, cx);
+        }
+    }
+
+    fn render_metadata_autocomplete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        render_autocomplete_menu(
+            &self.metadata_autocomplete,
+            "quick-add-metadata-autocomplete",
+            cx,
+            |idx, candidate, selected| {
+                autocomplete_item(
+                    ("quick-add-metadata-candidate", idx),
+                    &candidate.name,
+                    candidate.usage_count,
+                    selected,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                        this.apply_metadata_candidate(idx, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .into_any_element()
+            },
+        )
     }
 
     fn visible_attachment_rows(&self) -> usize {
@@ -1041,14 +1226,30 @@ impl Render for QuickAddWindow {
             .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
                 this.paste_pending_attachments(window, cx);
             }))
+            .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
+                let _ = this.handle_metadata_action("up", window, cx);
+            }))
+            .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
+                let _ = this.handle_metadata_action("down", window, cx);
+            }))
             .on_action(cx.listener(|this, _action: &Escape, window, cx| {
+                if this.handle_metadata_action("escape", window, cx) {
+                    return;
+                }
                 this.handle_escape(window, cx);
             }))
             .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                if this.handle_metadata_action("tab", window, cx) {
+                    return;
+                }
                 this.clear_transient_feedback(cx);
                 this.toggle_mode(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.handle_metadata_keydown(event, window, cx) {
+                    return;
+                }
+
                 let modifiers = event.keystroke.modifiers;
                 let key = event.keystroke.key.as_str();
 
@@ -1106,17 +1307,25 @@ impl Render for QuickAddWindow {
                         .unwrap_or_else(transparent_white))
                     .p(px(2.0))
                     .child(
-                        h_flex()
+                        v_flex()
                             .w_full()
-                            .items_start()
-                            .gap(px(2.0))
+                            .gap(px(0.0))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(Input::new(&self.input_state).flex_1()),
+                                h_flex()
+                                    .w_full()
+                                    .items_start()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .child(Input::new(&self.input_state).flex_1()),
+                                    )
+                                    .child(self.render_inline_attachment_trigger(cx)),
                             )
-                            .child(self.render_inline_attachment_trigger(cx)),
+                            .when(self.metadata_autocomplete.is_open(), |el| {
+                                el.child(self.render_metadata_autocomplete_menu(cx))
+                            }),
                     ),
             )
             .when(self.attachments_loading, |el| {

@@ -2,8 +2,8 @@ use crate::data_management::{
     AttachmentHealthSummary, AttachmentListItem, AttachmentStorageBackend, StorageUsageSummary,
 };
 use crate::models::{
-    Attachment, AttachmentStatus, Person, Priority, Record, RecordType, Tag, TaskStatus,
-    TimelineQuery,
+    Attachment, AttachmentStatus, MetadataCatalogEntry, Person, Priority, Record, RecordType, Tag,
+    TaskStatus, TimelineQuery,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
@@ -1160,6 +1160,25 @@ impl Database {
         tags.collect::<Result<Vec<_>>>()
     }
 
+    pub fn get_tag_catalog(&self) -> Result<Vec<MetadataCatalogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, COUNT(rt.record_id) AS usage_count
+             FROM tags t
+             LEFT JOIN record_tags rt ON rt.tag_id = t.id
+             GROUP BY t.id, t.name
+             ORDER BY usage_count DESC, t.name ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataCatalogEntry {
+                name: row.get(0)?,
+                usage_count: row.get::<_, i64>(1)?.max(0) as usize,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>>>()
+    }
+
     pub fn get_tag_by_name(&self, name: &str) -> Result<Option<Tag>> {
         let mut stmt = self
             .conn
@@ -1267,6 +1286,25 @@ impl Database {
         })?;
 
         persons.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_person_catalog(&self) -> Result<Vec<MetadataCatalogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.name, COUNT(rp.record_id) AS usage_count
+             FROM persons p
+             LEFT JOIN record_persons rp ON rp.person_id = p.id
+             GROUP BY p.id, p.name
+             ORDER BY usage_count DESC, p.name ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataCatalogEntry {
+                name: row.get(0)?,
+                usage_count: row.get::<_, i64>(1)?.max(0) as usize,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>>>()
     }
 
     pub fn get_person_by_name(&self, name: &str) -> Result<Option<Person>> {
@@ -1760,6 +1798,60 @@ mod tests {
         db.delete_person(person.id).unwrap();
         let persons = db.get_persons().unwrap();
         assert_eq!(persons.len(), 0);
+    }
+
+    #[test]
+    fn test_metadata_catalog_returns_usage_counts() {
+        let (db, _temp) = setup_test_db();
+
+        db.create_tag("零次", None).unwrap();
+        db.create_person("未关联").unwrap();
+
+        let mut first = Record::new_note("记录一".to_string());
+        first.tags = vec!["开发".to_string(), "测试".to_string()];
+        first.persons = vec!["张三".to_string()];
+        db.create_record(&first).unwrap();
+
+        let mut second = Record::new_note("记录二".to_string());
+        second.tags = vec!["开发".to_string()];
+        second.persons = vec!["张三".to_string(), "李四".to_string()];
+        db.create_record(&second).unwrap();
+
+        let tag_catalog = db.get_tag_catalog().unwrap();
+        assert_eq!(tag_catalog[0].name, "开发");
+        assert_eq!(tag_catalog[0].usage_count, 2);
+        assert_eq!(
+            tag_catalog
+                .iter()
+                .find(|entry| entry.name == "测试")
+                .map(|entry| entry.usage_count),
+            Some(1)
+        );
+        assert_eq!(
+            tag_catalog
+                .iter()
+                .find(|entry| entry.name == "零次")
+                .map(|entry| entry.usage_count),
+            Some(0)
+        );
+
+        let person_catalog = db.get_person_catalog().unwrap();
+        assert_eq!(person_catalog[0].name, "张三");
+        assert_eq!(person_catalog[0].usage_count, 2);
+        assert_eq!(
+            person_catalog
+                .iter()
+                .find(|entry| entry.name == "李四")
+                .map(|entry| entry.usage_count),
+            Some(1)
+        );
+        assert_eq!(
+            person_catalog
+                .iter()
+                .find(|entry| entry.name == "未关联")
+                .map(|entry| entry.usage_count),
+            Some(0)
+        );
     }
 
     #[test]
@@ -2296,7 +2388,8 @@ mod tests {
         let (db, _temp) = setup_test_db();
         let now = Utc::now();
 
-        let mut in_progress = Record::new_task("进行中".to_string(), "".to_string(), Priority::High);
+        let mut in_progress =
+            Record::new_task("进行中".to_string(), "".to_string(), Priority::High);
         in_progress.status = Some(TaskStatus::InProgress);
         in_progress.started_at = Some(now - chrono::Duration::hours(2));
         in_progress.updated_at = now - chrono::Duration::minutes(10);

@@ -3,7 +3,7 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     button::Button,
     h_flex,
-    input::{Input, InputEvent, InputState, Paste},
+    input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Paste},
     scroll::ScrollableElement,
     v_flex,
 };
@@ -14,6 +14,10 @@ use uuid::Uuid;
 use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::{Attachment, AttachmentStatus, Record};
 use crate::store::Store;
+use crate::ui::metadata_autocomplete::{
+    apply_completion_to_input, autocomplete_item, render_autocomplete_menu,
+    MetadataAutocompleteAction, MetadataAutocompleteState, MetadataCatalog,
+};
 use crate::ui::parsing;
 use crate::ui::tokenized_text::{
     render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
@@ -41,6 +45,8 @@ pub struct RecordDetailSidebar {
     content_input: Option<Entity<InputState>>,
     title_input_subscription: Option<Subscription>,
     content_input_subscription: Option<Subscription>,
+    title_metadata_autocomplete: MetadataAutocompleteState,
+    content_metadata_autocomplete: MetadataAutocompleteState,
     editing_title: bool,
     editing_content: bool,
     content_expanded: bool,
@@ -87,6 +93,8 @@ impl RecordDetailSidebar {
             content_input: None,
             title_input_subscription: None,
             content_input_subscription: None,
+            title_metadata_autocomplete: MetadataAutocompleteState::default(),
+            content_metadata_autocomplete: MetadataAutocompleteState::default(),
             editing_title: false,
             editing_content: false,
             content_expanded: false,
@@ -163,10 +171,15 @@ impl RecordDetailSidebar {
             let subscription = cx.subscribe_in(
                 &title_input,
                 window,
-                |this, _state, event: &InputEvent, window, cx| {
-                    if let InputEvent::Blur = event {
+                |this, _state, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change | InputEvent::Focus => {
+                        this.sync_title_metadata_autocomplete(cx);
+                    }
+                    InputEvent::Blur => {
+                        this.clear_title_metadata_autocomplete(cx);
                         this.cancel_title_edit(window, cx);
                     }
+                    InputEvent::PressEnter { .. } => {}
                 },
             );
             self.title_input = Some(title_input);
@@ -188,10 +201,15 @@ impl RecordDetailSidebar {
             let subscription = cx.subscribe_in(
                 &content_input,
                 window,
-                |this, _state, event: &InputEvent, window, cx| {
-                    if let InputEvent::Blur = event {
+                |this, _state, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change | InputEvent::Focus => {
+                        this.sync_content_metadata_autocomplete(cx);
+                    }
+                    InputEvent::Blur => {
+                        this.clear_content_metadata_autocomplete(cx);
                         this.cancel_content_edit(window, cx);
                     }
+                    InputEvent::PressEnter { .. } => {}
                 },
             );
             self.content_input = Some(content_input);
@@ -199,6 +217,9 @@ impl RecordDetailSidebar {
         }
 
         self.reload_attachments(cx);
+        self.title_metadata_autocomplete.clear();
+        self.content_metadata_autocomplete.clear();
+        self.load_metadata_catalog(cx);
         cx.notify();
     }
 
@@ -276,6 +297,265 @@ impl RecordDetailSidebar {
             });
         }
         cx.notify();
+    }
+
+    pub fn load_metadata_catalog(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let tags = store.get_tag_catalog().await.unwrap_or_default();
+            let persons = store.get_person_catalog().await.unwrap_or_default();
+            let _ = view.update(cx, |this, cx| {
+                let catalog = MetadataCatalog { tags, persons };
+                this.title_metadata_autocomplete
+                    .set_catalog(catalog.clone());
+                this.content_metadata_autocomplete.set_catalog(catalog);
+                this.sync_title_metadata_autocomplete(cx);
+                this.sync_content_metadata_autocomplete(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn sync_title_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.title_input.as_ref() {
+            self.title_metadata_autocomplete
+                .sync_from_input(&input.read(cx));
+        } else {
+            self.title_metadata_autocomplete.clear();
+        }
+        cx.notify();
+    }
+
+    fn sync_content_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.content_input.as_ref() {
+            self.content_metadata_autocomplete
+                .sync_from_input(&input.read(cx));
+        } else {
+            self.content_metadata_autocomplete.clear();
+        }
+        cx.notify();
+    }
+
+    fn clear_title_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
+        self.title_metadata_autocomplete.clear();
+        cx.notify();
+    }
+
+    fn clear_content_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
+        self.content_metadata_autocomplete.clear();
+        cx.notify();
+    }
+
+    fn handle_metadata_keydown(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.title_metadata_autocomplete.is_open() {
+            return self.handle_title_metadata_keydown(event, window, cx);
+        }
+        if self.content_metadata_autocomplete.is_open() {
+            return self.handle_content_metadata_keydown(event, window, cx);
+        }
+        false
+    }
+
+    fn handle_title_metadata_keydown(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(input) = self.title_input.as_ref() else {
+            return false;
+        };
+        let text = input.read(cx).text().to_string();
+        match self
+            .title_metadata_autocomplete
+            .handle_key(event.keystroke.key.as_str(), &text)
+        {
+            MetadataAutocompleteAction::Ignored => false,
+            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                true
+            }
+            MetadataAutocompleteAction::Applied(edit) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                apply_completion_to_input(input, &edit, window, cx);
+                self.sync_title_metadata_autocomplete(cx);
+                true
+            }
+        }
+    }
+
+    fn handle_metadata_action(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.title_metadata_autocomplete.is_open() {
+            let Some(input) = self.title_input.as_ref() else {
+                return false;
+            };
+            let text = input.read(cx).text().to_string();
+            match self.title_metadata_autocomplete.handle_key(key, &text) {
+                MetadataAutocompleteAction::Ignored => {}
+                MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return true;
+                }
+                MetadataAutocompleteAction::Applied(edit) => {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    apply_completion_to_input(input, &edit, window, cx);
+                    self.sync_title_metadata_autocomplete(cx);
+                    return true;
+                }
+            }
+        }
+
+        if self.content_metadata_autocomplete.is_open() {
+            let Some(input) = self.content_input.as_ref() else {
+                return false;
+            };
+            let text = input.read(cx).text().to_string();
+            match self.content_metadata_autocomplete.handle_key(key, &text) {
+                MetadataAutocompleteAction::Ignored => false,
+                MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                    true
+                }
+                MetadataAutocompleteAction::Applied(edit) => {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    apply_completion_to_input(input, &edit, window, cx);
+                    self.sync_content_metadata_autocomplete(cx);
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    fn handle_content_metadata_keydown(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(input) = self.content_input.as_ref() else {
+            return false;
+        };
+        let text = input.read(cx).text().to_string();
+        match self
+            .content_metadata_autocomplete
+            .handle_key(event.keystroke.key.as_str(), &text)
+        {
+            MetadataAutocompleteAction::Ignored => false,
+            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                true
+            }
+            MetadataAutocompleteAction::Applied(edit) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                apply_completion_to_input(input, &edit, window, cx);
+                self.sync_content_metadata_autocomplete(cx);
+                true
+            }
+        }
+    }
+
+    fn apply_title_metadata_candidate(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.title_input.as_ref() else {
+            return;
+        };
+        let text = input.read(cx).text().to_string();
+        if let Some(edit) = self.title_metadata_autocomplete.apply_index(&text, index) {
+            apply_completion_to_input(input, &edit, window, cx);
+            self.sync_title_metadata_autocomplete(cx);
+        }
+    }
+
+    fn apply_content_metadata_candidate(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.content_input.as_ref() else {
+            return;
+        };
+        let text = input.read(cx).text().to_string();
+        if let Some(edit) = self.content_metadata_autocomplete.apply_index(&text, index) {
+            apply_completion_to_input(input, &edit, window, cx);
+            self.sync_content_metadata_autocomplete(cx);
+        }
+    }
+
+    fn render_title_metadata_autocomplete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        render_autocomplete_menu(
+            &self.title_metadata_autocomplete,
+            "record-title-metadata-autocomplete",
+            cx,
+            |idx, candidate, selected| {
+                autocomplete_item(
+                    ("record-title-metadata-candidate", idx),
+                    &candidate.name,
+                    candidate.usage_count,
+                    selected,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                        this.apply_title_metadata_candidate(idx, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .into_any_element()
+            },
+        )
+    }
+
+    fn render_content_metadata_autocomplete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        render_autocomplete_menu(
+            &self.content_metadata_autocomplete,
+            "record-content-metadata-autocomplete",
+            cx,
+            |idx, candidate, selected| {
+                autocomplete_item(
+                    ("record-content-metadata-candidate", idx),
+                    &candidate.name,
+                    candidate.usage_count,
+                    selected,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                        this.apply_content_metadata_candidate(idx, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .into_any_element()
+            },
+        )
     }
 
     const APPROX_CHARS_PER_LINE: usize = 45;
@@ -864,8 +1144,23 @@ impl Render for RecordDetailSidebar {
                     .border_color(rgb(0xe8e8e8))
                     .bg(rgb(0xffffff))
                     .cursor_default()
+                    .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
+                        let _ = this.handle_metadata_action("up", window, cx);
+                    }))
+                    .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
+                        let _ = this.handle_metadata_action("down", window, cx);
+                    }))
+                    .capture_action(cx.listener(|this, _action: &IndentInline, window, cx| {
+                        let _ = this.handle_metadata_action("tab", window, cx);
+                    }))
+                    .capture_action(cx.listener(|this, _action: &Escape, window, cx| {
+                        let _ = this.handle_metadata_action("escape", window, cx);
+                    }))
                     .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
                         cx.stop_propagation();
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        let _ = this.handle_metadata_keydown(event, window, cx);
                     }))
                     .child(
                         div()
@@ -920,7 +1215,8 @@ impl Render for RecordDetailSidebar {
                                                 self.title_input
                                                     .clone()
                                                     .map(|input| {
-                                                        div()
+                                                        v_flex()
+                                                            .gap(px(0.0))
                                                             .on_mouse_down(
                                                                 gpui::MouseButton::Left,
                                                                 cx.listener(
@@ -936,6 +1232,17 @@ impl Render for RecordDetailSidebar {
                                                                     .font_weight(
                                                                         gpui::FontWeight::SEMIBOLD,
                                                                     ),
+                                                            )
+                                                            .when(
+                                                                self.title_metadata_autocomplete
+                                                                    .is_open(),
+                                                                |el| {
+                                                                    el.child(
+                                                                        self.render_title_metadata_autocomplete_menu(
+                                                                            cx,
+                                                                        ),
+                                                                    )
+                                                                },
                                                             )
                                                             .into_any_element()
                                                     })
@@ -1017,7 +1324,8 @@ impl Render for RecordDetailSidebar {
                                                         let needs_scroll = line_count > 6 && !content_expanded;
                                                         let is_expanded = content_expanded;
 
-                                                        div()
+                                                        v_flex()
+                                                            .gap(px(0.0))
                                                             .on_mouse_down(
                                                                 gpui::MouseButton::Left,
                                                                 cx.listener(
@@ -1041,6 +1349,17 @@ impl Render for RecordDetailSidebar {
                                                                     .appearance(false)
                                                                     .text_size(px(14.0))
                                                                     .when(needs_scroll || is_expanded, |i| i.h_full()),
+                                                            )
+                                                            .when(
+                                                                self.content_metadata_autocomplete
+                                                                    .is_open(),
+                                                                |el| {
+                                                                    el.child(
+                                                                        self.render_content_metadata_autocomplete_menu(
+                                                                            cx,
+                                                                        ),
+                                                                    )
+                                                                },
                                                             )
                                                             .into_any_element()
                                                     })

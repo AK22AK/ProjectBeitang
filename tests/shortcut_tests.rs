@@ -1,3 +1,4 @@
+use gpui::px;
 use robinne::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
 use robinne::config::{parse_hotkey, ShortcutConfig};
 use robinne::models::{Priority, Record};
@@ -5,7 +6,6 @@ use robinne::shortcut_manager::ShortcutEvent;
 use robinne::ui::sidebar::{
     main_sidebar_layout_mode, main_sidebar_width, Panel, SidebarLayoutMode,
 };
-use gpui::px;
 
 #[test]
 fn test_default_shortcut_config() {

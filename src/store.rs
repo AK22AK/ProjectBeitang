@@ -8,7 +8,9 @@ use crate::data_management::{
     ImportPreview, ImportResult, StorageUsageSummary,
 };
 use crate::db::Database;
-use crate::models::{Attachment, Person, Record, Tag, TaskStatus, TimelineQuery};
+use crate::models::{
+    Attachment, MetadataCatalogEntry, Person, Record, Tag, TaskStatus, TimelineQuery,
+};
 use async_channel::{unbounded, Receiver, Sender};
 use chrono::{DateTime, Duration, Local};
 use std::path::PathBuf;
@@ -122,6 +124,9 @@ pub enum StoreCommand {
     GetAllTags {
         respond_to: Sender<Result<Vec<Tag>, String>>,
     },
+    GetTagCatalog {
+        respond_to: Sender<Result<Vec<MetadataCatalogEntry>, String>>,
+    },
     CreateTag {
         name: String,
         respond_to: Sender<Result<i64, String>>,
@@ -134,6 +139,9 @@ pub enum StoreCommand {
     // 人物操作
     GetAllPersons {
         respond_to: Sender<Result<Vec<Person>, String>>,
+    },
+    GetPersonCatalog {
+        respond_to: Sender<Result<Vec<MetadataCatalogEntry>, String>>,
     },
     CreatePerson {
         name: String,
@@ -252,7 +260,10 @@ fn derive_task_stats(tasks: &[Record], now: DateTime<Local>) -> DerivedTaskStats
                 stats.high_priority_open_count += 1;
             }
 
-            if let Some(due_date) = task.due_date.map(|due| due.with_timezone(&Local).date_naive()) {
+            if let Some(due_date) = task
+                .due_date
+                .map(|due| due.with_timezone(&Local).date_naive())
+            {
                 if due_date < today {
                     stats.overdue_count += 1;
                 } else if due_date == today {
@@ -444,6 +455,10 @@ impl StoreRuntime {
                     let result = self.handle_get_all_tags().await;
                     let _ = respond_to.send(result).await;
                 }
+                StoreCommand::GetTagCatalog { respond_to } => {
+                    let result = self.handle_get_tag_catalog().await;
+                    let _ = respond_to.send(result).await;
+                }
                 StoreCommand::CreateTag { name, respond_to } => {
                     let result = self.handle_create_tag(name).await;
                     let _ = respond_to.send(result).await;
@@ -458,6 +473,10 @@ impl StoreRuntime {
                 }
                 StoreCommand::GetAllPersons { respond_to } => {
                     let result = self.handle_get_all_persons().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetPersonCatalog { respond_to } => {
+                    let result = self.handle_get_person_catalog().await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::CreatePerson { name, respond_to } => {
@@ -925,6 +944,23 @@ impl StoreRuntime {
         }
     }
 
+    async fn handle_get_tag_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        eprintln!("[Store] handle_get_tag_catalog called");
+        match &self.db {
+            Some(db) => match db.get_tag_catalog() {
+                Ok(entries) => {
+                    eprintln!("[Store] Found {} tag catalog entries", entries.len());
+                    Ok(entries)
+                }
+                Err(e) => {
+                    eprintln!("[Store] Get tag catalog query failed: {}", e);
+                    Err(format!("Database error: {}", e))
+                }
+            },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
     async fn handle_add_tag_to_record(
         &self,
         record_id: uuid::Uuid,
@@ -969,6 +1005,23 @@ impl StoreRuntime {
                 }
                 Err(e) => {
                     eprintln!("[Store] Create person failed: {}", e);
+                    Err(format!("Database error: {}", e))
+                }
+            },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_person_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        eprintln!("[Store] handle_get_person_catalog called");
+        match &self.db {
+            Some(db) => match db.get_person_catalog() {
+                Ok(entries) => {
+                    eprintln!("[Store] Found {} person catalog entries", entries.len());
+                    Ok(entries)
+                }
+                Err(e) => {
+                    eprintln!("[Store] Get person catalog query failed: {}", e);
                     Err(format!("Database error: {}", e))
                 }
             },
@@ -1623,6 +1676,21 @@ impl Store {
             .unwrap_or_else(|_| Err("Failed to create tag".to_string()))
     }
 
+    pub async fn get_tag_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        eprintln!("[Store] get_tag_catalog called");
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetTagCatalog { respond_to: tx })
+            .await;
+        let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
+        eprintln!(
+            "[Store] get_tag_catalog returning: {:?} entries",
+            result.as_ref().map(|v| v.len())
+        );
+        result
+    }
+
     pub async fn add_tag_to_record(
         &self,
         record_id: uuid::Uuid,
@@ -1672,6 +1740,21 @@ impl Store {
         rx.recv()
             .await
             .unwrap_or_else(|_| Err("Failed to create person".to_string()))
+    }
+
+    pub async fn get_person_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        eprintln!("[Store] get_person_catalog called");
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetPersonCatalog { respond_to: tx })
+            .await;
+        let result = rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()));
+        eprintln!(
+            "[Store] get_person_catalog returning: {:?} entries",
+            result.as_ref().map(|v| v.len())
+        );
+        result
     }
 
     pub async fn add_person_to_record(
@@ -1752,11 +1835,35 @@ mod tests {
         let now = Local.with_ymd_and_hms(2026, 4, 8, 9, 30, 0).unwrap();
         let tasks = vec![
             make_task(TaskStatus::Todo, Some(Priority::High), Some(0), None, now),
-            make_task(TaskStatus::InProgress, Some(Priority::Medium), Some(1), None, now),
+            make_task(
+                TaskStatus::InProgress,
+                Some(Priority::Medium),
+                Some(1),
+                None,
+                now,
+            ),
             make_task(TaskStatus::Todo, Some(Priority::Low), Some(-1), None, now),
-            make_task(TaskStatus::Done, Some(Priority::High), Some(0), Some(0), now),
-            make_task(TaskStatus::Done, Some(Priority::Medium), None, Some(-3), now),
-            make_task(TaskStatus::Cancelled, Some(Priority::High), Some(2), Some(-6), now),
+            make_task(
+                TaskStatus::Done,
+                Some(Priority::High),
+                Some(0),
+                Some(0),
+                now,
+            ),
+            make_task(
+                TaskStatus::Done,
+                Some(Priority::Medium),
+                None,
+                Some(-3),
+                now,
+            ),
+            make_task(
+                TaskStatus::Cancelled,
+                Some(Priority::High),
+                Some(2),
+                Some(-6),
+                now,
+            ),
         ];
 
         let stats = derive_task_stats(&tasks, now);
@@ -1778,8 +1885,20 @@ mod tests {
     fn derive_task_stats_excludes_done_and_cancelled_from_open_counts() {
         let now = Local.with_ymd_and_hms(2026, 4, 8, 9, 30, 0).unwrap();
         let tasks = vec![
-            make_task(TaskStatus::Done, Some(Priority::High), Some(-2), Some(-1), now),
-            make_task(TaskStatus::Cancelled, Some(Priority::High), Some(0), Some(0), now),
+            make_task(
+                TaskStatus::Done,
+                Some(Priority::High),
+                Some(-2),
+                Some(-1),
+                now,
+            ),
+            make_task(
+                TaskStatus::Cancelled,
+                Some(Priority::High),
+                Some(0),
+                Some(0),
+                now,
+            ),
         ];
 
         let stats = derive_task_stats(&tasks, now);

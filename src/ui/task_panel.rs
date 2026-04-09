@@ -5,6 +5,10 @@ use crate::ui::attachment_draft::{
     attachment_lightbox_size, attachment_preview_size, format_attachment_meta,
     prepare_pending_attachments, PendingAttachment,
 };
+use crate::ui::metadata_autocomplete::{
+    apply_completion_to_input, autocomplete_item, render_autocomplete_menu,
+    MetadataAutocompleteAction, MetadataAutocompleteState, MetadataCatalog,
+};
 use crate::ui::parsing;
 use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
 use crate::ui::task_detail_sidebar::TaskDetailSidebar;
@@ -17,7 +21,9 @@ use gpui::StatefulInteractiveElement as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::date_picker::{DatePicker, DatePickerState};
-use gpui_component::input::{Input, InputEvent, InputState, Paste};
+use gpui_component::input::{
+    Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Paste,
+};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, IconName};
 use std::collections::{HashMap, HashSet};
@@ -204,6 +210,7 @@ pub struct TaskPanel {
     available_tags: Vec<String>,
     tag_filter_mode: TagFilterMode,
     pending_deletion: Option<PendingDeletion>,
+    metadata_autocomplete: MetadataAutocompleteState,
     task_detail_sidebar: Entity<TaskDetailSidebar>,
 }
 
@@ -222,12 +229,17 @@ impl TaskPanel {
             &input_state,
             window,
             |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change | InputEvent::Focus => {
+                    this.sync_metadata_autocomplete(cx);
+                }
+                InputEvent::Blur => {
+                    this.clear_metadata_autocomplete(cx);
+                }
                 InputEvent::PressEnter { secondary } => {
                     if *secondary {
                         this.create_task(window, cx);
                     }
                 }
-                _ => {}
             },
         );
 
@@ -275,6 +287,7 @@ impl TaskPanel {
             available_tags: Vec::new(),
             tag_filter_mode: TagFilterMode::And,
             pending_deletion: None,
+            metadata_autocomplete: MetadataAutocompleteState::default(),
             task_detail_sidebar: cx
                 .new(|cx| TaskDetailSidebar::new(sidebar_store.clone(), window, cx)),
         };
@@ -308,6 +321,7 @@ impl TaskPanel {
 
         panel.load_tasks(cx);
         panel.load_available_tags(cx);
+        panel.load_metadata_catalog(cx);
         panel
     }
 
@@ -379,13 +393,18 @@ impl TaskPanel {
 
             let updated_task = task.clone();
             let store = self.store.clone();
+            let sidebar = self.task_detail_sidebar.clone();
             cx.spawn(
                 async move |view, cx| match store.update_record(updated_task).await {
                     Ok(_) => {
                         view.update(cx, |panel, cx| {
                             panel.load_available_tags(cx);
+                            panel.load_metadata_catalog(cx);
                         })
                         .ok();
+                        let _ = sidebar.update(cx, |sidebar, cx| {
+                            sidebar.load_metadata_catalog(cx);
+                        });
                     }
                     Err(e) => {
                         eprintln!("[TaskPanel] Failed to update task: {}", e);
@@ -396,6 +415,122 @@ impl TaskPanel {
 
             cx.notify();
         }
+    }
+
+    fn load_metadata_catalog(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| {
+            let tags = store.get_tag_catalog().await.unwrap_or_default();
+            let persons = store.get_person_catalog().await.unwrap_or_default();
+            let _ = view.update(cx, |panel, cx| {
+                panel
+                    .metadata_autocomplete
+                    .set_catalog(MetadataCatalog { tags, persons });
+                panel.sync_metadata_autocomplete(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn sync_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
+        let input = self.input_state.read(cx);
+        self.metadata_autocomplete.sync_from_input(&input);
+        cx.notify();
+    }
+
+    fn clear_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
+        self.metadata_autocomplete.clear();
+        cx.notify();
+    }
+
+    fn handle_metadata_keydown(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let text = self.input_state.read(cx).text().to_string();
+        match self
+            .metadata_autocomplete
+            .handle_key(event.keystroke.key.as_str(), &text)
+        {
+            MetadataAutocompleteAction::Ignored => false,
+            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                true
+            }
+            MetadataAutocompleteAction::Applied(edit) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                apply_completion_to_input(&self.input_state, &edit, window, cx);
+                self.sync_metadata_autocomplete(cx);
+                true
+            }
+        }
+    }
+
+    fn handle_metadata_action(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let text = self.input_state.read(cx).text().to_string();
+        match self.metadata_autocomplete.handle_key(key, &text) {
+            MetadataAutocompleteAction::Ignored => false,
+            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                true
+            }
+            MetadataAutocompleteAction::Applied(edit) => {
+                window.prevent_default();
+                cx.stop_propagation();
+                apply_completion_to_input(&self.input_state, &edit, window, cx);
+                self.sync_metadata_autocomplete(cx);
+                true
+            }
+        }
+    }
+
+    fn apply_metadata_candidate(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.input_state.read(cx).text().to_string();
+        if let Some(edit) = self.metadata_autocomplete.apply_index(&text, index) {
+            apply_completion_to_input(&self.input_state, &edit, window, cx);
+            self.sync_metadata_autocomplete(cx);
+        }
+    }
+
+    fn render_metadata_autocomplete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        render_autocomplete_menu(
+            &self.metadata_autocomplete,
+            "task-metadata-autocomplete",
+            cx,
+            |idx, candidate, selected| {
+                autocomplete_item(
+                    ("task-metadata-candidate", idx),
+                    &candidate.name,
+                    candidate.usage_count,
+                    selected,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                        this.apply_metadata_candidate(idx, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .into_any_element()
+            },
+        )
     }
 
     fn categorize_quadrant(task: &Record) -> Quadrant {
@@ -427,7 +562,9 @@ impl TaskPanel {
         let today = Local::now().date_naive();
         let tomorrow = today + Duration::days(1);
         let is_open = task.completed_at.is_none();
-        let due_local = task.due_date.map(|dt| dt.with_timezone(&Local).date_naive());
+        let due_local = task
+            .due_date
+            .map(|dt| dt.with_timezone(&Local).date_naive());
 
         match self.focus_preset {
             TaskFocusPreset::None => true,
@@ -995,6 +1132,7 @@ impl TaskPanel {
                         panel.pending_attachments.clear();
                         panel.active_attachment_preview = None;
                         panel.attachment_error = None;
+                        panel.load_metadata_catalog(cx);
                         eprintln!("[TaskPanel] About to call load_tasks from create_task callback");
                         panel.load_tasks(cx);
                         panel.load_available_tags(cx);
@@ -2451,7 +2589,23 @@ impl Render for TaskPanel {
             .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
                 this.paste_pending_attachments(window, cx);
             }))
+            .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
+                let _ = this.handle_metadata_action("up", window, cx);
+            }))
+            .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
+                let _ = this.handle_metadata_action("down", window, cx);
+            }))
+            .capture_action(cx.listener(|this, _action: &IndentInline, window, cx| {
+                let _ = this.handle_metadata_action("tab", window, cx);
+            }))
+            .capture_action(cx.listener(|this, _action: &Escape, window, cx| {
+                let _ = this.handle_metadata_action("escape", window, cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.handle_metadata_keydown(event, window, cx) {
+                    return;
+                }
+
                 if this.pending_deletion.is_none() {
                     return;
                 }
@@ -2580,11 +2734,16 @@ impl Render for TaskPanel {
                                     .items_end()
                                     .gap(px(8.0))
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .overflow_hidden()
-                                            .child(Input::new(&self.input_state).flex_1()),
+                                        div().flex_1().min_w(px(0.0)).overflow_hidden().child(
+                                            v_flex()
+                                                .gap(px(0.0))
+                                                .child(Input::new(&self.input_state).flex_1())
+                                                .when(self.metadata_autocomplete.is_open(), |el| {
+                                                    el.child(
+                                                        self.render_metadata_autocomplete_menu(cx),
+                                                    )
+                                                }),
+                                        ),
                                     )
                                     .child(
                                         Button::new("task-add-image-btn")

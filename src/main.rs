@@ -1,3 +1,9 @@
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use gpui::*;
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::ActiveTheme;
+use gpui_component_assets::Assets;
+use gpui_platform::application;
 use robinne::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, SEARCH_KEYSTROKE, SETTINGS_KEYSTROKE,
 };
@@ -15,12 +21,6 @@ use robinne::ui::search::SearchPanel;
 use robinne::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, Sidebar};
 use robinne::ui::task_panel::TaskPanel;
 use robinne::ui::timeline::Timeline;
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use gpui::*;
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::ActiveTheme;
-use gpui_component_assets::Assets;
-use gpui_platform::application;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

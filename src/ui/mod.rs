@@ -2,6 +2,7 @@ pub mod attachment_draft;
 pub mod dashboard;
 pub mod data_management;
 pub mod floating_window;
+pub mod metadata_autocomplete;
 pub mod note_panel;
 pub mod parsing;
 pub mod record_detail_sidebar;

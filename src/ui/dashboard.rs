@@ -412,12 +412,7 @@ impl Dashboard {
             )
     }
 
-    fn render_today_row(
-        &self,
-        idx: usize,
-        task: &Record,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    fn render_today_row(&self, idx: usize, task: &Record, cx: &mut Context<Self>) -> Stateful<Div> {
         let due_text = task
             .due_date
             .map(|due| due.with_timezone(&Local).format("%m-%d").to_string())
@@ -869,37 +864,34 @@ impl Dashboard {
             .pr(px(12.0))
             .overflow_y_scrollbar()
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        h_flex()
-                            .gap(px(8.0))
-                            .items_center()
-                            .child(
-                                div()
-                                    .id("dashboard-back-overview")
-                                    .cursor_pointer()
-                                    .px(px(10.0))
-                                    .py(px(6.0))
-                                    .rounded(px(999.0))
-                                    .bg(rgb(0xf5f5f5))
-                                    .text_xs()
-                                    .text_color(rgb(0x595959))
-                                    .hover(|s| s.bg(rgb(0xefefef)))
-                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                        this.set_page(DashboardPage::Overview, cx);
-                                    }))
-                                    .child("返回"),
-                            )
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x262626))
-                                    .child("统计"),
-                            ),
-                    ),
+                h_flex().justify_between().items_center().child(
+                    h_flex()
+                        .gap(px(8.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .id("dashboard-back-overview")
+                                .cursor_pointer()
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(px(999.0))
+                                .bg(rgb(0xf5f5f5))
+                                .text_xs()
+                                .text_color(rgb(0x595959))
+                                .hover(|s| s.bg(rgb(0xefefef)))
+                                .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                    this.set_page(DashboardPage::Overview, cx);
+                                }))
+                                .child("返回"),
+                        )
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x262626))
+                                .child("统计"),
+                        ),
+                ),
             )
             .child(
                 div()
@@ -911,36 +903,34 @@ impl Dashboard {
                     .py(px(12.0))
                     .child(Self::panel_title("关键统计"))
                     .child(
-                        h_flex()
-                            .mt(px(10.0))
-                            .gap(px(12.0))
-                            .children([
-                                Self::compact_stat("未完成", stats.total_open_count, rgb(0x262626))
-                                    .into_any_element(),
-                                Self::compact_stat("进行中", stats.total_in_progress, rgb(0x1677ff))
-                                    .into_any_element(),
-                                Self::compact_stat("今日完成", stats.completed_today_count, rgb(0x52c41a))
-                                    .into_any_element(),
-                                Self::compact_stat("已逾期", stats.overdue_count, rgb(0xff4d4f))
-                                    .into_any_element(),
-                            ]),
+                        h_flex().mt(px(10.0)).gap(px(12.0)).children([
+                            Self::compact_stat("未完成", stats.total_open_count, rgb(0x262626))
+                                .into_any_element(),
+                            Self::compact_stat("进行中", stats.total_in_progress, rgb(0x1677ff))
+                                .into_any_element(),
+                            Self::compact_stat(
+                                "今日完成",
+                                stats.completed_today_count,
+                                rgb(0x52c41a),
+                            )
+                            .into_any_element(),
+                            Self::compact_stat("已逾期", stats.overdue_count, rgb(0xff4d4f))
+                                .into_any_element(),
+                        ]),
                     )
                     .child(
-                        h_flex()
-                            .mt(px(8.0))
-                            .gap(px(12.0))
-                            .children([
-                                Self::compact_stat("今天到期", stats.due_today_count, rgb(0xfa8c16))
-                                    .into_any_element(),
-                                Self::compact_stat("明天到期", stats.due_tomorrow_count, rgb(0xfaad14))
-                                    .into_any_element(),
-                                Self::compact_stat(
-                                    "高优未完",
-                                    stats.high_priority_open_count,
-                                    rgb(0x722ed1),
-                                )
+                        h_flex().mt(px(8.0)).gap(px(12.0)).children([
+                            Self::compact_stat("今天到期", stats.due_today_count, rgb(0xfa8c16))
                                 .into_any_element(),
-                            ]),
+                            Self::compact_stat("明天到期", stats.due_tomorrow_count, rgb(0xfaad14))
+                                .into_any_element(),
+                            Self::compact_stat(
+                                "高优未完",
+                                stats.high_priority_open_count,
+                                rgb(0x722ed1),
+                            )
+                            .into_any_element(),
+                        ]),
                     ),
             )
             .child(
@@ -953,11 +943,12 @@ impl Dashboard {
                     .py(px(12.0))
                     .child(Self::panel_title("近 7 天完成数"))
                     .child(
-                        v_flex()
-                            .mt(px(12.0))
-                            .gap(px(10.0))
-                            .children(stats.last_7_days_completed.iter().enumerate().map(
-                                |(idx, item)| {
+                        v_flex().mt(px(12.0)).gap(px(10.0)).children(
+                            stats
+                                .last_7_days_completed
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, item)| {
                                     let width = px((item.count as f32 * 28.0).max(12.0));
                                     h_flex()
                                         .id(("stats-bar-row", idx))
@@ -991,8 +982,8 @@ impl Dashboard {
                                                 .text_color(rgb(0x595959))
                                                 .child(item.count.to_string()),
                                         )
-                                },
-                            )),
+                                }),
+                        ),
                     ),
             )
     }
@@ -1035,10 +1026,12 @@ impl Render for Dashboard {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .child(match self.page {
-                        DashboardPage::Overview => {
-                            self.render_overview(dashboard_data, window, cx).into_any_element()
+                        DashboardPage::Overview => self
+                            .render_overview(dashboard_data, window, cx)
+                            .into_any_element(),
+                        DashboardPage::Stats => {
+                            self.render_stats_page(stats_data, cx).into_any_element()
                         }
-                        DashboardPage::Stats => self.render_stats_page(stats_data, cx).into_any_element(),
                     }),
             )
             .child(self.task_detail_sidebar.clone())

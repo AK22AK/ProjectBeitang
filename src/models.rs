@@ -65,6 +65,12 @@ pub struct Person {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetadataCatalogEntry {
+    pub name: String,
+    pub usage_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimelineQuery {
     pub limit: usize,
     pub offset: usize,
