@@ -505,7 +505,17 @@ fn open_quick_add_window(
         },
     ) {
         Ok(handle) => {
-            quick_add_session.borrow_mut().handle = Some(handle.into());
+            let handle: AnyWindowHandle = handle.into();
+            quick_add_session.borrow_mut().handle = Some(handle);
+
+            // When the window is opened from a title-bar click, macOS can briefly
+            // return focus to the main window after the click completes.
+            // Re-activating the quick add window on the next turn keeps it visible.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.activate_window();
+                });
+            });
         }
         Err(err) => {
             quick_add_session.borrow_mut().clear();
