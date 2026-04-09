@@ -1,7 +1,8 @@
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::ActiveTheme;
+use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
 use robinne::app_shortcuts::{
@@ -13,10 +14,11 @@ use robinne::store::{create_store, Store};
 use robinne::ui::dashboard::{Dashboard, DashboardAction};
 use robinne::ui::data_management::DataManagementPanel;
 use robinne::ui::floating_window::{
-    quick_add_window_size, QuickAddDestination, QuickAddSessionController, QuickAddSessionStatus,
-    QuickAddWindow,
+    quick_add_window_size, InputMode, QuickAddDestination, QuickAddSessionController,
+    QuickAddSessionStatus, QuickAddWindow,
 };
 use robinne::ui::note_panel::NotePanel;
+use robinne::ui::quick_add_context::resolve_quick_add_mode;
 use robinne::ui::search::SearchPanel;
 use robinne::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, Sidebar};
 use robinne::ui::task_panel::TaskPanel;
@@ -116,6 +118,7 @@ fn install_app_shortcuts_and_menus(
     cx: &mut App,
     main_window: Rc<RefCell<MainWindowController>>,
     store: Store,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
 ) {
     cx.bind_keys([
         KeyBinding::new(SEARCH_KEYSTROKE, OpenSearch, None),
@@ -124,23 +127,39 @@ fn install_app_shortcuts_and_menus(
 
     let main_window_for_search = main_window.clone();
     let store_for_search = store.clone();
+    let quick_add_for_search = quick_add_session.clone();
     cx.on_action(move |_: &OpenSearch, cx| {
         let main_window = main_window_for_search.clone();
         let store = store_for_search.clone();
+        let quick_add_session = quick_add_for_search.clone();
         // Defer to avoid updating the active window while the action is being dispatched from it.
         cx.defer(move |cx| {
-            ensure_main_window(cx, &main_window, &store, Some(Panel::Search));
+            ensure_main_window(
+                cx,
+                &main_window,
+                &store,
+                &quick_add_session,
+                Some(Panel::Search),
+            );
         });
     });
 
     let main_window_for_settings = main_window.clone();
     let store_for_settings = store.clone();
+    let quick_add_for_settings = quick_add_session.clone();
     cx.on_action(move |_: &OpenSettings, cx| {
         let main_window = main_window_for_settings.clone();
         let store = store_for_settings.clone();
+        let quick_add_session = quick_add_for_settings.clone();
         // Defer to avoid updating the active window while the action is being dispatched from it.
         cx.defer(move |cx| {
-            ensure_main_window(cx, &main_window, &store, Some(Panel::Settings));
+            ensure_main_window(
+                cx,
+                &main_window,
+                &store,
+                &quick_add_session,
+                Some(Panel::Settings),
+            );
         });
     });
 
@@ -190,8 +209,15 @@ fn main() {
 
     let main_window_for_reopen = main_window.clone();
     let store_for_reopen = store.clone();
+    let quick_add_for_reopen = quick_add_session.clone();
     app.on_reopen(move |cx| {
-        ensure_main_window(cx, &main_window_for_reopen, &store_for_reopen, None);
+        ensure_main_window(
+            cx,
+            &main_window_for_reopen,
+            &store_for_reopen,
+            &quick_add_for_reopen,
+            None,
+        );
     });
 
     let main_window_for_run = main_window.clone();
@@ -200,7 +226,12 @@ fn main() {
     app.run(move |cx| {
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
-        install_app_shortcuts_and_menus(cx, main_window_for_run.clone(), store_for_run.clone());
+        install_app_shortcuts_and_menus(
+            cx,
+            main_window_for_run.clone(),
+            store_for_run.clone(),
+            quick_add_for_run.clone(),
+        );
         let main_window_for_closed = main_window_for_run.clone();
         cx.on_window_closed(move |cx| {
             sync_main_window_controller(cx, &main_window_for_closed);
@@ -222,6 +253,7 @@ fn main() {
             cx,
             &main_window_for_run,
             &store_for_run,
+            &quick_add_for_run,
             Some(Panel::Dashboard),
         );
 
@@ -279,6 +311,7 @@ fn main() {
                                                     cx,
                                                     &main_window_for_hotkey,
                                                     &store_for_hotkey,
+                                                    &quick_add_for_hotkey,
                                                     None,
                                                 );
                                             } else if event.id == open_tasks.id() {
@@ -286,6 +319,7 @@ fn main() {
                                                     cx,
                                                     &main_window_for_hotkey,
                                                     &store_for_hotkey,
+                                                    &quick_add_for_hotkey,
                                                     Some(Panel::Tasks),
                                                 );
                                             } else if event.id == open_records.id() {
@@ -293,6 +327,7 @@ fn main() {
                                                     cx,
                                                     &main_window_for_hotkey,
                                                     &store_for_hotkey,
+                                                    &quick_add_for_hotkey,
                                                     Some(Panel::Records),
                                                 );
                                             }
@@ -328,10 +363,17 @@ fn handle_quick_capture_hotkey(
     match status {
         QuickAddSessionStatus::Closed => {
             let hide_app_on_close = cx.active_window().is_none();
-            open_quick_add_window(cx, store, main_window, quick_add_session, hide_app_on_close);
+            open_or_focus_quick_add(
+                cx,
+                store,
+                main_window,
+                quick_add_session,
+                None,
+                hide_app_on_close,
+            );
         }
         QuickAddSessionStatus::Dormant => {
-            open_quick_add_window(cx, store, main_window, quick_add_session, false);
+            open_or_focus_quick_add(cx, store, main_window, quick_add_session, None, false);
         }
         QuickAddSessionStatus::Visible => {
             if quick_add_session.borrow().has_draft() {
@@ -343,19 +385,69 @@ fn handle_quick_capture_hotkey(
     }
 }
 
+fn prime_quick_add_session(
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+    preferred_mode: Option<InputMode>,
+    hide_app_on_close: bool,
+) {
+    let mut session = quick_add_session.borrow_mut();
+    if let Some(mode) = preferred_mode {
+        session.mode = mode;
+    }
+    session.status = QuickAddSessionStatus::Visible;
+    session.handle = None;
+    session.hide_app_on_close = hide_app_on_close;
+}
+
+fn focus_visible_quick_add(
+    cx: &mut App,
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+) -> bool {
+    let handle = quick_add_session.borrow().handle;
+    let Some(handle) = handle else {
+        return false;
+    };
+
+    handle
+        .update(cx, |_, window, _| {
+            window.activate_window();
+        })
+        .is_ok()
+}
+
+fn open_or_focus_quick_add(
+    cx: &mut App,
+    store: Store,
+    main_window: Rc<RefCell<MainWindowController>>,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    preferred_mode: Option<InputMode>,
+    hide_app_on_close: bool,
+) {
+    if quick_add_session.borrow().status == QuickAddSessionStatus::Visible
+        && focus_visible_quick_add(cx, &quick_add_session)
+    {
+        return;
+    }
+
+    open_quick_add_window(
+        cx,
+        store,
+        main_window,
+        quick_add_session,
+        hide_app_on_close,
+        preferred_mode,
+    );
+}
+
 fn open_quick_add_window(
     cx: &mut App,
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
     hide_app_on_close: bool,
+    preferred_mode: Option<InputMode>,
 ) {
-    {
-        let mut session = quick_add_session.borrow_mut();
-        session.status = QuickAddSessionStatus::Visible;
-        session.handle = None;
-        session.hide_app_on_close = hide_app_on_close;
-    }
+    prime_quick_add_session(&quick_add_session, preferred_mode, hide_app_on_close);
 
     cx.activate(true);
 
@@ -365,15 +457,28 @@ fn open_quick_add_window(
     let open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)> = {
         let store = store.clone();
         let main_window = main_window.clone();
+        let quick_add_session = quick_add_session.clone();
         Arc::new(move |destination, cx| match destination {
             QuickAddDestination::Main => {
-                ensure_main_window(cx, &main_window, &store, None);
+                ensure_main_window(cx, &main_window, &store, &quick_add_session, None);
             }
             QuickAddDestination::Tasks => {
-                ensure_main_window(cx, &main_window, &store, Some(Panel::Tasks));
+                ensure_main_window(
+                    cx,
+                    &main_window,
+                    &store,
+                    &quick_add_session,
+                    Some(Panel::Tasks),
+                );
             }
             QuickAddDestination::Records => {
-                ensure_main_window(cx, &main_window, &store, Some(Panel::Records));
+                ensure_main_window(
+                    cx,
+                    &main_window,
+                    &store,
+                    &quick_add_session,
+                    Some(Panel::Records),
+                );
             }
         })
     };
@@ -539,6 +644,7 @@ fn ensure_main_window(
     cx: &mut App,
     controller: &Rc<RefCell<MainWindowController>>,
     store: &Store,
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
     target_panel: Option<Panel>,
 ) {
     let desired_panel = target_panel.unwrap_or_else(|| controller.borrow().current_panel);
@@ -547,7 +653,13 @@ fn ensure_main_window(
         return;
     }
 
-    match open_main_window(cx, store.clone(), controller.clone(), desired_panel) {
+    match open_main_window(
+        cx,
+        store.clone(),
+        controller.clone(),
+        quick_add_session.clone(),
+        desired_panel,
+    ) {
         Ok(handle) => {
             controller.borrow_mut().track(handle, desired_panel);
         }
@@ -577,6 +689,7 @@ fn open_main_window(
     cx: &mut App,
     store: Store,
     controller: Rc<RefCell<MainWindowController>>,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
     initial_panel: Panel,
 ) -> Result<AnyWindowHandle> {
     let window_size = size(px(900.0), px(600.0));
@@ -585,12 +698,23 @@ fn open_main_window(
     cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
+            titlebar: Some(TitleBar::title_bar_options()),
             ..Default::default()
         },
         move |window, cx| {
             let store = store.clone();
             let controller = controller.clone();
-            let view = cx.new(|cx| MainView::new(store, controller, initial_panel, window, cx));
+            let quick_add_session = quick_add_session.clone();
+            let view = cx.new(|cx| {
+                MainView::new(
+                    store,
+                    controller,
+                    quick_add_session,
+                    initial_panel,
+                    window,
+                    cx,
+                )
+            });
             cx.new(|cx| gpui_component::Root::new(view, window, cx).bg(cx.theme().background))
         },
     )
@@ -598,6 +722,7 @@ fn open_main_window(
 }
 
 pub struct MainView {
+    store: Store,
     current_panel: Panel,
     current_settings_section: SettingsSection,
     dashboard_panel: Entity<Dashboard>,
@@ -608,6 +733,7 @@ pub struct MainView {
     notes_panel: Entity<NotePanel>,
     shortcut_config: ShortcutConfig,
     window_state: Rc<RefCell<MainWindowController>>,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
     focus_handle: FocusHandle,
 }
 
@@ -615,6 +741,7 @@ impl MainView {
     fn new(
         store: Store,
         window_state: Rc<RefCell<MainWindowController>>,
+        quick_add_session: Rc<RefCell<QuickAddSessionController>>,
         initial_panel: Panel,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -642,6 +769,7 @@ impl MainView {
         });
 
         Self {
+            store,
             current_panel: initial_panel,
             current_settings_section: SettingsSection::DataManagement,
             dashboard_panel,
@@ -652,6 +780,7 @@ impl MainView {
             notes_panel,
             shortcut_config: ShortcutConfig::load(),
             window_state,
+            quick_add_session,
             focus_handle,
         }
     }
@@ -694,20 +823,54 @@ impl MainView {
                     panel.focus_input(window, cx);
                 });
             }
-            Panel::Tasks => {
-                self.task_panel.update(cx, |panel, cx| {
-                    panel.focus_primary_input(window, cx);
-                });
-            }
-            Panel::Records => {
-                self.notes_panel.update(cx, |panel, cx| {
-                    panel.focus_primary_input(window, cx);
-                });
-            }
             _ => {
                 self.focus_handle.focus(window, cx);
             }
         }
+    }
+
+    fn open_quick_add_from_titlebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let preferred_mode =
+            resolve_quick_add_mode(self.current_panel, self.quick_add_session.borrow().mode);
+        let store = self.store.clone();
+        let main_window = self.window_state.clone();
+        let quick_add_session = self.quick_add_session.clone();
+
+        window.activate_window();
+        cx.defer(move |cx| {
+            open_or_focus_quick_add(
+                cx,
+                store,
+                main_window,
+                quick_add_session,
+                Some(preferred_mode),
+                false,
+            );
+        });
+    }
+
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        TitleBar::new()
+            .child(
+                h_flex().h_full().items_center().child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0x595959))
+                        .child(format!("Robinne · {}", self.current_panel.title())),
+                ),
+            )
+            .child(
+                h_flex().h_full().items_center().pr(px(12.0)).child(
+                    Button::new("main-titlebar-quick-add")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Plus)
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.open_quick_add_from_titlebar(window, cx);
+                        })),
+                ),
+            )
     }
 
     pub fn switch_to_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
@@ -1060,6 +1223,7 @@ impl Render for MainView {
         div()
             .size_full()
             .flex()
+            .flex_col()
             .bg(rgb(0xf0f0f0))
             .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
@@ -1080,56 +1244,78 @@ impl Render for MainView {
                 }
             }))
             .child(
-                Sidebar::new(move |panel, window, app| {
-                    on_panel_change(&panel, window, app);
-                })
-                .with_panel(current_panel)
-                .with_layout_mode(sidebar_layout_mode),
-            )
-            .child(
                 div()
                     .flex_1()
                     .flex()
-                    .flex_col()
                     .overflow_hidden()
-                    .relative()
-                    .bg(rgb(0xffffff))
-                    .child(match self.current_panel {
-                        Panel::Dashboard => self.dashboard_panel.clone().into_any_element(),
-                        Panel::Tasks => self.task_panel.clone().into_any_element(),
-                        Panel::Records => self.notes_panel.clone().into_any_element(),
-                        Panel::Timeline => self.timeline_panel.clone().into_any_element(),
-                        Panel::Search => self.search_panel.clone().into_any_element(),
-                        Panel::AI => div()
-                            .size_full()
+                    .flex_col()
+                    .child(self.render_title_bar(cx))
+                    .child(
+                        div()
+                            .flex_1()
                             .flex()
-                            .items_center()
-                            .justify_center()
+                            .overflow_hidden()
+                            .child(
+                                Sidebar::new(move |panel, window, app| {
+                                    on_panel_change(&panel, window, app);
+                                })
+                                .with_panel(current_panel)
+                                .with_layout_mode(sidebar_layout_mode),
+                            )
                             .child(
                                 div()
+                                    .flex_1()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(8.0))
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_xl()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0x262626))
-                                            .child("AI 面板开发中..."),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x8c8c8c))
-                                            .child("当前版本先保留占位态，后续再补充完整交互。"),
-                                    ),
-                            )
-                            .into_any_element(),
-                        Panel::Settings => {
-                            self.render_settings_panel(window, cx).into_any_element()
-                        }
-                    }),
+                                    .overflow_hidden()
+                                    .relative()
+                                    .bg(rgb(0xffffff))
+                                    .child(match self.current_panel {
+                                        Panel::Dashboard => {
+                                            self.dashboard_panel.clone().into_any_element()
+                                        }
+                                        Panel::Tasks => self.task_panel.clone().into_any_element(),
+                                        Panel::Records => {
+                                            self.notes_panel.clone().into_any_element()
+                                        }
+                                        Panel::Timeline => {
+                                            self.timeline_panel.clone().into_any_element()
+                                        }
+                                        Panel::Search => {
+                                            self.search_panel.clone().into_any_element()
+                                        }
+                                        Panel::AI => div()
+                                            .size_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(8.0))
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .text_xl()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(rgb(0x262626))
+                                                            .child("AI 面板开发中..."),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(0x8c8c8c))
+                                                            .child("当前版本先保留占位态，后续再补充完整交互。"),
+                                                    ),
+                                            )
+                                            .into_any_element(),
+                                        Panel::Settings => {
+                                            self.render_settings_panel(window, cx).into_any_element()
+                                        }
+                                    }),
+                            ),
+                    ),
             )
     }
 }

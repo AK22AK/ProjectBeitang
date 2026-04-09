@@ -1,15 +1,5 @@
-use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::Record;
 use crate::store::Store;
-use crate::ui::attachment_draft::{
-    attachment_lightbox_size, attachment_preview_size, format_attachment_meta,
-    prepare_pending_attachments, PendingAttachment,
-};
-use crate::ui::metadata_autocomplete::{
-    apply_completion_to_input, autocomplete_item, render_autocomplete_menu,
-    MetadataAutocompleteAction, MetadataAutocompleteState, MetadataCatalog,
-};
-use crate::ui::parsing;
 use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
 use crate::ui::tokenized_text::{
     render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
@@ -17,12 +7,7 @@ use crate::ui::tokenized_text::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
-use gpui_component::input::{
-    Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Paste,
-};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{h_flex, v_flex};
-use std::path::PathBuf;
 use uuid::Uuid;
 
 const NOTE_TITLE_LIMIT: usize = 24;
@@ -38,56 +23,19 @@ pub struct NotePanel {
     store: Store,
     notes: Vec<Record>,
     focus_handle: FocusHandle,
-    input_state: Entity<InputState>,
-    pending_attachments: Vec<PendingAttachment>,
-    active_attachment_preview: Option<PendingAttachment>,
-    attachments_loading: bool,
-    attachment_error: Option<String>,
-    _input_subscription: Subscription,
     _window_activation_subscription: Subscription,
     pending_deletion: Option<PendingDeletion>,
-    metadata_autocomplete: MetadataAutocompleteState,
     record_detail_sidebar: Entity<RecordDetailSidebar>,
 }
 
 impl NotePanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let input_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .auto_grow(1, 6)
-                .placeholder("输入记录，Enter 换行后首行作为标题 | Cmd+Enter 保存 | #标签 @人物")
-        });
-
-        let _input_subscription = cx.subscribe_in(
-            &input_state,
-            window,
-            |this, _state, event: &InputEvent, window, cx| match event {
-                InputEvent::Change | InputEvent::Focus => {
-                    this.sync_metadata_autocomplete(cx);
-                }
-                InputEvent::Blur => {
-                    this.clear_metadata_autocomplete(cx);
-                }
-                InputEvent::PressEnter { secondary } => {
-                    if *secondary {
-                        this.create_note(window, cx);
-                    }
-                }
-            },
-        );
 
         let mut panel = Self {
             store: store.clone(),
             notes: Vec::new(),
             focus_handle,
-            input_state,
-            pending_attachments: Vec::new(),
-            active_attachment_preview: None,
-            attachments_loading: false,
-            attachment_error: None,
-            _input_subscription,
             _window_activation_subscription: cx.observe_window_activation(
                 window,
                 |this, window, cx| {
@@ -97,7 +45,6 @@ impl NotePanel {
                 },
             ),
             pending_deletion: None,
-            metadata_autocomplete: MetadataAutocompleteState::default(),
             record_detail_sidebar: cx.new(|cx| RecordDetailSidebar::new(store.clone(), window, cx)),
         };
 
@@ -121,26 +68,7 @@ impl NotePanel {
         });
 
         panel.load_notes(cx);
-        panel.load_metadata_catalog(cx);
         panel
-    }
-
-    pub fn focus_primary_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_deletion.is_some()
-            || self
-                .record_detail_sidebar
-                .read(cx)
-                .current_record_id()
-                .is_some()
-        {
-            self.focus_handle.focus(window, cx);
-            return;
-        }
-
-        self.focus_handle.focus(window, cx);
-        self.input_state.update(cx, |state, cx| {
-            state.focus(window, cx);
-        });
     }
 
     fn handle_sidebar_save(&mut self, payload: &SavePayload, cx: &mut Context<Self>) {
@@ -171,122 +99,6 @@ impl NotePanel {
 
             cx.notify();
         }
-    }
-
-    fn load_metadata_catalog(&mut self, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        cx.spawn(async move |view, cx| {
-            let tags = store.get_tag_catalog().await.unwrap_or_default();
-            let persons = store.get_person_catalog().await.unwrap_or_default();
-            let _ = view.update(cx, |panel, cx| {
-                panel
-                    .metadata_autocomplete
-                    .set_catalog(MetadataCatalog { tags, persons });
-                panel.sync_metadata_autocomplete(cx);
-            });
-        })
-        .detach();
-    }
-
-    fn sync_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
-        let input = self.input_state.read(cx);
-        self.metadata_autocomplete.sync_from_input(&input);
-        cx.notify();
-    }
-
-    fn clear_metadata_autocomplete(&mut self, cx: &mut Context<Self>) {
-        self.metadata_autocomplete.clear();
-        cx.notify();
-    }
-
-    fn handle_metadata_keydown(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let text = self.input_state.read(cx).text().to_string();
-        match self
-            .metadata_autocomplete
-            .handle_key(event.keystroke.key.as_str(), &text)
-        {
-            MetadataAutocompleteAction::Ignored => false,
-            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
-                window.prevent_default();
-                cx.stop_propagation();
-                cx.notify();
-                true
-            }
-            MetadataAutocompleteAction::Applied(edit) => {
-                window.prevent_default();
-                cx.stop_propagation();
-                apply_completion_to_input(&self.input_state, &edit, window, cx);
-                self.sync_metadata_autocomplete(cx);
-                true
-            }
-        }
-    }
-
-    fn handle_metadata_action(
-        &mut self,
-        key: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let text = self.input_state.read(cx).text().to_string();
-        match self.metadata_autocomplete.handle_key(key, &text) {
-            MetadataAutocompleteAction::Ignored => false,
-            MetadataAutocompleteAction::Moved | MetadataAutocompleteAction::Dismissed => {
-                window.prevent_default();
-                cx.stop_propagation();
-                cx.notify();
-                true
-            }
-            MetadataAutocompleteAction::Applied(edit) => {
-                window.prevent_default();
-                cx.stop_propagation();
-                apply_completion_to_input(&self.input_state, &edit, window, cx);
-                self.sync_metadata_autocomplete(cx);
-                true
-            }
-        }
-    }
-
-    fn apply_metadata_candidate(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let text = self.input_state.read(cx).text().to_string();
-        if let Some(edit) = self.metadata_autocomplete.apply_index(&text, index) {
-            apply_completion_to_input(&self.input_state, &edit, window, cx);
-            self.sync_metadata_autocomplete(cx);
-        }
-    }
-
-    fn render_metadata_autocomplete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        render_autocomplete_menu(
-            &self.metadata_autocomplete,
-            "note-metadata-autocomplete",
-            cx,
-            |idx, candidate, selected| {
-                autocomplete_item(
-                    ("note-metadata-candidate", idx),
-                    &candidate.name,
-                    candidate.usage_count,
-                    selected,
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                        this.apply_metadata_candidate(idx, window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .into_any_element()
-            },
-        )
     }
 
     fn select_record(&mut self, record: &Record, window: &mut Window, cx: &mut Context<Self>) {
@@ -334,419 +146,6 @@ impl NotePanel {
             }
         })
         .detach();
-    }
-
-    fn create_note(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.input_state.read(cx).text().to_string();
-
-        eprintln!("[NotePanel] create_note called with text: '{}'", text);
-
-        if self.attachments_loading {
-            self.attachment_error = Some("图片仍在处理中，请稍候".to_string());
-            cx.notify();
-            return;
-        }
-
-        if text.trim().is_empty() {
-            if self.pending_attachments.is_empty() {
-                eprintln!("[NotePanel] Text is empty, returning");
-            } else {
-                self.attachment_error = Some("请先输入记录内容，再创建附图记录".to_string());
-                cx.notify();
-            }
-            return;
-        }
-
-        self.attachment_error = None;
-        let parsed = parsing::parse_record_draft(&text);
-        eprintln!(
-            "[NotePanel] Parsed title: {:?}, content: '{}', tags: {:?}, people: {:?}",
-            parsed.title, parsed.content, parsed.tags, parsed.people
-        );
-
-        let mut note = Record::new_note_with_title(parsed.title, parsed.content);
-        note.tags = parsed.tags;
-        note.persons = parsed.people;
-        eprintln!(
-            "[NotePanel] Created note with id: {}, tags: {:?}, persons: {:?}",
-            note.id, note.tags, note.persons
-        );
-
-        let store = self.store.clone();
-        let active_window = cx.active_window();
-        let pending_paths: Vec<_> = self
-            .pending_attachments
-            .iter()
-            .map(|attachment| attachment.path.clone())
-            .collect();
-        cx.spawn(async move |view, cx| {
-            eprintln!("[NotePanel] Spawning create_record...");
-            let note_id = note.id;
-            match store.create_record(note).await {
-                Ok(_) => {
-                    eprintln!("[NotePanel] create_record succeeded, scheduling load_notes");
-                    let update_result = view.update(cx, |panel, cx| {
-                        if let Some(window_handle) = active_window {
-                            let input_state = panel.input_state.clone();
-                            let _ = window_handle.update(cx, move |_, window, cx| {
-                                input_state.update(cx, |state, cx| {
-                                    state.set_value("", window, cx);
-                                });
-                            });
-                        }
-                        panel.pending_attachments.clear();
-                        panel.active_attachment_preview = None;
-                        panel.attachment_error = None;
-                        panel.load_metadata_catalog(cx);
-                        eprintln!("[NotePanel] About to call load_notes from create_note callback");
-                        panel.load_notes(cx);
-                        eprintln!("[NotePanel] load_notes called from callback");
-                    });
-                    if let Err(e) = update_result {
-                        eprintln!("[NotePanel] Failed to update view: {:?}", e);
-                    } else {
-                        eprintln!("[NotePanel] View view succeeded");
-                    }
-
-                    if !pending_paths.is_empty() {
-                        if let Err(import_err) = store
-                            .enqueue_record_attachment_import(note_id, pending_paths)
-                            .await
-                        {
-                            let _ = view.update(cx, |panel, cx| {
-                                panel.attachment_error =
-                                    Some(format!("图片后台处理启动失败：{}", import_err));
-                                cx.notify();
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[NotePanel] Failed to create note: {}", e);
-                    let _ = view.update(cx, |panel, cx| {
-                        panel.attachment_error = Some(format!("创建记录失败：{}", e));
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn import_pending_attachments(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let picker = pick_image_files(ParentWindowHint::from_window(window));
-        cx.spawn(async move |view, cx| {
-            let Some(paths) = picker.await else {
-                return;
-            };
-
-            let _ = view.update(cx, |panel, cx| {
-                panel.append_pending_attachment_paths(paths, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn append_pending_attachment_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        self.attachments_loading = true;
-        self.attachment_error = None;
-        cx.notify();
-
-        cx.spawn(async move |view, cx| {
-            let (tx, rx) = async_channel::bounded(1);
-            std::thread::spawn(move || {
-                let result = prepare_pending_attachments(paths);
-                let _ = tx.send_blocking(result);
-            });
-
-            let result = rx
-                .recv()
-                .await
-                .map_err(|err| format!("图片处理任务失败: {}", err))
-                .and_then(|result| result);
-
-            let _ = view.update(cx, |panel, cx| {
-                panel.attachments_loading = false;
-                match result {
-                    Ok(mut attachments) => {
-                        panel.pending_attachments.append(&mut attachments);
-                        panel.attachment_error = None;
-                    }
-                    Err(err) => {
-                        panel.attachment_error = Some(err);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn paste_pending_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return;
-        };
-        if !crate::clipboard_attachment::clipboard_has_image_candidate(&clipboard) {
-            return;
-        }
-
-        window.prevent_default();
-        cx.stop_propagation();
-        self.attachments_loading = true;
-        self.attachment_error = None;
-        cx.notify();
-
-        cx.spawn(async move |view, cx| {
-            let (tx, rx) = async_channel::bounded(1);
-            std::thread::spawn(move || {
-                let result =
-                    crate::clipboard_attachment::prepare_pending_attachments_from_clipboard(
-                        &clipboard,
-                    );
-                let _ = tx.send_blocking(result);
-            });
-
-            let result = rx
-                .recv()
-                .await
-                .map_err(|err| format!("剪贴板图片处理任务失败: {}", err))
-                .and_then(|result| result);
-
-            let _ = view.update(cx, |panel, cx| match result {
-                Ok(mut attachments) if !attachments.is_empty() => {
-                    panel.attachments_loading = false;
-                    panel.pending_attachments.append(&mut attachments);
-                    panel.attachment_error = None;
-                    cx.notify();
-                }
-                Ok(_) => {
-                    panel.attachments_loading = false;
-                    panel.attachment_error = None;
-                    cx.notify();
-                }
-                Err(err) => {
-                    panel.attachments_loading = false;
-                    panel.attachment_error = Some(err);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn remove_pending_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx < self.pending_attachments.len() {
-            let removed = self.pending_attachments.remove(idx);
-            if self
-                .active_attachment_preview
-                .as_ref()
-                .is_some_and(|preview| preview.path == removed.path)
-            {
-                self.active_attachment_preview = None;
-            }
-            if self.pending_attachments.is_empty()
-                && self
-                    .attachment_error
-                    .as_deref()
-                    .is_some_and(|err| err.contains("请先输入记录内容"))
-            {
-                self.attachment_error = None;
-            }
-            cx.notify();
-        }
-    }
-
-    fn render_pending_attachment_card(
-        &self,
-        idx: usize,
-        attachment: &PendingAttachment,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (preview_width, preview_height) = attachment_preview_size(attachment);
-        let can_preview = attachment.preview_image.is_some();
-        let preview_attachment = attachment.clone();
-
-        h_flex()
-            .id(("note-pending-attachment", idx))
-            .gap(px(4.0))
-            .items_center()
-            .px(px(4.0))
-            .py(px(4.0))
-            .border_1()
-            .border_color(rgb(0xf0f0f0))
-            .rounded(px(999.0))
-            .bg(rgb(0xfcfcfc))
-            .when(can_preview, |el| el.cursor_pointer())
-            .when(can_preview, |el| {
-                el.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                        this.open_pending_attachment_preview(preview_attachment.clone(), cx);
-                        cx.stop_propagation();
-                    }),
-                )
-            })
-            .child(
-                attachment
-                    .preview_image
-                    .clone()
-                    .map(|image| {
-                        div()
-                            .w(px(16.0))
-                            .h(px(16.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(0xf5f5f5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(img(image).w(preview_width).h(preview_height))
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| {
-                        div()
-                            .w(px(16.0))
-                            .h(px(16.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(0xf5f5f5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .text_color(rgb(0x999999))
-                            .child("图")
-                            .into_any_element()
-                    }),
-            )
-            .child(
-                div()
-                    .cursor_pointer()
-                    .px(px(2.0))
-                    .text_xs()
-                    .text_color(rgb(0x999999))
-                    .hover(|style| style.text_color(rgb(0xff4d4f)))
-                    .child("×")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                            this.remove_pending_attachment(idx, cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn open_pending_attachment_preview(
-        &mut self,
-        preview: PendingAttachment,
-        cx: &mut Context<Self>,
-    ) {
-        self.active_attachment_preview = None;
-        match crate::system_preview::open_path(&preview.path) {
-            Ok(()) => {
-                self.attachment_error = None;
-            }
-            Err(err) => {
-                self.attachment_error = Some(err);
-            }
-        }
-        cx.notify();
-    }
-
-    fn close_pending_attachment_preview(&mut self, cx: &mut Context<Self>) {
-        self.active_attachment_preview = None;
-        cx.notify();
-    }
-
-    fn render_pending_attachment_lightbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let preview = self.active_attachment_preview.as_ref()?;
-        let image = preview.preview_image.clone()?;
-        let meta = format_attachment_meta(preview);
-        let (lightbox_width, lightbox_height) = attachment_lightbox_size(preview);
-
-        Some(
-            div()
-                .id("note-pending-attachment-lightbox")
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .bottom(px(0.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(0x00000061))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                        this.close_pending_attachment_preview(cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .child(
-                    v_flex()
-                        .w(px(960.0))
-                        .max_w(relative(0.9))
-                        .gap(px(12.0))
-                        .p(px(16.0))
-                        .rounded(px(14.0))
-                        .bg(rgb(0xffffff))
-                        .border_1()
-                        .border_color(rgb(0xe8e8e8))
-                        .shadow_lg()
-                        .cursor_default()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .items_center()
-                                .gap(px(12.0))
-                                .child(
-                                    v_flex()
-                                        .gap(px(4.0))
-                                        .min_w(px(0.0))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(0x262626))
-                                                .child(preview.file_name.clone()),
-                                        )
-                                        .child(
-                                            div().text_sm().text_color(rgb(0x666666)).child(meta),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("note-pending-attachment-lightbox-close")
-                                        .child("关闭")
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            this.close_pending_attachment_preview(cx);
-                                            cx.stop_propagation();
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .min_h(px(240.0))
-                                .max_h(px(760.0))
-                                .py(px(8.0))
-                                .rounded(px(10.0))
-                                .bg(rgb(0xf5f5f5))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .overflow_hidden()
-                                .child(img(image).w(lightbox_width).h(lightbox_height)),
-                        ),
-                )
-                .into_any_element(),
-        )
     }
 
     fn request_delete_note(&mut self, note_id: Uuid, cx: &mut Context<Self>) {
@@ -946,26 +345,7 @@ impl Render for NotePanel {
             .flex_row()
             .relative()
             .track_focus(&self.focus_handle(cx))
-            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
-                this.paste_pending_attachments(window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
-                let _ = this.handle_metadata_action("up", window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
-                let _ = this.handle_metadata_action("down", window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &IndentInline, window, cx| {
-                let _ = this.handle_metadata_action("tab", window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &Escape, window, cx| {
-                let _ = this.handle_metadata_action("escape", window, cx);
-            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.handle_metadata_keydown(event, window, cx) {
-                    return;
-                }
-
                 if this.pending_deletion.is_none() {
                     return;
                 }
@@ -1004,72 +384,6 @@ impl Render for NotePanel {
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("记录 ({})", self.notes.len()))
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_end()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .child(
-                                                v_flex()
-                                                    .gap(px(0.0))
-                                                    .child(Input::new(&self.input_state))
-                                                    .when(self.metadata_autocomplete.is_open(), |el| {
-                                                        el.child(self.render_metadata_autocomplete_menu(cx))
-                                                    }),
-                                            )
-                                    )
-                                    .child(
-                                        Button::new("note-add-image-btn")
-                                            .child("添加图片")
-                                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                                                this.import_pending_attachments(window, cx);
-                                                cx.stop_propagation();
-                                            }))
-                                    )
-                                    .child(
-                                        Button::new("add-btn")
-                                            .child("添加")
-                                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
-                                                this.create_note(window, cx);
-                                            }))
-                                    )
-                            )
-                            .when(self.attachments_loading, |el| {
-                                el.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0x999999))
-                                        .child("正在处理图片…"),
-                                )
-                            })
-                            .when_some(self.attachment_error.clone(), |el, err| {
-                                el.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xff4d4f))
-                                        .child(err),
-                                )
-                            })
-                            .when(!self.pending_attachments.is_empty(), |el| {
-                                el.child(
-                                    h_flex()
-                                        .gap(px(8.0))
-                                        .flex_wrap()
-                                        .children(self.pending_attachments.iter().enumerate().map(|(idx, attachment)| {
-                                            self.render_pending_attachment_card(idx, attachment, cx)
-                                        })),
-                                )
-                            })
                     )
                     .child(
                         div()
@@ -1216,9 +530,6 @@ impl Render for NotePanel {
             )
             .child(self.record_detail_sidebar.clone())
             .children(self.render_delete_confirmation(cx))
-            .when_some(self.render_pending_attachment_lightbox(cx), |el, overlay| {
-                el.child(overlay)
-            })
             .into_any_element()
     }
 }

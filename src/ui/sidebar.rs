@@ -14,6 +14,20 @@ pub enum Panel {
     Settings,
 }
 
+impl Panel {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Dashboard => "看板",
+            Self::Tasks => "任务",
+            Self::Records => "记录",
+            Self::Timeline => "时间线",
+            Self::AI => "AI",
+            Self::Search => "搜索",
+            Self::Settings => "设置",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidebarLayoutMode {
     Expanded,

@@ -5,6 +5,7 @@ pub mod floating_window;
 pub mod metadata_autocomplete;
 pub mod note_panel;
 pub mod parsing;
+pub mod quick_add_context;
 pub mod record_detail_sidebar;
 pub mod search;
 pub mod sidebar;
