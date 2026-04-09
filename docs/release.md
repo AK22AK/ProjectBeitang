@@ -60,6 +60,14 @@
 - Windows 签名
 - DMG / MSI / NSIS / Inno Setup
 
+## 后续发布规划
+
+- [ ] 支持按架构分别构建和发布产物
+- [ ] macOS 同时提供 `arm64` 和 `x86_64` 版本，或评估合并为 Universal Binary
+- [ ] Windows 先补 `x86_64` 明确命名产物，后续再评估 `arm64`
+- [ ] 在 GitHub Actions 中将 `os + target` 扩展为矩阵构建
+- [ ] 统一产物命名，例如 `Robinne-v0.2.0-macos-arm64.zip`
+
 ## 发版步骤
 
 1. 确认当前代码已经合并到 `main`
