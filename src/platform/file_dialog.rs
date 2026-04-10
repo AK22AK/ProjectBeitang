@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 
 use gpui::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
@@ -12,6 +12,7 @@ type SingleFileDialogFuture = Pin<Box<dyn Future<Output = Option<PathBuf>> + Sen
 
 static LAST_IMAGE_DIRECTORY: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static LAST_ARCHIVE_DIRECTORY: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static PREWARM_ONCE: Once = Once::new();
 
 #[derive(Clone, Copy)]
 pub struct ParentWindowHint {
@@ -29,6 +30,10 @@ impl ParentWindowHint {
             raw_display_handle,
         })
     }
+}
+
+pub fn prewarm_file_dialog() {
+    PREWARM_ONCE.call_once(prewarm_file_dialog_inner);
 }
 
 pub fn pick_image_files(parent_window_hint: Option<ParentWindowHint>) -> FileDialogFuture {
@@ -142,6 +147,25 @@ impl HasDisplayHandle for RawParentWindow {
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.0.raw_display_handle) })
     }
 }
+
+#[cfg(target_os = "macos")]
+fn prewarm_file_dialog_inner() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSOpenPanel;
+    use objc2_foundation::NSThread;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+
+    let thread = NSThread::new();
+    thread.start();
+
+    let _ = NSOpenPanel::openPanel(mtm);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prewarm_file_dialog_inner() {}
 
 #[cfg(target_os = "macos")]
 mod macos {

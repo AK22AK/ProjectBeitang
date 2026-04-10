@@ -7,18 +7,21 @@ use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
 use robinne::app_shortcuts::{
-    app_shortcut_entries, main_panel_shortcuts, QUICK_ADD_OVERLAY_KEYSTROKE, SEARCH_KEYSTROKE,
-    SETTINGS_KEYSTROKE,
+    app_shortcut_entries, main_panel_shortcuts, quick_add_overlay_keystroke, search_keystroke,
+    settings_keystroke,
 };
 use robinne::config::ShortcutConfig;
-use robinne::file_dialog_prewarm::prewarm_file_dialog;
+use robinne::platform::{
+    app_shortcut_scope_description, app_shortcuts_intro, build_app_menus,
+    global_shortcut_scope_description, prewarm_file_dialog,
+};
 use robinne::store::{create_store, Store};
 use robinne::ui::dashboard::{Dashboard, DashboardAction};
 use robinne::ui::data_management::DataManagementPanel;
 use robinne::ui::floating_window::{
-    quick_add_window_size, InputMode, QuickAddDestination, QuickAddPresentation,
+    quick_add_window_size, should_hide_app_after_global_quick_add_launch,
+    should_hide_app_after_quick_add_close, InputMode, QuickAddDestination, QuickAddPresentation,
     QuickAddSessionController, QuickAddSessionStatus, QuickAddWindow,
-    should_hide_app_after_global_quick_add_launch, should_hide_app_after_quick_add_close,
 };
 use robinne::ui::note_panel::NotePanel;
 use robinne::ui::quick_add_context::resolve_quick_add_mode;
@@ -132,9 +135,9 @@ fn install_app_shortcuts_and_menus(
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
 ) {
     cx.bind_keys([
-        KeyBinding::new(QUICK_ADD_OVERLAY_KEYSTROKE, OpenQuickAddOverlay, None),
-        KeyBinding::new(SEARCH_KEYSTROKE, OpenSearch, None),
-        KeyBinding::new(SETTINGS_KEYSTROKE, OpenSettings, None),
+        KeyBinding::new(quick_add_overlay_keystroke(), OpenQuickAddOverlay, None),
+        KeyBinding::new(search_keystroke(), OpenSearch, None),
+        KeyBinding::new(settings_keystroke(), OpenSettings, None),
     ]);
 
     let main_window_for_quick_add = main_window.clone();
@@ -189,41 +192,12 @@ fn install_app_shortcuts_and_menus(
 
     cx.on_action(|_: &QuitApp, cx| cx.quit());
 
-    cx.set_menus(vec![
-        Menu {
-            name: "Robinne".into(),
-            items: vec![
-                MenuItem::os_submenu("服务", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("设置...", OpenSettings),
-                MenuItem::separator(),
-                MenuItem::action("退出 Robinne", QuitApp),
-            ],
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![MenuItem::action("快速创建", OpenQuickAddOverlay)],
-        },
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::os_action("撤销", gpui_component::input::Undo, OsAction::Undo),
-                MenuItem::os_action("重做", gpui_component::input::Redo, OsAction::Redo),
-                MenuItem::separator(),
-                MenuItem::os_action("剪切", gpui_component::input::Cut, OsAction::Cut),
-                MenuItem::os_action("复制", gpui_component::input::Copy, OsAction::Copy),
-                MenuItem::os_action("粘贴", gpui_component::input::Paste, OsAction::Paste),
-                MenuItem::separator(),
-                MenuItem::os_action(
-                    "全选",
-                    gpui_component::input::SelectAll,
-                    OsAction::SelectAll,
-                ),
-                MenuItem::separator(),
-                MenuItem::action("搜索", OpenSearch),
-            ],
-        },
-    ]);
+    cx.set_menus(build_app_menus(
+        OpenQuickAddOverlay,
+        OpenSearch,
+        OpenSettings,
+        QuitApp,
+    ));
 }
 
 fn main() {
@@ -1478,16 +1452,16 @@ impl MainView {
                     .text_sm()
                     .text_color(rgb(0x8c8c8c))
                     .line_height(relative(1.5))
-                    .child("应用内快捷键由 macOS 菜单统一管理，全局快捷键继续用于跨应用唤起。"),
+                    .child(app_shortcuts_intro()),
             )
             .child(self.render_shortcut_group(
                 "应用内快捷键",
-                "仅在 Robinne 前台时生效，并显示在系统菜单中。",
+                app_shortcut_scope_description(),
                 app_shortcut_entries,
             ))
             .child(self.render_shortcut_group(
                 "全局快捷键",
-                "即使应用未聚焦也可触发，后续版本会在这里补充自定义编辑能力。",
+                global_shortcut_scope_description(),
                 global_shortcut_entries,
             ))
     }
@@ -1767,11 +1741,11 @@ impl Render for MainView {
                                             self.render_settings_panel(window, cx).into_any_element()
                                         }
                                     }),
-                            ),
-                    )
-                    .when_some(self.quick_add_overlay.clone(), |el, overlay| {
-                        el.child(overlay)
-                    }),
+                            )
+                            .when_some(self.quick_add_overlay.clone(), |el, overlay| {
+                                el.child(overlay)
+                            }),
+                    ),
             )
     }
 }

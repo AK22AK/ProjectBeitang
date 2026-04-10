@@ -1,5 +1,7 @@
-use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::Record;
+use crate::platform::{
+    open_path, pick_image_files, quick_add_hint_labels, quick_add_placeholder, ParentWindowHint,
+};
 use crate::store::Store;
 use crate::ui::attachment_draft::{
     attachment_lightbox_size, attachment_preview_size, format_attachment_meta,
@@ -50,14 +52,10 @@ impl InputMode {
         }
     }
 
-    fn placeholder(&self) -> &'static str {
+    fn placeholder(&self) -> String {
         match self {
-            InputMode::Task => {
-                "输入任务标题，Enter 换行添加正文 (Cmd+Enter 保存, Shift+Cmd+Enter 打开任务, #标签 @人物)"
-            }
-            InputMode::Record => {
-                "输入记录，Enter 换行后首行作为标题 (Cmd+Enter 保存, Shift+Cmd+Enter 打开记录, #标签 @人物)"
-            }
+            InputMode::Task => quick_add_placeholder(true),
+            InputMode::Record => quick_add_placeholder(false),
         }
     }
 
@@ -756,26 +754,26 @@ impl QuickAddWindow {
         }
     }
 
-    fn feedback_style(&self) -> Option<(Hsla, Hsla, Hsla, &'static str)> {
+    fn feedback_style(&self) -> Option<(Hsla, Hsla, Hsla, String)> {
         match self.feedback {
             QuickAddFeedback::Idle => None,
             QuickAddFeedback::EmptySubmitWarning => Some((
                 rgb(0xff4d4f).into(),
                 rgb(0xfff1f0).into(),
                 rgb(0xffccc7).into(),
-                "没有输入内容，不能记录",
+                "没有输入内容，不能记录".to_string(),
             )),
             QuickAddFeedback::EscConfirmPending { .. } => Some((
                 rgb(0xfa8c16).into(),
                 rgb(0xfff7e6).into(),
                 rgb(0xffd591).into(),
-                "再次按 Esc 关闭输入",
+                "再次按 Esc 关闭输入".to_string(),
             )),
             QuickAddFeedback::HotkeyDraftProtected => Some((
                 rgb(0x0958d9).into(),
                 rgb(0xe6f4ff).into(),
                 rgb(0x91caff).into(),
-                "已有草稿，按 Esc 关闭或按 Cmd+2 / Cmd+3 查看对应面板",
+                crate::platform::quick_add_draft_protection_message(),
             )),
         }
     }
@@ -793,17 +791,19 @@ impl QuickAddWindow {
     }
 
     fn render_shortcut_hints(&self) -> impl IntoElement {
+        let labels = quick_add_hint_labels();
         div()
             .flex()
             .flex_wrap()
             .gap(px(12.0))
             .text_xs()
             .text_color(rgb(0x8c8c8c))
+            .line_height(relative(1.5))
             .child("Enter 换行")
-            .child("Cmd+Enter 保存")
-            .child("Shift+Cmd+Enter 打开对应面板")
-            .child("Cmd+2 查看任务")
-            .child("Cmd+3 查看记录")
+            .child(labels.save)
+            .child(labels.open_destination)
+            .child(labels.open_tasks)
+            .child(labels.open_records)
             .child("Tab 切换模式")
             .child("Esc 关闭")
     }
@@ -998,7 +998,7 @@ impl QuickAddWindow {
         cx: &mut Context<Self>,
     ) {
         self.active_attachment_preview = None;
-        match crate::system_preview::open_path(&preview.path) {
+        match open_path(&preview.path) {
             Ok(()) => {
                 self.attachment_error = None;
             }
@@ -1308,23 +1308,124 @@ impl QuickAddWindow {
     fn render_composer_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let feedback_style = self.feedback_style();
 
+        if self.presentation == QuickAddPresentation::Overlay {
+            return div()
+                .w_full()
+                .rounded(px(20.0))
+                .border_1()
+                .border_color(rgb(0xe6ebf2))
+                .bg(rgba(0xfffffff7))
+                .shadow_lg()
+                .px(px(18.0))
+                .py(px(16.0))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .rounded(px(14.0))
+                                .w_full()
+                                .border_1()
+                                .border_color(
+                                    feedback_style
+                                        .as_ref()
+                                        .map(|(_, _, border_color, _)| *border_color)
+                                        .unwrap_or_else(|| rgb(0xd9e7f5).into()),
+                                )
+                                .bg(
+                                    feedback_style
+                                        .as_ref()
+                                        .map(|(_, bg_color, _, _)| *bg_color)
+                                        .unwrap_or_else(|| rgb(0xffffff).into()),
+                                )
+                                .p(px(4.0))
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap(px(0.0))
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .items_start()
+                                                .gap(px(4.0))
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w(px(0.0))
+                                                        .child(Input::new(&self.input_state).flex_1()),
+                                                )
+                                                .child(self.render_inline_attachment_trigger(cx)),
+                                        )
+                                        .when(self.metadata_autocomplete.is_open(), |el| {
+                                            el.child(self.render_metadata_autocomplete_menu(cx))
+                                        }),
+                                ),
+                        )
+                        .when(self.attachments_loading, |el| {
+                            el.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0x999999))
+                                    .child("正在处理图片…"),
+                            )
+                        })
+                        .when_some(self.attachment_error.clone(), |el, err| {
+                            el.child(div().text_sm().text_color(rgb(0xff4d4f)).child(err))
+                        })
+                        .when(!self.pending_attachments.is_empty(), |el| {
+                            el.child(
+                                h_flex().gap(px(8.0)).flex_wrap().children(
+                                    self.pending_attachments
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(idx, attachment)| {
+                                            self.render_pending_attachment_card(idx, attachment, cx)
+                                        }),
+                                ),
+                            )
+                        })
+                        .children(self.render_feedback_message())
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(12.0))
+                                .child(self.render_mode_switcher(cx))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x8c8c8c))
+                                        .child("Cmd+Enter 保存  Esc 关闭"),
+                                ),
+                        ),
+                )
+                .into_any_element();
+        }
+
         v_flex()
             .w_full()
-            .gap(px(10.0))
+            .gap(px(12.0))
             .child(
                 div()
-                    .rounded(px(12.0))
+                    .rounded(px(14.0))
                     .w_full()
                     .border_1()
                     .border_color(
                         feedback_style
-                            .map(|(_, _, border_color, _)| border_color)
-                            .unwrap_or_else(transparent_black),
+                            .as_ref()
+                            .map(|(_, _, border_color, _)| *border_color)
+                            .unwrap_or_else(|| rgb(0xd6e4f0).into()),
                     )
-                    .bg(feedback_style
-                        .map(|(_, bg_color, _, _)| bg_color)
-                        .unwrap_or_else(transparent_white))
-                    .p(px(2.0))
+                    .bg(
+                        feedback_style
+                            .as_ref()
+                            .map(|(_, bg_color, _, _)| *bg_color)
+                            .unwrap_or_else(|| rgb(0xffffff).into()),
+                    )
+                    .shadow_lg()
+                    .p(px(6.0))
                     .child(
                         v_flex()
                             .w_full()
@@ -1333,7 +1434,7 @@ impl QuickAddWindow {
                                 h_flex()
                                     .w_full()
                                     .items_start()
-                                    .gap(px(2.0))
+                                    .gap(px(6.0))
                                     .child(
                                         div()
                                             .flex_1()
@@ -1404,11 +1505,14 @@ impl QuickAddWindow {
             .left(px(0.0))
             .right(px(0.0))
             .bottom(px(0.0))
-            .bg(rgba(0x00000026))
             .flex()
+            .flex_col()
             .items_center()
-            .justify_center()
-            .p(px(24.0))
+            .justify_start()
+            .pt(px(36.0))
+            .px(px(24.0))
+            .pb(px(24.0))
+            .bg(rgba(0x00000000))
             .track_focus(&self.focus_handle(cx))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1419,14 +1523,8 @@ impl QuickAddWindow {
             )
             .child(
                 div()
-                    .w(px(720.0))
+                    .w(px(760.0))
                     .max_w(relative(0.92))
-                    .rounded(px(18.0))
-                    .border_1()
-                    .border_color(rgb(0x4b4b4b))
-                    .bg(rgb(0x232323))
-                    .shadow_lg()
-                    .p(px(18.0))
                     .cursor_default()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1452,86 +1550,90 @@ impl Render for QuickAddWindow {
         self.focus_input(window, cx);
 
         let body = self.render_composer_body(cx);
+        let root = match self.presentation {
+            QuickAddPresentation::Window => div().size_full(),
+            QuickAddPresentation::Overlay => div()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0)),
+        };
+
         let shell = match self.presentation {
             QuickAddPresentation::Window => self.render_window_shell(body, cx),
             QuickAddPresentation::Overlay => self.render_overlay_shell(body, cx),
         };
 
-        div()
-            .size_full()
-            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
-                this.paste_pending_attachments(window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
-                let _ = this.handle_metadata_action("up", window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
-                let _ = this.handle_metadata_action("down", window, cx);
-            }))
-            .on_action(cx.listener(|this, _action: &Escape, window, cx| {
-                if this.handle_metadata_action("escape", window, cx) {
-                    return;
-                }
-                this.handle_escape(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                if this.handle_metadata_action("tab", window, cx) {
-                    return;
-                }
-                this.clear_transient_feedback(cx);
-                this.toggle_mode(window, cx);
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.handle_metadata_keydown(event, window, cx) {
-                    return;
-                }
+        root.capture_action(cx.listener(|this, _action: &Paste, window, cx| {
+            this.paste_pending_attachments(window, cx);
+        }))
+        .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
+            let _ = this.handle_metadata_action("up", window, cx);
+        }))
+        .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
+            let _ = this.handle_metadata_action("down", window, cx);
+        }))
+        .on_action(cx.listener(|this, _action: &Escape, window, cx| {
+            if this.handle_metadata_action("escape", window, cx) {
+                return;
+            }
+            this.handle_escape(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
+            if this.handle_metadata_action("tab", window, cx) {
+                return;
+            }
+            this.clear_transient_feedback(cx);
+            this.toggle_mode(window, cx);
+        }))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if this.handle_metadata_keydown(event, window, cx) {
+                return;
+            }
 
-                let modifiers = event.keystroke.modifiers;
-                let key = event.keystroke.key.as_str();
+            let modifiers = event.keystroke.modifiers;
+            let key = event.keystroke.key.as_str();
 
-                if key == "enter" && modifiers.platform && modifiers.shift {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    let draft_text = this.session.borrow().draft_text.clone();
-                    this.try_submit_and_open_with_text(
-                        draft_text,
-                        this.mode.destination(),
-                        window,
-                        cx,
-                    );
-                    return;
-                }
+            if key == "enter" && modifiers.platform && modifiers.shift {
+                window.prevent_default();
+                cx.stop_propagation();
+                let draft_text = this.session.borrow().draft_text.clone();
+                this.try_submit_and_open_with_text(
+                    draft_text,
+                    this.mode.destination(),
+                    window,
+                    cx,
+                );
+                return;
+            }
 
-                if modifiers.platform {
-                    match key {
-                        "2" => {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_panel_without_submit(QuickAddDestination::Tasks, window, cx);
-                            return;
-                        }
-                        "3" => {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_panel_without_submit(
-                                QuickAddDestination::Records,
-                                window,
-                                cx,
-                            );
-                            return;
-                        }
-                        _ => {}
+            if modifiers.platform {
+                match key {
+                    "2" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_panel_without_submit(QuickAddDestination::Tasks, window, cx);
+                        return;
                     }
+                    "3" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_panel_without_submit(QuickAddDestination::Records, window, cx);
+                        return;
+                    }
+                    _ => {}
                 }
+            }
 
-                if key != "escape" {
-                    this.clear_transient_feedback(cx);
-                }
-            }))
-            .child(shell)
-            .when_some(
-                self.render_pending_attachment_lightbox(cx),
-                |el, overlay| el.child(overlay),
-            )
+            if key != "escape" {
+                this.clear_transient_feedback(cx);
+            }
+        }))
+        .child(shell)
+        .when_some(
+            self.render_pending_attachment_lightbox(cx),
+            |el, overlay| el.child(overlay),
+        )
     }
 }

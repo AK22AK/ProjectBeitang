@@ -1,6 +1,6 @@
 # Robinne
 
-一个面向 macOS 的本地优先桌面任务/记录应用，使用 GPUI 构建，数据默认保存在本地 SQLite。
+一个面向 macOS / Windows 的本地优先桌面任务/记录应用，使用 GPUI 构建，数据默认保存在本地 SQLite。
 
 ## 当前能力
 
@@ -22,9 +22,10 @@
 
 ## 平台与依赖说明
 
-- 当前主要面向 macOS 开发和运行
+- 当前正式支持 macOS 和 Windows
 - 需要本地 Rust/Cargo 环境
-- 仓库当前已启用 `gpui_platform` 的 `font-kit` feature；如果后续调整依赖配置，需继续保留该 feature，否则可能出现文字无法显示的问题
+- 仓库当前已启用 `gpui_platform` 的 `font-kit` feature；如果后续调整依赖配置，需继续保留该 feature
+- macOS 保留原生文件选择和 Quick Look 预览；Windows 使用系统默认应用打开附件预览
 
 详见 [docs/DEBUGGING_TEXT_RENDERING.md](docs/DEBUGGING_TEXT_RENDERING.md)。
 
@@ -43,6 +44,9 @@ cargo test
 
 # 打包 macOS App
 ./build_mac_app.sh
+
+# Windows 打包在 Windows 环境执行
+pwsh ./scripts/package_windows.ps1
 ```
 
 ## 使用说明
@@ -50,6 +54,7 @@ cargo test
 ### 快捷输入
 
 - 通过全局快捷键呼出快捷输入窗口，支持“任务”和“记录”两种模式
+- 以下示例中的主修饰键：macOS 为 `Cmd`，Windows 为 `Ctrl`
 - 任务模式下：
   `Enter` 换行补充正文，`Cmd+Enter` 保存，`Shift+Cmd+Enter` 保存并打开任务面板
 - 记录模式下：
@@ -74,19 +79,12 @@ cargo test
 
 以下为当前默认值：
 
-- 全局快捷键
-  - `Cmd+Shift+T`：打开快捷输入
-  - `Cmd+0`：打开主窗口
-  - `Cmd+2`：直接打开任务面板
-  - `Cmd+3`：直接打开记录面板
-- 应用内快捷键
-  - `Cmd+1`：看板
-  - `Cmd+2`：任务
-  - `Cmd+3`：记录
-  - `Cmd+4`：时间线
-  - `Cmd+5`：AI 面板
-  - `Cmd+K`：搜索
-  - `Cmd+,`：设置
+- macOS
+  - 全局快捷键：`Cmd+Shift+T`、`Cmd+0`、`Cmd+2`、`Cmd+3`
+  - 应用内快捷键：`Cmd+1`、`Cmd+2`、`Cmd+3`、`Cmd+4`、`Cmd+5`、`Cmd+K`、`Cmd+,`
+- Windows
+  - 全局快捷键：`Ctrl+Shift+T`、`Ctrl+0`、`Ctrl+2`、`Ctrl+3`
+  - 应用内快捷键：`Ctrl+1`、`Ctrl+2`、`Ctrl+3`、`Ctrl+4`、`Ctrl+5`、`Ctrl+K`、`Ctrl+,`
 
 当前 README 仅记录默认行为，不表示这些快捷键已经具备完整的持久化自定义配置能力。
 
@@ -97,6 +95,7 @@ Robinne/
 ├── src/
 │   ├── main.rs                 # 应用入口、窗口装配、菜单与快捷键注册
 │   ├── lib.rs                  # 模块导出与基础测试
+│   ├── platform/               # 平台服务层（文件对话框、预览、通知、菜单、快捷键）
 │   ├── store.rs                # 状态层与异步命令分发
 │   ├── db.rs                   # SQLite 数据访问
 │   ├── data_management.rs      # 数据导入导出与附件归档逻辑
@@ -109,12 +108,14 @@ Robinne/
 ├── assets/                     # 图标与静态资源
 ├── scripts/                    # 打包与资源生成脚本
 ├── build_mac_app.sh            # macOS App 打包脚本
+├── scripts/package_windows.ps1 # Windows ZIP 打包脚本
 └── Cargo.toml
 ```
 
 ## 相关文档
 
 - [docs/DEBUGGING_TEXT_RENDERING.md](docs/DEBUGGING_TEXT_RENDERING.md)：GPUI 文字渲染问题调试记录
+- [docs/platform-compatibility.md](docs/platform-compatibility.md)：平台差异、降级策略与跨平台开发约定
 - [docs/plans/roadmap.md](docs/plans/roadmap.md)：项目路线图
 - [docs/plans/product-design.md](docs/plans/product-design.md)：产品设计说明
 - [docs/plans/ui-ux-design.md](docs/plans/ui-ux-design.md)：UI / UX 设计文档

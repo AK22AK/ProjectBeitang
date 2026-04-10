@@ -33,6 +33,7 @@
   - `cargo test --quiet`
   - `cargo build --release`
   - macOS 下额外生成 `Robinne-v<version>-macos.zip`
+  - Windows 产物由 GitHub Actions 的 Windows runner 统一构建和打包
 
 常用参数：
 
@@ -53,6 +54,7 @@
 - Windows 提供 `robinne.exe` 的 ZIP 压缩包
 - 自动生成 `SHA256SUMS.txt`
 - Release 默认创建为 Draft
+- 当前代码基线以 macOS / Windows 双平台为准，Linux 不在本轮支持范围内
 
 当前版本不包含以下内容：
 
@@ -78,6 +80,7 @@
 cargo test --quiet
 cargo build --release
 ./build_mac_app.sh --version 0.1.0
+# Windows 打包在 GitHub Actions 的 Windows runner 完成
 ```
 
 4. 创建标签：

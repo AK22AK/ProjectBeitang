@@ -4,13 +4,10 @@ pub mod clipboard_attachment;
 pub mod config;
 pub mod data_management;
 pub mod db;
-pub mod file_dialog;
-pub mod file_dialog_prewarm;
 pub mod models;
-pub mod notifier;
+pub mod platform;
 pub mod shortcut_manager;
 pub mod store;
-pub mod system_preview;
 pub mod ui;
 
 #[cfg(test)]

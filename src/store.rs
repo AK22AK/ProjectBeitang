@@ -353,7 +353,7 @@ impl StoreRuntime {
                         }
                         for mut record in records {
                             eprintln!("[Store] Processing reminder for task: {}", record.id);
-                            match crate::notifier::Notifier::send_reminder(&record) {
+                            match crate::platform::send_reminder(&record) {
                                 Ok(_) => {
                                     eprintln!("[Store] Notification sent successfully");
                                     record.notified_at = Some(chrono::Utc::now());

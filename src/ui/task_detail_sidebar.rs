@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::file_dialog::{pick_image_files, ParentWindowHint};
 use crate::models::{Attachment, AttachmentStatus, Priority, Record, TaskStatus};
+use crate::platform::{open_saved_attachment, pick_image_files, ParentWindowHint};
 use crate::store::Store;
 use crate::ui::metadata_autocomplete::{
     apply_completion_to_input, autocomplete_item, render_autocomplete_menu,
@@ -1248,9 +1248,7 @@ impl TaskDetailSidebar {
             let _ = view.update(cx, |this, cx| {
                 match result {
                     Ok(file_data) => {
-                        if let Err(err) =
-                            crate::system_preview::open_saved_attachment(&attachment, file_data)
-                        {
+                        if let Err(err) = open_saved_attachment(&attachment, file_data) {
                             this.attachment_error = Some(err);
                         } else {
                             this.attachment_error = None;

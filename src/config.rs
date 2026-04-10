@@ -1,3 +1,4 @@
+use crate::platform;
 use anyhow::{anyhow, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use serde::{Deserialize, Serialize};
@@ -12,11 +13,12 @@ pub struct ShortcutConfig {
 
 impl Default for ShortcutConfig {
     fn default() -> Self {
+        let defaults = platform::default_global_shortcuts();
         Self {
-            quick_capture: "Cmd+Shift+T".to_string(),
-            open_main: "Cmd+0".to_string(),
-            open_tasks: "Cmd+2".to_string(),
-            open_records: "Cmd+3".to_string(),
+            quick_capture: defaults.quick_capture.to_string(),
+            open_main: defaults.open_main.to_string(),
+            open_tasks: defaults.open_tasks.to_string(),
+            open_records: defaults.open_records.to_string(),
         }
     }
 }

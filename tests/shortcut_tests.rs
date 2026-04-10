@@ -2,6 +2,9 @@ use gpui::px;
 use robinne::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
 use robinne::config::{parse_hotkey, ShortcutConfig};
 use robinne::models::{Priority, Record};
+use robinne::platform::{
+    app_shortcut_keystrokes, default_global_shortcuts, primary_modifier_label,
+};
 use robinne::shortcut_manager::ShortcutEvent;
 use robinne::ui::floating_window::{
     should_hide_app_after_global_quick_add_launch, should_hide_app_after_quick_add_close,
@@ -13,25 +16,28 @@ use robinne::ui::sidebar::{
 #[test]
 fn test_default_shortcut_config() {
     let config = ShortcutConfig::default();
-    assert_eq!(config.quick_capture, "Cmd+Shift+T");
-    assert_eq!(config.open_main, "Cmd+0");
-    assert_eq!(config.open_tasks, "Cmd+2");
-    assert_eq!(config.open_records, "Cmd+3");
+    let defaults = default_global_shortcuts();
+    assert_eq!(config.quick_capture, defaults.quick_capture);
+    assert_eq!(config.open_main, defaults.open_main);
+    assert_eq!(config.open_tasks, defaults.open_tasks);
+    assert_eq!(config.open_records, defaults.open_records);
 }
 
 #[test]
 fn test_shortcut_config_load_returns_default() {
     let config = ShortcutConfig::load();
-    assert_eq!(config.quick_capture, "Cmd+Shift+T");
-    assert_eq!(config.open_main, "Cmd+0");
+    let defaults = default_global_shortcuts();
+    assert_eq!(config.quick_capture, defaults.quick_capture);
+    assert_eq!(config.open_main, defaults.open_main);
 }
 
 #[test]
 fn test_parse_hotkey_supports_default_shortcuts() {
-    assert!(parse_hotkey("Cmd+Shift+T").is_ok());
-    assert!(parse_hotkey("Cmd+0").is_ok());
-    assert!(parse_hotkey("Cmd+2").is_ok());
-    assert!(parse_hotkey("Cmd+3").is_ok());
+    let defaults = default_global_shortcuts();
+    assert!(parse_hotkey(defaults.quick_capture).is_ok());
+    assert!(parse_hotkey(defaults.open_main).is_ok());
+    assert!(parse_hotkey(defaults.open_tasks).is_ok());
+    assert!(parse_hotkey(defaults.open_records).is_ok());
 }
 
 #[test]
@@ -51,10 +57,24 @@ fn test_app_shortcut_entries_are_not_in_global_shortcut_config() {
 
     assert!(!config_labels.contains(&"搜索"));
     assert!(!config_labels.contains(&"设置"));
-    assert_eq!(
-        app_shortcut_entries(),
-        [("快速创建", "Cmd+N"), ("搜索", "Cmd+K"), ("设置", "Cmd+,")]
-    );
+    let keystrokes = app_shortcut_keystrokes();
+    if primary_modifier_label() == "Cmd" {
+        assert_eq!(keystrokes.quick_add_overlay, "cmd-n");
+        assert_eq!(
+            app_shortcut_entries(),
+            [("快速创建", "Cmd+N"), ("搜索", "Cmd+K"), ("设置", "Cmd+,")]
+        );
+    } else {
+        assert_eq!(keystrokes.quick_add_overlay, "ctrl-n");
+        assert_eq!(
+            app_shortcut_entries(),
+            [
+                ("快速创建", "Ctrl+N"),
+                ("搜索", "Ctrl+K"),
+                ("设置", "Ctrl+,")
+            ]
+        );
+    }
 }
 
 #[test]

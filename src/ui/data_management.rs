@@ -3,8 +3,10 @@ use crate::data_management::{
     AttachmentStorageBackend, ConflictChoice, ConflictResolution, ImportConflict, ImportMode,
     ImportPreview, StorageUsageSummary,
 };
-use crate::file_dialog::{pick_archive_file, save_archive_file, ParentWindowHint};
 use crate::models::{AttachmentStatus, RecordType};
+use crate::platform::{
+    open_saved_attachment, pick_archive_file, save_archive_file, ParentWindowHint,
+};
 use crate::store::Store;
 use gpui::{prelude::*, *};
 use gpui_component::button::{Button, ButtonVariants};
@@ -344,10 +346,7 @@ impl DataManagementPanel {
             let _ = view.update(cx, |this, cx| {
                 match result {
                     Ok(bytes) => {
-                        if let Err(err) = crate::system_preview::open_saved_attachment(
-                            &entry.item.attachment,
-                            bytes,
-                        ) {
+                        if let Err(err) = open_saved_attachment(&entry.item.attachment, bytes) {
                             this.error = Some(err);
                         }
                     }
