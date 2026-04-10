@@ -75,9 +75,9 @@ pub fn quick_add_window_size() -> Size<Pixels> {
 
 pub fn should_hide_app_after_global_quick_add_launch(
     app_has_active_window: bool,
-    has_main_window: bool,
+    _has_main_window: bool,
 ) -> bool {
-    !app_has_active_window && !has_main_window
+    !app_has_active_window
 }
 
 pub fn should_hide_app_after_quick_add_close(

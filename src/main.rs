@@ -277,14 +277,6 @@ fn main() {
         })
         .detach();
 
-        ensure_main_window(
-            cx,
-            &main_window_for_run,
-            &store_for_run,
-            &quick_add_for_run,
-            Some(Panel::Dashboard),
-        );
-
         cx.defer(|_cx| {
             prewarm_file_dialog();
         });
@@ -408,6 +400,7 @@ fn handle_quick_capture_hotkey(
 
     match status {
         QuickAddSessionStatus::Closed => {
+            let activate_app = cx.active_window().is_none();
             let hide_app_on_close = should_hide_app_after_global_quick_add_launch(
                 cx.active_window().is_some(),
                 main_window_exists(cx, &main_window),
@@ -418,16 +411,19 @@ fn handle_quick_capture_hotkey(
                 main_window,
                 quick_add_session,
                 None,
+                activate_app,
                 hide_app_on_close,
             );
         }
         QuickAddSessionStatus::Dormant => {
+            let activate_app = cx.active_window().is_none();
             open_or_focus_quick_add_window_only(
                 cx,
                 store,
                 main_window,
                 quick_add_session,
                 None,
+                activate_app,
                 false,
             );
         }
@@ -445,6 +441,7 @@ fn handle_quick_capture_hotkey(
                     main_window,
                     quick_add_session,
                     None,
+                    cx.active_window().is_none(),
                     false,
                 );
             }
@@ -523,6 +520,24 @@ fn prime_quick_add_session(
     request_serial
 }
 
+fn destroy_inactive_main_window_if_needed(
+    cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
+) {
+    let Some(handle) = resolve_main_window_handle(cx, controller) else {
+        return;
+    };
+
+    if controller.borrow().is_active {
+        return;
+    }
+
+    let _ = handle.update(cx, |_, window, _| {
+        window.remove_window();
+    });
+    controller.borrow_mut().clear_handle();
+}
+
 fn focus_visible_quick_add(
     cx: &mut App,
     controller: &Rc<RefCell<MainWindowController>>,
@@ -553,6 +568,7 @@ fn open_or_focus_quick_add_window_only(
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
     preferred_mode: Option<InputMode>,
+    activate_app: bool,
     hide_app_on_close: bool,
 ) {
     if quick_add_session.borrow().presentation == Some(QuickAddPresentation::Window)
@@ -566,6 +582,7 @@ fn open_or_focus_quick_add_window_only(
         store,
         main_window,
         quick_add_session,
+        activate_app,
         hide_app_on_close,
         preferred_mode,
     );
@@ -593,11 +610,22 @@ fn open_quick_add_window(
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    activate_app: bool,
     hide_app_on_close: bool,
     preferred_mode: Option<InputMode>,
 ) {
+    if activate_app && main_window_exists(cx, &main_window) {
+        destroy_inactive_main_window_if_needed(cx, &main_window);
+    }
+
     let request_serial =
         prime_quick_add_session(&quick_add_session, preferred_mode, hide_app_on_close);
+
+    // Showing a floating quick-add window from a background app still requires app activation.
+    // Keep this independent from whether the app should be hidden again on close.
+    if activate_app {
+        cx.activate(true);
+    }
 
     let window_size = quick_add_window_size();
     let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
@@ -638,7 +666,7 @@ fn open_quick_add_window(
     match cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
-            kind: WindowKind::PopUp,
+            kind: WindowKind::Floating,
             is_resizable: false,
             ..Default::default()
         },

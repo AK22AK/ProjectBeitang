@@ -129,7 +129,7 @@ fn test_shortcut_event_variants() {
 #[test]
 fn test_global_quick_add_only_hides_app_when_no_other_window_exists() {
     assert!(should_hide_app_after_global_quick_add_launch(false, false));
-    assert!(!should_hide_app_after_global_quick_add_launch(false, true));
+    assert!(should_hide_app_after_global_quick_add_launch(false, true));
     assert!(!should_hide_app_after_global_quick_add_launch(true, false));
 }
 
