@@ -18,6 +18,7 @@ use robinne::ui::data_management::DataManagementPanel;
 use robinne::ui::floating_window::{
     quick_add_window_size, InputMode, QuickAddDestination, QuickAddPresentation,
     QuickAddSessionController, QuickAddSessionStatus, QuickAddWindow,
+    should_hide_app_after_global_quick_add_launch, should_hide_app_after_quick_add_close,
 };
 use robinne::ui::note_panel::NotePanel;
 use robinne::ui::quick_add_context::resolve_quick_add_mode;
@@ -407,7 +408,10 @@ fn handle_quick_capture_hotkey(
 
     match status {
         QuickAddSessionStatus::Closed => {
-            let hide_app_on_close = cx.active_window().is_none();
+            let hide_app_on_close = should_hide_app_after_global_quick_add_launch(
+                cx.active_window().is_some(),
+                main_window_exists(cx, &main_window),
+            );
             open_or_focus_quick_add_window_only(
                 cx,
                 store,
@@ -595,8 +599,6 @@ fn open_quick_add_window(
     let request_serial =
         prime_quick_add_session(&quick_add_session, preferred_mode, hide_app_on_close);
 
-    cx.activate(true);
-
     let window_size = quick_add_window_size();
     let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
 
@@ -636,6 +638,8 @@ fn open_quick_add_window(
     match cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
+            kind: WindowKind::PopUp,
+            is_resizable: false,
             ..Default::default()
         },
         move |window, cx| {
@@ -723,7 +727,10 @@ fn close_visible_quick_add(
 
     let should_hide = {
         let mut session = quick_add_session.borrow_mut();
-        let should_hide = hide_app_on_close && !session.has_draft();
+        let should_hide = should_hide_app_after_quick_add_close(
+            hide_app_on_close && !session.has_draft(),
+            live_window_handles(cx).len(),
+        );
         session.clear();
         should_hide
     };
@@ -764,6 +771,17 @@ fn show_quick_add_hotkey_protection(
 
 fn live_window_handles(cx: &App) -> Vec<AnyWindowHandle> {
     cx.window_stack().unwrap_or_else(|| cx.windows())
+}
+
+fn main_window_exists(cx: &mut App, controller: &Rc<RefCell<MainWindowController>>) -> bool {
+    sync_main_window_controller(cx, controller);
+    if controller.borrow().handle.is_some() {
+        return true;
+    }
+
+    live_window_handles(cx)
+        .into_iter()
+        .any(|handle| is_main_window_handle(cx, handle))
 }
 
 fn sync_main_window_controller(cx: &mut App, controller: &Rc<RefCell<MainWindowController>>) {

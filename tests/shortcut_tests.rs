@@ -3,6 +3,9 @@ use robinne::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
 use robinne::config::{parse_hotkey, ShortcutConfig};
 use robinne::models::{Priority, Record};
 use robinne::shortcut_manager::ShortcutEvent;
+use robinne::ui::floating_window::{
+    should_hide_app_after_global_quick_add_launch, should_hide_app_after_quick_add_close,
+};
 use robinne::ui::sidebar::{
     main_sidebar_layout_mode, main_sidebar_width, Panel, SidebarLayoutMode,
 };
@@ -121,6 +124,20 @@ fn test_shortcut_event_variants() {
             }
         }
     }
+}
+
+#[test]
+fn test_global_quick_add_only_hides_app_when_no_other_window_exists() {
+    assert!(should_hide_app_after_global_quick_add_launch(false, false));
+    assert!(!should_hide_app_after_global_quick_add_launch(false, true));
+    assert!(!should_hide_app_after_global_quick_add_launch(true, false));
+}
+
+#[test]
+fn test_quick_add_close_only_hides_when_it_is_the_last_window() {
+    assert!(should_hide_app_after_quick_add_close(true, 1));
+    assert!(!should_hide_app_after_quick_add_close(true, 2));
+    assert!(!should_hide_app_after_quick_add_close(false, 1));
 }
 
 #[test]

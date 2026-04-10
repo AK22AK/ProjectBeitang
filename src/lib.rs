@@ -16,7 +16,7 @@ pub mod ui;
 #[cfg(test)]
 mod tests {
     use crate::ui::attachment_draft::PendingAttachment;
-    use crate::ui::floating_window::QuickAddSessionController;
+    use crate::ui::floating_window::{QuickAddPresentation, QuickAddSessionController};
     use std::path::PathBuf;
 
     fn test_pending_attachment() -> PendingAttachment {
@@ -46,5 +46,16 @@ mod tests {
         session.clear();
         assert!(!session.has_draft());
         assert!(session.pending_attachments.is_empty());
+    }
+
+    #[test]
+    fn quick_add_restore_visible_does_not_advance_request_serial() {
+        let mut session = QuickAddSessionController::default();
+        let request_serial = session.mark_visible(QuickAddPresentation::Window);
+
+        session.restore_visible(QuickAddPresentation::Window);
+
+        assert_eq!(session.request_serial, request_serial);
+        assert_eq!(session.presentation, Some(QuickAddPresentation::Window));
     }
 }

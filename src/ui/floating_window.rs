@@ -73,6 +73,20 @@ pub fn quick_add_window_size() -> Size<Pixels> {
     size(px(520.0), px(244.0))
 }
 
+pub fn should_hide_app_after_global_quick_add_launch(
+    app_has_active_window: bool,
+    has_main_window: bool,
+) -> bool {
+    !app_has_active_window && !has_main_window
+}
+
+pub fn should_hide_app_after_quick_add_close(
+    hide_app_on_close: bool,
+    live_window_count: usize,
+) -> bool {
+    hide_app_on_close && live_window_count <= 1
+}
+
 fn quick_add_window_size_for_content(
     input_rows: usize,
     attachment_rows: usize,
@@ -128,15 +142,23 @@ pub struct QuickAddSessionController {
 }
 
 impl QuickAddSessionController {
+    fn set_visible_state(&mut self, presentation: QuickAddPresentation) {
+        self.status = QuickAddSessionStatus::Visible;
+        self.presentation = Some(presentation);
+    }
+
     pub fn has_draft(&self) -> bool {
         !self.draft_text.trim().is_empty() || !self.pending_attachments.is_empty()
     }
 
     pub fn mark_visible(&mut self, presentation: QuickAddPresentation) -> u64 {
         self.request_serial = self.request_serial.wrapping_add(1);
-        self.status = QuickAddSessionStatus::Visible;
-        self.presentation = Some(presentation);
+        self.set_visible_state(presentation);
         self.request_serial
+    }
+
+    pub fn restore_visible(&mut self, presentation: QuickAddPresentation) {
+        self.set_visible_state(presentation);
     }
 
     pub fn clear(&mut self) {
@@ -243,7 +265,7 @@ impl QuickAddWindow {
             },
         );
 
-        session.borrow_mut().mark_visible(presentation);
+        session.borrow_mut().restore_visible(presentation);
 
         let view = Self {
             store,
@@ -594,7 +616,10 @@ impl QuickAddWindow {
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_session();
-        let hide = self.hide_app_on_close;
+        let hide = should_hide_app_after_quick_add_close(
+            self.hide_app_on_close,
+            cx.window_stack().unwrap_or_else(|| cx.windows()).len(),
+        );
         self.dismiss_presentation(window, cx);
         if hide {
             cx.hide();
