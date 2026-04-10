@@ -21,7 +21,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputMode {
@@ -108,6 +108,12 @@ pub enum QuickAddSessionStatus {
     Dormant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuickAddPresentation {
+    Overlay,
+    Window,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct QuickAddSessionController {
     pub handle: Option<AnyWindowHandle>,
@@ -115,7 +121,10 @@ pub struct QuickAddSessionController {
     pub pending_attachments: Vec<PendingAttachment>,
     pub mode: InputMode,
     pub status: QuickAddSessionStatus,
+    pub presentation: Option<QuickAddPresentation>,
     pub hide_app_on_close: bool,
+    pub request_serial: u64,
+    pub last_hotkey_at: Option<Instant>,
 }
 
 impl QuickAddSessionController {
@@ -123,16 +132,21 @@ impl QuickAddSessionController {
         !self.draft_text.trim().is_empty() || !self.pending_attachments.is_empty()
     }
 
-    pub fn mark_visible(&mut self) {
+    pub fn mark_visible(&mut self, presentation: QuickAddPresentation) -> u64 {
+        self.request_serial = self.request_serial.wrapping_add(1);
         self.status = QuickAddSessionStatus::Visible;
+        self.presentation = Some(presentation);
+        self.request_serial
     }
 
     pub fn clear(&mut self) {
+        self.request_serial = self.request_serial.wrapping_add(1);
         self.handle = None;
         self.draft_text.clear();
         self.pending_attachments.clear();
         self.mode = InputMode::Record;
         self.status = QuickAddSessionStatus::Closed;
+        self.presentation = None;
         self.hide_app_on_close = false;
     }
 }
@@ -149,6 +163,8 @@ pub struct QuickAddWindow {
     store: Store,
     session: Rc<RefCell<QuickAddSessionController>>,
     open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
+    presentation: QuickAddPresentation,
+    dismiss_overlay: Option<Arc<dyn Fn(&mut App)>>,
     input_state: Entity<InputState>,
     pending_attachments: Vec<PendingAttachment>,
     active_attachment_preview: Option<PendingAttachment>,
@@ -166,10 +182,12 @@ pub struct QuickAddWindow {
 }
 
 impl QuickAddWindow {
-    pub fn new(
+    fn new(
         store: Store,
         session: Rc<RefCell<QuickAddSessionController>>,
         open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
+        presentation: QuickAddPresentation,
+        dismiss_overlay: Option<Arc<dyn Fn(&mut App)>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -225,12 +243,14 @@ impl QuickAddWindow {
             },
         );
 
-        session.borrow_mut().mark_visible();
+        session.borrow_mut().mark_visible(presentation);
 
         let view = Self {
             store,
             session,
             open_destination,
+            presentation,
+            dismiss_overlay,
             input_state,
             pending_attachments,
             active_attachment_preview: None,
@@ -252,9 +272,55 @@ impl QuickAddWindow {
         view
     }
 
+    pub fn new_window(
+        store: Store,
+        session: Rc<RefCell<QuickAddSessionController>>,
+        open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(
+            store,
+            session,
+            open_destination,
+            QuickAddPresentation::Window,
+            None,
+            window,
+            cx,
+        )
+    }
+
+    pub fn new_overlay(
+        store: Store,
+        session: Rc<RefCell<QuickAddSessionController>>,
+        open_destination: Arc<dyn Fn(QuickAddDestination, &mut App)>,
+        dismiss_overlay: Arc<dyn Fn(&mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(
+            store,
+            session,
+            open_destination,
+            QuickAddPresentation::Overlay,
+            Some(dismiss_overlay),
+            window,
+            cx,
+        )
+    }
+
     pub fn show_hotkey_protection(&mut self, cx: &mut Context<Self>) {
         self.feedback = QuickAddFeedback::HotkeyDraftProtected;
         cx.notify();
+    }
+
+    pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input_state
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    pub fn dismiss_via_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_escape(window, cx);
     }
 
     fn set_mode(&mut self, mode: InputMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -283,6 +349,9 @@ impl QuickAddWindow {
     }
 
     fn sync_window_size(&self, window: &mut Window, cx: &Context<Self>) {
+        if self.presentation != QuickAddPresentation::Window {
+            return;
+        }
         window.resize(quick_add_window_size_for_content(
             self.visible_input_rows(cx),
             self.visible_attachment_rows(),
@@ -485,6 +554,7 @@ impl QuickAddWindow {
         session.pending_attachments = self.pending_attachments.clone();
         session.mode = self.mode;
         session.status = QuickAddSessionStatus::Visible;
+        session.presentation = Some(self.presentation);
     }
 
     fn clear_session(&self) {
@@ -498,6 +568,7 @@ impl QuickAddWindow {
         session.pending_attachments = self.pending_attachments.clone();
         session.mode = self.mode;
         session.status = QuickAddSessionStatus::Dormant;
+        session.presentation = None;
     }
 
     fn submit_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -507,22 +578,31 @@ impl QuickAddWindow {
         }
     }
 
-    fn remove_window(&mut self, window: &mut Window) {
-        self.session.borrow_mut().handle = None;
-        window.remove_window();
+    fn dismiss_presentation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.presentation {
+            QuickAddPresentation::Window => {
+                self.session.borrow_mut().handle = None;
+                window.remove_window();
+            }
+            QuickAddPresentation::Overlay => {
+                if let Some(dismiss_overlay) = &self.dismiss_overlay {
+                    dismiss_overlay(cx);
+                }
+            }
+        }
     }
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_session();
         let hide = self.hide_app_on_close;
-        self.remove_window(window);
+        self.dismiss_presentation(window, cx);
         if hide {
             cx.hide();
         }
     }
 
-    fn close_window_preserving_session(&mut self, window: &mut Window) {
-        self.remove_window(window);
+    fn close_window_preserving_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_presentation(window, cx);
     }
 
     fn submit_text_and_close(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -584,7 +664,7 @@ impl QuickAddWindow {
         self.clear_transient_feedback(cx);
         self.submit_text(&text, cx);
         self.clear_session();
-        self.remove_window(window);
+        self.dismiss_presentation(window, cx);
         (self.open_destination)(destination, cx);
     }
 
@@ -600,7 +680,7 @@ impl QuickAddWindow {
         } else {
             self.clear_session();
         }
-        self.close_window_preserving_session(window);
+        self.close_window_preserving_session(window, cx);
         (self.open_destination)(destination, cx);
     }
 
@@ -1199,99 +1279,13 @@ impl QuickAddWindow {
                 cx.stop_propagation();
             }))
     }
-}
 
-impl Focusable for QuickAddWindow {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl Render for QuickAddWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_window_size(window, cx);
-        self.input_state
-            .update(cx, |input, cx| input.focus(window, cx));
-
+    fn render_composer_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let feedback_style = self.feedback_style();
 
-        div()
-            .size_full()
-            .bg(rgb(0xfcfcfd))
-            .p(px(14.0))
-            .flex()
-            .flex_col()
+        v_flex()
+            .w_full()
             .gap(px(10.0))
-            .track_focus(&self.focus_handle(cx))
-            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
-                this.paste_pending_attachments(window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
-                let _ = this.handle_metadata_action("up", window, cx);
-            }))
-            .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
-                let _ = this.handle_metadata_action("down", window, cx);
-            }))
-            .on_action(cx.listener(|this, _action: &Escape, window, cx| {
-                if this.handle_metadata_action("escape", window, cx) {
-                    return;
-                }
-                this.handle_escape(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                if this.handle_metadata_action("tab", window, cx) {
-                    return;
-                }
-                this.clear_transient_feedback(cx);
-                this.toggle_mode(window, cx);
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.handle_metadata_keydown(event, window, cx) {
-                    return;
-                }
-
-                let modifiers = event.keystroke.modifiers;
-                let key = event.keystroke.key.as_str();
-
-                if key == "enter" && modifiers.platform && modifiers.shift {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    let draft_text = this.session.borrow().draft_text.clone();
-                    this.try_submit_and_open_with_text(
-                        draft_text,
-                        this.mode.destination(),
-                        window,
-                        cx,
-                    );
-                    return;
-                }
-
-                if modifiers.platform {
-                    match key {
-                        "2" => {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_panel_without_submit(QuickAddDestination::Tasks, window, cx);
-                            return;
-                        }
-                        "3" => {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_panel_without_submit(
-                                QuickAddDestination::Records,
-                                window,
-                                cx,
-                            );
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-
-                if key != "escape" {
-                    this.clear_transient_feedback(cx);
-                }
-            }))
             .child(
                 div()
                     .rounded(px(12.0))
@@ -1361,6 +1355,155 @@ impl Render for QuickAddWindow {
                     .child(self.render_mode_switcher(cx)),
             )
             .child(self.render_shortcut_hints())
+            .into_any_element()
+    }
+
+    fn render_window_shell(&self, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .size_full()
+            .bg(rgb(0xfcfcfd))
+            .p(px(14.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .track_focus(&self.focus_handle(cx))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn render_overlay_shell(&self, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("quick-add-overlay")
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .bg(rgba(0x00000026))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(24.0))
+            .track_focus(&self.focus_handle(cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    this.dismiss_via_escape(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(720.0))
+                    .max_w(relative(0.92))
+                    .rounded(px(18.0))
+                    .border_1()
+                    .border_color(rgb(0x4b4b4b))
+                    .bg(rgb(0x232323))
+                    .shadow_lg()
+                    .p(px(18.0))
+                    .cursor_default()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(body),
+            )
+            .into_any_element()
+    }
+}
+
+impl Focusable for QuickAddWindow {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for QuickAddWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_window_size(window, cx);
+        self.focus_input(window, cx);
+
+        let body = self.render_composer_body(cx);
+        let shell = match self.presentation {
+            QuickAddPresentation::Window => self.render_window_shell(body, cx),
+            QuickAddPresentation::Overlay => self.render_overlay_shell(body, cx),
+        };
+
+        div()
+            .size_full()
+            .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
+                this.paste_pending_attachments(window, cx);
+            }))
+            .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
+                let _ = this.handle_metadata_action("up", window, cx);
+            }))
+            .capture_action(cx.listener(|this, _action: &MoveDown, window, cx| {
+                let _ = this.handle_metadata_action("down", window, cx);
+            }))
+            .on_action(cx.listener(|this, _action: &Escape, window, cx| {
+                if this.handle_metadata_action("escape", window, cx) {
+                    return;
+                }
+                this.handle_escape(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                if this.handle_metadata_action("tab", window, cx) {
+                    return;
+                }
+                this.clear_transient_feedback(cx);
+                this.toggle_mode(window, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.handle_metadata_keydown(event, window, cx) {
+                    return;
+                }
+
+                let modifiers = event.keystroke.modifiers;
+                let key = event.keystroke.key.as_str();
+
+                if key == "enter" && modifiers.platform && modifiers.shift {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    let draft_text = this.session.borrow().draft_text.clone();
+                    this.try_submit_and_open_with_text(
+                        draft_text,
+                        this.mode.destination(),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+
+                if modifiers.platform {
+                    match key {
+                        "2" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.open_panel_without_submit(QuickAddDestination::Tasks, window, cx);
+                            return;
+                        }
+                        "3" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.open_panel_without_submit(
+                                QuickAddDestination::Records,
+                                window,
+                                cx,
+                            );
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if key != "escape" {
+                    this.clear_transient_feedback(cx);
+                }
+            }))
+            .child(shell)
             .when_some(
                 self.render_pending_attachment_lightbox(cx),
                 |el, overlay| el.child(overlay),

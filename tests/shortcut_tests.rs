@@ -50,7 +50,7 @@ fn test_app_shortcut_entries_are_not_in_global_shortcut_config() {
     assert!(!config_labels.contains(&"设置"));
     assert_eq!(
         app_shortcut_entries(),
-        [("搜索", "Cmd+K"), ("设置", "Cmd+,")]
+        [("快速创建", "Cmd+N"), ("搜索", "Cmd+K"), ("设置", "Cmd+,")]
     );
 }
 

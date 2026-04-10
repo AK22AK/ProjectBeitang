@@ -1,4 +1,5 @@
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
@@ -6,7 +7,8 @@ use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
 use robinne::app_shortcuts::{
-    app_shortcut_entries, main_panel_shortcuts, SEARCH_KEYSTROKE, SETTINGS_KEYSTROKE,
+    app_shortcut_entries, main_panel_shortcuts, QUICK_ADD_OVERLAY_KEYSTROKE, SEARCH_KEYSTROKE,
+    SETTINGS_KEYSTROKE,
 };
 use robinne::config::ShortcutConfig;
 use robinne::file_dialog_prewarm::prewarm_file_dialog;
@@ -14,8 +16,8 @@ use robinne::store::{create_store, Store};
 use robinne::ui::dashboard::{Dashboard, DashboardAction};
 use robinne::ui::data_management::DataManagementPanel;
 use robinne::ui::floating_window::{
-    quick_add_window_size, InputMode, QuickAddDestination, QuickAddSessionController,
-    QuickAddSessionStatus, QuickAddWindow,
+    quick_add_window_size, InputMode, QuickAddDestination, QuickAddPresentation,
+    QuickAddSessionController, QuickAddSessionStatus, QuickAddWindow,
 };
 use robinne::ui::note_panel::NotePanel;
 use robinne::ui::quick_add_context::resolve_quick_add_mode;
@@ -29,14 +31,19 @@ use std::sync::Arc;
 
 const SETTINGS_NAV_BREAKPOINT: Pixels = px(600.0);
 const SETTINGS_SIDEBAR_NAV_WIDTH: Pixels = px(180.0);
+const QUICK_CAPTURE_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 
-actions!(app_menu, [OpenSearch, OpenSettings, QuitApp]);
+actions!(
+    app_menu,
+    [OpenQuickAddOverlay, OpenSearch, OpenSettings, QuitApp]
+);
 
 #[derive(Clone)]
 struct MainWindowController {
     handle: Option<AnyWindowHandle>,
     window_id: Option<WindowId>,
     current_panel: Panel,
+    is_active: bool,
 }
 
 impl Default for MainWindowController {
@@ -45,6 +52,7 @@ impl Default for MainWindowController {
             handle: None,
             window_id: None,
             current_panel: Panel::Dashboard,
+            is_active: false,
         }
     }
 }
@@ -54,11 +62,13 @@ impl MainWindowController {
         self.handle = Some(handle);
         self.window_id = Some(handle.window_id());
         self.current_panel = panel;
+        self.is_active = true;
     }
 
     fn clear_handle(&mut self) {
         self.handle = None;
         self.window_id = None;
+        self.is_active = false;
     }
 }
 
@@ -121,9 +131,22 @@ fn install_app_shortcuts_and_menus(
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
 ) {
     cx.bind_keys([
+        KeyBinding::new(QUICK_ADD_OVERLAY_KEYSTROKE, OpenQuickAddOverlay, None),
         KeyBinding::new(SEARCH_KEYSTROKE, OpenSearch, None),
         KeyBinding::new(SETTINGS_KEYSTROKE, OpenSettings, None),
     ]);
+
+    let main_window_for_quick_add = main_window.clone();
+    let store_for_quick_add = store.clone();
+    let quick_add_for_quick_add = quick_add_session.clone();
+    cx.on_action(move |_: &OpenQuickAddOverlay, cx| {
+        let main_window = main_window_for_quick_add.clone();
+        let store = store_for_quick_add.clone();
+        let quick_add_session = quick_add_for_quick_add.clone();
+        cx.defer(move |cx| {
+            open_or_focus_quick_add_overlay(cx, store, main_window, quick_add_session);
+        });
+    });
 
     let main_window_for_search = main_window.clone();
     let store_for_search = store.clone();
@@ -175,6 +198,10 @@ fn install_app_shortcuts_and_menus(
                 MenuItem::separator(),
                 MenuItem::action("退出 Robinne", QuitApp),
             ],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![MenuItem::action("快速创建", OpenQuickAddOverlay)],
         },
         Menu {
             name: "Edit".into(),
@@ -359,11 +386,29 @@ fn handle_quick_capture_hotkey(
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
 ) {
-    let status = quick_add_session.borrow().status;
+    let now = std::time::Instant::now();
+    {
+        let mut session = quick_add_session.borrow_mut();
+        if session
+            .last_hotkey_at
+            .is_some_and(|last| now.duration_since(last) < QUICK_CAPTURE_DEBOUNCE_WINDOW)
+        {
+            return;
+        }
+        session.last_hotkey_at = Some(now);
+    }
+
+    dismiss_quick_add_overlay_for_window(cx, &main_window, &quick_add_session);
+
+    let (status, current_presentation, has_draft) = {
+        let session = quick_add_session.borrow();
+        (session.status, session.presentation, session.has_draft())
+    };
+
     match status {
         QuickAddSessionStatus::Closed => {
             let hide_app_on_close = cx.active_window().is_none();
-            open_or_focus_quick_add(
+            open_or_focus_quick_add_window_only(
                 cx,
                 store,
                 main_window,
@@ -373,15 +418,89 @@ fn handle_quick_capture_hotkey(
             );
         }
         QuickAddSessionStatus::Dormant => {
-            open_or_focus_quick_add(cx, store, main_window, quick_add_session, None, false);
+            open_or_focus_quick_add_window_only(
+                cx,
+                store,
+                main_window,
+                quick_add_session,
+                None,
+                false,
+            );
         }
         QuickAddSessionStatus::Visible => {
-            if quick_add_session.borrow().has_draft() {
-                show_quick_add_hotkey_protection(cx, &quick_add_session);
+            if current_presentation == Some(QuickAddPresentation::Window) {
+                if has_draft {
+                    show_quick_add_hotkey_protection(cx, &main_window, &quick_add_session);
+                } else {
+                    close_visible_quick_add(cx, &main_window, &quick_add_session);
+                }
             } else {
-                close_visible_quick_add(cx, &quick_add_session);
+                open_or_focus_quick_add_window_only(
+                    cx,
+                    store,
+                    main_window,
+                    quick_add_session,
+                    None,
+                    false,
+                );
             }
         }
+    }
+}
+
+fn dismiss_quick_add_window_for_overlay(
+    cx: &mut App,
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+) {
+    let handle = {
+        let session = quick_add_session.borrow();
+        if session.presentation == Some(QuickAddPresentation::Window) {
+            session.handle
+        } else {
+            None
+        }
+    };
+
+    if let Some(handle) = handle {
+        let _ = handle.update(cx, |_, window, _| {
+            window.remove_window();
+        });
+    }
+
+    let mut session = quick_add_session.borrow_mut();
+    if session.presentation == Some(QuickAddPresentation::Window) {
+        session.handle = None;
+        session.presentation = None;
+        session.status = if session.has_draft() {
+            QuickAddSessionStatus::Dormant
+        } else {
+            QuickAddSessionStatus::Closed
+        };
+        session.hide_app_on_close = false;
+    }
+}
+
+fn dismiss_quick_add_overlay_for_window(
+    cx: &mut App,
+    main_window: &Rc<RefCell<MainWindowController>>,
+    quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+) {
+    let presentation = quick_add_session.borrow().presentation;
+    if presentation != Some(QuickAddPresentation::Overlay) {
+        return;
+    }
+
+    let _ = dismiss_quick_add_overlay(cx, main_window);
+
+    let mut session = quick_add_session.borrow_mut();
+    if session.presentation == Some(QuickAddPresentation::Overlay) {
+        session.presentation = None;
+        session.status = if session.has_draft() {
+            QuickAddSessionStatus::Dormant
+        } else {
+            QuickAddSessionStatus::Closed
+        };
+        session.hide_app_on_close = false;
     }
 }
 
@@ -389,33 +508,42 @@ fn prime_quick_add_session(
     quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
     preferred_mode: Option<InputMode>,
     hide_app_on_close: bool,
-) {
+) -> u64 {
     let mut session = quick_add_session.borrow_mut();
     if let Some(mode) = preferred_mode {
         session.mode = mode;
     }
-    session.status = QuickAddSessionStatus::Visible;
+    let request_serial = session.mark_visible(QuickAddPresentation::Window);
     session.handle = None;
     session.hide_app_on_close = hide_app_on_close;
+    request_serial
 }
 
 fn focus_visible_quick_add(
     cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
     quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
 ) -> bool {
-    let handle = quick_add_session.borrow().handle;
-    let Some(handle) = handle else {
-        return false;
-    };
+    let presentation = quick_add_session.borrow().presentation;
+    match presentation {
+        Some(QuickAddPresentation::Window) => {
+            let handle = quick_add_session.borrow().handle;
+            let Some(handle) = handle else {
+                return false;
+            };
 
-    handle
-        .update(cx, |_, window, _| {
-            window.activate_window();
-        })
-        .is_ok()
+            handle
+                .update(cx, |_, window, _| {
+                    window.activate_window();
+                })
+                .is_ok()
+        }
+        Some(QuickAddPresentation::Overlay) => focus_quick_add_overlay(cx, controller),
+        None => false,
+    }
 }
 
-fn open_or_focus_quick_add(
+fn open_or_focus_quick_add_window_only(
     cx: &mut App,
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
@@ -423,8 +551,8 @@ fn open_or_focus_quick_add(
     preferred_mode: Option<InputMode>,
     hide_app_on_close: bool,
 ) {
-    if quick_add_session.borrow().status == QuickAddSessionStatus::Visible
-        && focus_visible_quick_add(cx, &quick_add_session)
+    if quick_add_session.borrow().presentation == Some(QuickAddPresentation::Window)
+        && focus_visible_quick_add(cx, &main_window, &quick_add_session)
     {
         return;
     }
@@ -439,6 +567,23 @@ fn open_or_focus_quick_add(
     );
 }
 
+fn open_or_focus_quick_add_overlay(
+    cx: &mut App,
+    store: Store,
+    main_window: Rc<RefCell<MainWindowController>>,
+    quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+) {
+    let preferred_mode = {
+        let panel = main_window.borrow().current_panel;
+        let last_mode = quick_add_session.borrow().mode;
+        resolve_quick_add_mode(panel, last_mode)
+    };
+
+    ensure_main_window(cx, &main_window, &store, &quick_add_session, None);
+    dismiss_quick_add_window_for_overlay(cx, &quick_add_session);
+    let _ = show_quick_add_overlay(cx, &main_window, Some(preferred_mode));
+}
+
 fn open_quick_add_window(
     cx: &mut App,
     store: Store,
@@ -447,7 +592,8 @@ fn open_quick_add_window(
     hide_app_on_close: bool,
     preferred_mode: Option<InputMode>,
 ) {
-    prime_quick_add_session(&quick_add_session, preferred_mode, hide_app_on_close);
+    let request_serial =
+        prime_quick_add_session(&quick_add_session, preferred_mode, hide_app_on_close);
 
     cx.activate(true);
 
@@ -497,7 +643,8 @@ fn open_quick_add_window(
             let open_destination = open_destination_for_window.clone();
             let store = store_for_window.clone();
             let view = cx.new(|cx| {
-                let mut view = QuickAddWindow::new(store, session, open_destination, window, cx);
+                let mut view =
+                    QuickAddWindow::new_window(store, session, open_destination, window, cx);
                 view.hide_app_on_close = hide_app_on_close;
                 view
             });
@@ -506,7 +653,22 @@ fn open_quick_add_window(
     ) {
         Ok(handle) => {
             let handle: AnyWindowHandle = handle.into();
-            quick_add_session.borrow_mut().handle = Some(handle);
+            let keep_window = {
+                let mut session = quick_add_session.borrow_mut();
+                let keep_window = session.request_serial == request_serial
+                    && session.presentation == Some(QuickAddPresentation::Window);
+                if keep_window {
+                    session.handle = Some(handle);
+                }
+                keep_window
+            };
+
+            if !keep_window {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.remove_window();
+                });
+                return;
+            }
 
             // When the window is opened from a title-bar click, macOS can briefly
             // return focus to the main window after the click completes.
@@ -518,7 +680,14 @@ fn open_quick_add_window(
             });
         }
         Err(err) => {
-            quick_add_session.borrow_mut().clear();
+            let should_clear = {
+                let session = quick_add_session.borrow();
+                session.request_serial == request_serial
+                    && session.presentation == Some(QuickAddPresentation::Window)
+            };
+            if should_clear {
+                quick_add_session.borrow_mut().clear();
+            }
             eprintln!("[QuickAdd] Failed to open window: {}", err);
         }
     }
@@ -526,17 +695,30 @@ fn open_quick_add_window(
 
 fn close_visible_quick_add(
     cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
     quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
 ) {
-    let (handle, hide_app_on_close) = {
+    let (presentation, handle, hide_app_on_close) = {
         let session = quick_add_session.borrow();
-        (session.handle, session.hide_app_on_close)
+        (
+            session.presentation,
+            session.handle,
+            session.hide_app_on_close,
+        )
     };
 
-    if let Some(handle) = handle {
-        let _ = handle.update(cx, |_, window, _| {
-            window.remove_window();
-        });
+    match presentation {
+        Some(QuickAddPresentation::Window) => {
+            if let Some(handle) = handle {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.remove_window();
+                });
+            }
+        }
+        Some(QuickAddPresentation::Overlay) => {
+            let _ = dismiss_quick_add_overlay(cx, controller);
+        }
+        None => {}
     }
 
     let should_hide = {
@@ -553,20 +735,30 @@ fn close_visible_quick_add(
 
 fn show_quick_add_hotkey_protection(
     cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
     quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
 ) {
-    let handle = quick_add_session.borrow().handle;
-    if let Some(handle) = handle {
-        let _ = handle.update(cx, |root_view, window, cx| {
-            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
-                root.update(cx, |root, cx| {
-                    if let Ok(view) = root.view().clone().downcast::<QuickAddWindow>() {
-                        view.update(cx, |view, cx| view.show_hotkey_protection(cx));
+    let presentation = quick_add_session.borrow().presentation;
+    match presentation {
+        Some(QuickAddPresentation::Window) => {
+            let handle = quick_add_session.borrow().handle;
+            if let Some(handle) = handle {
+                let _ = handle.update(cx, |root_view, window, cx| {
+                    if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                        root.update(cx, |root, cx| {
+                            if let Ok(view) = root.view().clone().downcast::<QuickAddWindow>() {
+                                view.update(cx, |view, cx| view.show_hotkey_protection(cx));
+                            }
+                        });
                     }
+                    window.activate_window();
                 });
             }
-            window.activate_window();
-        });
+        }
+        Some(QuickAddPresentation::Overlay) => {
+            let _ = show_overlay_hotkey_protection(cx, controller);
+        }
+        None => {}
     }
 }
 
@@ -624,6 +816,92 @@ fn resolve_main_window_handle(
     }
 
     None
+}
+
+fn show_quick_add_overlay(
+    cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
+    preferred_mode: Option<InputMode>,
+) -> bool {
+    let Some(handle) = resolve_main_window_handle(cx, controller) else {
+        return false;
+    };
+
+    handle
+        .update(cx, |root_view, window, cx| {
+            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                root.update(cx, |root, cx| {
+                    if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
+                        main_view.update(cx, |this, cx| {
+                            this.show_quick_add_overlay(preferred_mode, window, cx);
+                        });
+                    }
+                });
+            }
+            window.activate_window();
+        })
+        .is_ok()
+}
+
+fn focus_quick_add_overlay(cx: &mut App, controller: &Rc<RefCell<MainWindowController>>) -> bool {
+    let Some(handle) = resolve_main_window_handle(cx, controller) else {
+        return false;
+    };
+
+    handle
+        .update(cx, |root_view, window, cx| {
+            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                root.update(cx, |root, cx| {
+                    if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
+                        main_view.update(cx, |this, cx| this.focus_quick_add_overlay(window, cx));
+                    }
+                });
+            }
+            window.activate_window();
+        })
+        .is_ok()
+}
+
+fn dismiss_quick_add_overlay(cx: &mut App, controller: &Rc<RefCell<MainWindowController>>) -> bool {
+    let Some(handle) = resolve_main_window_handle(cx, controller) else {
+        return false;
+    };
+
+    handle
+        .update(cx, |root_view, _window, cx| {
+            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                root.update(cx, |root, cx| {
+                    if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
+                        main_view.update(cx, |this, cx| this.dismiss_quick_add_overlay(cx));
+                    }
+                });
+            }
+        })
+        .is_ok()
+}
+
+fn show_overlay_hotkey_protection(
+    cx: &mut App,
+    controller: &Rc<RefCell<MainWindowController>>,
+) -> bool {
+    let Some(handle) = resolve_main_window_handle(cx, controller) else {
+        return false;
+    };
+
+    handle
+        .update(cx, |root_view, window, cx| {
+            if let Ok(root) = root_view.downcast::<gpui_component::Root>() {
+                root.update(cx, |root, cx| {
+                    if let Ok(main_view) = root.view().clone().downcast::<MainView>() {
+                        main_view.update(cx, |this, cx| {
+                            this.show_quick_add_hotkey_protection(window, cx);
+                        });
+                    }
+                });
+            }
+            window.activate_window();
+        })
+        .is_ok()
 }
 
 fn switch_existing_main_window(
@@ -741,10 +1019,12 @@ pub struct MainView {
     task_panel: Entity<TaskPanel>,
     timeline_panel: Entity<Timeline>,
     notes_panel: Entity<NotePanel>,
+    quick_add_overlay: Option<Entity<QuickAddWindow>>,
     shortcut_config: ShortcutConfig,
     window_state: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
     focus_handle: FocusHandle,
+    _window_activation_subscription: Subscription,
 }
 
 impl MainView {
@@ -768,6 +1048,12 @@ impl MainView {
         focus_handle.focus(window, cx);
 
         window_state.borrow_mut().current_panel = initial_panel;
+        let window_state_for_activation = window_state.clone();
+        let window_activation_subscription =
+            cx.observe_window_activation(window, move |_this, window, _cx| {
+                let mut controller = window_state_for_activation.borrow_mut();
+                controller.is_active = window.is_window_active();
+            });
 
         let handle = cx.entity().clone();
         dashboard_panel.update(cx, |panel, _cx| {
@@ -788,10 +1074,12 @@ impl MainView {
             task_panel,
             timeline_panel,
             notes_panel,
+            quick_add_overlay: None,
             shortcut_config: ShortcutConfig::load(),
             window_state,
             quick_add_session,
             focus_handle,
+            _window_activation_subscription: window_activation_subscription,
         }
     }
 
@@ -827,6 +1115,11 @@ impl MainView {
     }
 
     fn focus_active_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_add_overlay.is_some() {
+            self.focus_quick_add_overlay(window, cx);
+            return;
+        }
+
         match panel {
             Panel::Search => {
                 self.search_panel.update(cx, |panel, cx| {
@@ -839,23 +1132,126 @@ impl MainView {
         }
     }
 
+    fn quick_add_open_destination(&self) -> Arc<dyn Fn(QuickAddDestination, &mut App)> {
+        let store = self.store.clone();
+        let main_window = self.window_state.clone();
+        let quick_add_session = self.quick_add_session.clone();
+        Arc::new(move |destination, cx| match destination {
+            QuickAddDestination::Main => {
+                ensure_main_window(cx, &main_window, &store, &quick_add_session, None);
+            }
+            QuickAddDestination::Tasks => {
+                ensure_main_window(
+                    cx,
+                    &main_window,
+                    &store,
+                    &quick_add_session,
+                    Some(Panel::Tasks),
+                );
+            }
+            QuickAddDestination::Records => {
+                ensure_main_window(
+                    cx,
+                    &main_window,
+                    &store,
+                    &quick_add_session,
+                    Some(Panel::Records),
+                );
+            }
+        })
+    }
+
+    fn show_quick_add_overlay(
+        &mut self,
+        preferred_mode: Option<InputMode>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(overlay) = self.quick_add_overlay.clone() {
+            overlay.update(cx, |overlay, cx| {
+                overlay.focus_input(window, cx);
+            });
+            let mut session = self.quick_add_session.borrow_mut();
+            session.mark_visible(QuickAddPresentation::Overlay);
+            session.handle = None;
+            session.hide_app_on_close = false;
+            window.activate_window();
+            return;
+        }
+
+        {
+            let mut session = self.quick_add_session.borrow_mut();
+            if let Some(mode) = preferred_mode {
+                session.mode = mode;
+            }
+            session.mark_visible(QuickAddPresentation::Overlay);
+            session.handle = None;
+            session.hide_app_on_close = false;
+        }
+
+        let dismiss_overlay: Arc<dyn Fn(&mut App)> = {
+            let main_view = cx.entity().clone();
+            Arc::new(move |cx| {
+                let _ = main_view.update(cx, |this, cx| {
+                    this.dismiss_quick_add_overlay(cx);
+                });
+            })
+        };
+
+        let store = self.store.clone();
+        let session = self.quick_add_session.clone();
+        let open_destination = self.quick_add_open_destination();
+        let overlay = cx.new(|cx| {
+            let mut view = QuickAddWindow::new_overlay(
+                store,
+                session,
+                open_destination,
+                dismiss_overlay,
+                window,
+                cx,
+            );
+            view.hide_app_on_close = false;
+            view
+        });
+        self.quick_add_overlay = Some(overlay);
+        cx.notify();
+    }
+
+    fn focus_quick_add_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(overlay) = self.quick_add_overlay.clone() {
+            overlay.update(cx, |overlay, cx| {
+                overlay.focus_input(window, cx);
+            });
+            let mut session = self.quick_add_session.borrow_mut();
+            session.mark_visible(QuickAddPresentation::Overlay);
+            session.handle = None;
+            session.hide_app_on_close = false;
+            window.activate_window();
+        }
+    }
+
+    fn dismiss_quick_add_overlay(&mut self, cx: &mut Context<Self>) {
+        self.quick_add_overlay = None;
+        cx.notify();
+    }
+
+    fn show_quick_add_hotkey_protection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(overlay) = self.quick_add_overlay.clone() {
+            overlay.update(cx, |overlay, cx| {
+                overlay.show_hotkey_protection(cx);
+                overlay.focus_input(window, cx);
+            });
+        }
+    }
+
     fn open_quick_add_from_titlebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let preferred_mode =
-            resolve_quick_add_mode(self.current_panel, self.quick_add_session.borrow().mode);
         let store = self.store.clone();
         let main_window = self.window_state.clone();
         let quick_add_session = self.quick_add_session.clone();
 
         window.activate_window();
         cx.defer(move |cx| {
-            open_or_focus_quick_add(
-                cx,
-                store,
-                main_window,
-                quick_add_session,
-                Some(preferred_mode),
-                false,
-            );
+            open_or_focus_quick_add_overlay(cx, store, main_window, quick_add_session);
         });
     }
 
@@ -1265,6 +1661,7 @@ impl Render for MainView {
                             .flex_1()
                             .flex()
                             .overflow_hidden()
+                            .relative()
                             .child(
                                 Sidebar::new(move |panel, window, app| {
                                     on_panel_change(&panel, window, app);
@@ -1325,7 +1722,10 @@ impl Render for MainView {
                                         }
                                     }),
                             ),
-                    ),
+                    )
+                    .when_some(self.quick_add_overlay.clone(), |el, overlay| {
+                        el.child(overlay)
+                    }),
             )
     }
 }
