@@ -2,11 +2,11 @@
 
 ## 版本规则
 
-- `Cargo.toml` 使用纯语义化版本号，例如 `0.1.0`
-- Git tag 和 GitHub Release 使用带 `v` 前缀的版本号，例如 `v0.1.0`
+- `Cargo.toml` 使用纯语义化版本号，例如 `0.2.0`
+- Git tag 和 GitHub Release 使用带 `v` 前缀的版本号，例如 `v0.2.0`
 - 首个可分发版本固定为 `v0.1.0`
-- 后续补丁版本使用 `v0.1.1`、`v0.1.2`
-- 功能明显增强或发布方式升级后再进入 `v0.2.0`
+- 后续补丁版本使用 `v0.2.1`、`v0.2.2`
+- 存在对外可感知的新功能迭代时，提升次版本，例如从 `v0.1.0` 进入 `v0.2.0`
 
 ### 自动判定规则
 
@@ -53,7 +53,7 @@
 - macOS 提供 `Robinne.app` 的 ZIP 压缩包
 - Windows 提供 `robinne.exe` 的 ZIP 压缩包
 - 自动生成 `SHA256SUMS.txt`
-- Release 默认创建为 Draft
+- Release 由 GitHub Actions 自动创建并直接发布
 - 当前代码基线以 macOS / Windows 双平台为准，Linux 不在本轮支持范围内
 
 当前版本不包含以下内容：
@@ -73,35 +73,35 @@
 ## 发版步骤
 
 1. 确认当前代码已经合并到 `main`
-2. 确认 `Cargo.toml` 中 `version` 已更新为目标版本，例如 `0.1.0`
+2. 确认 `Cargo.toml` 中 `version` 已更新为目标版本，例如 `0.2.0`
 3. 本地执行验证：
 
 ```bash
 cargo test --quiet
 cargo build --release
-./build_mac_app.sh --version 0.1.0
+./build_mac_app.sh --version 0.2.0
 # Windows 打包在 GitHub Actions 的 Windows runner 完成
 ```
 
 4. 创建标签：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 5. 等待 GitHub Actions 中的 `Release` 工作流完成
-6. 打开 GitHub Draft Release，确认附件已生成：
-   - `Robinne-v0.1.0-macos.zip`
-   - `Robinne-v0.1.0-windows.zip`
+6. 打开 GitHub Release 页面，确认附件已生成：
+   - `Robinne-v0.2.0-macos.zip`
+   - `Robinne-v0.2.0-windows.zip`
    - `SHA256SUMS.txt`
 7. 分别下载并验证 macOS 和 Windows 产物可以启动
-8. 确认 release notes 后，手动点击 `Publish release`
+8. 确认自动生成的 release notes 和附件内容正确
 
 ## 手动补发
 
 - 如果标签已经存在，但需要重新生成附件，可在 GitHub Actions 页面手动运行 `Release` 工作流
-- 手动触发时填入目标标签，例如 `v0.1.0`
+- 手动触发时填入目标标签，例如 `v0.2.0`
 - 工作流会重新校验标签与 `Cargo.toml` 中版本是否一致
 
 ## 已知提示
