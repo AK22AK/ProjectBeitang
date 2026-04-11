@@ -104,7 +104,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.artifact_name }}
-          path: ${{ runner.temp }}/release/*.zip
+          path: |
+            ${{ runner.temp }}/release/*.zip
+            ${{ runner.temp }}/release/*.dmg
           if-no-files-found: error
 
   release:
@@ -126,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum ./*.zip > SHA256SUMS.txt
+          sha256sum ./*.zip ./*.dmg > SHA256SUMS.txt
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -136,4 +138,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.zip
+            dist/*.dmg
             dist/SHA256SUMS.txt

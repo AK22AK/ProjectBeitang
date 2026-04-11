@@ -42,7 +42,7 @@ cargo run
 # 运行测试
 cargo test
 
-# 打包 macOS App
+# 打包 macOS App / ZIP / DMG
 ./build_mac_app.sh
 
 # Windows 打包在 Windows 环境执行

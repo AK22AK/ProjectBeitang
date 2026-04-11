@@ -257,4 +257,5 @@ echo "Suggested tag: v${next_version}"
 echo "Release notes draft: ${notes_file}"
 if [[ "${SKIP_VERIFY}" -eq 0 && "$(uname -s)" == "Darwin" ]]; then
     echo "macOS package: ${NOTES_DIR}/Robinne-v${next_version}-macos.zip"
+    echo "macOS installer: ${NOTES_DIR}/Robinne-v${next_version}-macos.dmg"
 fi

@@ -15,7 +15,7 @@ usage() {
     cat <<'EOF'
 Usage: ./build_mac_app.sh [--version <version>] [--output-dir <dir>] [--skip-build]
 
-Build a release .app bundle and zip it for GitHub Release distribution.
+Build a release .app bundle and package both .zip and .dmg artifacts.
 EOF
 }
 
@@ -64,6 +64,14 @@ OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
 APP_BUNDLE_PATH="${OUTPUT_DIR}/${APP_NAME}.app"
 APP_CONTENTS_PATH="${APP_BUNDLE_PATH}/Contents"
 ZIP_PATH="${OUTPUT_DIR}/${APP_NAME}-v${VERSION}-macos.zip"
+DMG_PATH="${OUTPUT_DIR}/${APP_NAME}-v${VERSION}-macos.dmg"
+DMG_STAGING_DIR="$(mktemp -d "${OUTPUT_DIR}/.${APP_NAME}.dmg.XXXXXX")"
+
+cleanup() {
+    rm -rf "${DMG_STAGING_DIR}"
+}
+
+trap cleanup EXIT
 
 if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     echo "Building release binary..."
@@ -77,7 +85,7 @@ if [[ ! -f "${TARGET_DIR}/robinne" ]]; then
     exit 1
 fi
 
-rm -rf "${APP_BUNDLE_PATH}" "${ZIP_PATH}"
+rm -rf "${APP_BUNDLE_PATH}" "${ZIP_PATH}" "${DMG_PATH}"
 
 echo "Creating app bundle structure in ${APP_BUNDLE_PATH}..."
 mkdir -p "${APP_CONTENTS_PATH}/MacOS"
@@ -130,5 +138,18 @@ EOF
 echo "Creating release zip..."
 ditto -c -k --sequesterRsrc --keepParent "${APP_BUNDLE_PATH}" "${ZIP_PATH}"
 
+echo "Preparing DMG staging directory..."
+cp -R "${APP_BUNDLE_PATH}" "${DMG_STAGING_DIR}/${APP_NAME}.app"
+ln -s /Applications "${DMG_STAGING_DIR}/Applications"
+
+echo "Creating release dmg..."
+hdiutil create \
+    -volname "${APP_NAME}" \
+    -srcfolder "${DMG_STAGING_DIR}" \
+    -ov \
+    -format UDZO \
+    "${DMG_PATH}" >/dev/null
+
 echo "App bundle created at ${APP_BUNDLE_PATH}"
 echo "Release archive created at ${ZIP_PATH}"
+echo "Release installer created at ${DMG_PATH}"

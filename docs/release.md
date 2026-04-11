@@ -33,6 +33,7 @@
   - `cargo test --quiet`
   - `cargo build --release`
   - macOS 下额外生成 `Robinne-v<version>-macos.zip`
+  - macOS 下额外生成 `Robinne-v<version>-macos.dmg`
   - Windows 产物由 GitHub Actions 的 Windows runner 统一构建和打包
 
 常用参数：
@@ -51,6 +52,7 @@
 
 - 自动化双平台 GitHub Release
 - macOS 提供 `Robinne.app` 的 ZIP 压缩包
+- macOS 提供带 `Applications` 快捷方式的 DMG 安装盘
 - Windows 提供 `robinne.exe` 的 ZIP 压缩包
 - 自动生成 `SHA256SUMS.txt`
 - Release 由 GitHub Actions 自动创建并直接发布
@@ -60,7 +62,7 @@
 
 - macOS codesign / notarization
 - Windows 签名
-- DMG / MSI / NSIS / Inno Setup
+- MSI / NSIS / Inno Setup
 
 ## 后续发布规划
 
@@ -69,6 +71,7 @@
 - [ ] Windows 先补 `x86_64` 明确命名产物，后续再评估 `arm64`
 - [ ] 在 GitHub Actions 中将 `os + target` 扩展为矩阵构建
 - [ ] 统一产物命名，例如 `Robinne-v0.2.0-macos-arm64.zip`
+- [ ] 为 DMG 增加 codesign / notarization 与更完整的安装盘视觉样式
 
 ## 发版步骤
 
@@ -93,6 +96,7 @@ git push origin v0.2.0
 5. 等待 GitHub Actions 中的 `Release` 工作流完成
 6. 打开 GitHub Release 页面，确认附件已生成：
    - `Robinne-v0.2.0-macos.zip`
+   - `Robinne-v0.2.0-macos.dmg`
    - `Robinne-v0.2.0-windows.zip`
    - `SHA256SUMS.txt`
 7. 分别下载并验证 macOS 和 Windows 产物可以启动
@@ -107,5 +111,6 @@ git push origin v0.2.0
 ## 已知提示
 
 - macOS 首次打开未签名应用时，系统可能提示无法验证开发者，需要手动放行
+- 只有把 `Robinne.app` 拖入 `/Applications` 或 `~/Applications` 后，Spotlight / Launchpad 才更稳定地检索到它；仅在下载目录直接运行 `.app` 或在挂载的 `.dmg` 中直接运行，通常不会被当作已安装应用
 - Windows 首次运行未签名应用时，SmartScreen 可能提示未知发布者
 - 这属于当前阶段的预期行为，正式对外分发前再补签名和安装器
