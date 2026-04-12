@@ -116,12 +116,30 @@ jobs:
       - prepare
       - build
     steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
       - name: Download packaged artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           pattern: release-*
           merge-multiple: true
+
+      - name: Resolve release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="docs/releases/v${{ needs.prepare.outputs.version }}.md"
+          if [[ -f "${notes_path}" ]]; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Generate SHA256 checksums
         shell: bash
@@ -130,7 +148,20 @@ jobs:
           cd dist
           sha256sum ./*.zip ./*.dmg > SHA256SUMS.txt
 
-      - name: Create or update release
+      - name: Create or update release with custom notes
+        if: steps.notes.outputs.exists == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          draft: false
+          body_path: ${{ steps.notes.outputs.path }}
+          files: |
+            dist/*.zip
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+
+      - name: Create or update release with generated notes
+        if: steps.notes.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}

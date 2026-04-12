@@ -33,8 +33,16 @@
   - `cargo test --quiet`
   - `cargo build --release`
   - macOS 下额外生成 `Robinne-v<version>-macos.zip`
-  - macOS 下额外生成 `Robinne-v<version>-macos.dmg`
-  - Windows 产物由 GitHub Actions 的 Windows runner 统一构建和打包
+- macOS 下额外生成 `Robinne-v<version>-macos.dmg`
+- Windows 产物由 GitHub Actions 的 Windows runner 统一构建和打包
+
+如果需要为某个版本提供手写 release note，可在仓库中新增：
+
+```text
+docs/releases/v<version>.md
+```
+
+当这个文件存在时，GitHub Release 工作流会优先使用它作为发布说明；不存在时，继续回退到 GitHub 自动生成的 release notes。
 
 常用参数：
 
@@ -100,7 +108,7 @@ git push origin v0.2.0
    - `Robinne-v0.2.0-windows.zip`
    - `SHA256SUMS.txt`
 7. 分别下载并验证 macOS 和 Windows 产物可以启动
-8. 确认自动生成的 release notes 和附件内容正确
+8. 确认发布说明（手写或自动生成）与附件内容正确
 
 ## 手动补发
 
