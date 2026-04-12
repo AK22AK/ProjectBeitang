@@ -60,7 +60,7 @@ docs/releases/v<version>.md
 
 - 自动化双平台 GitHub Release
 - macOS 提供 `Robinne.app` 的 ZIP 压缩包
-- macOS 提供带 `Applications` 快捷方式的 DMG 安装盘
+- macOS 可额外生成带 `Applications` 快捷方式的 DMG 安装盘，但在完成 codesign / notarization 前不作为推荐分发方式
 - Windows 提供 `robinne.exe` 的 ZIP 压缩包
 - 自动生成 `SHA256SUMS.txt`
 - Release 由 GitHub Actions 自动创建并直接发布
@@ -71,6 +71,11 @@ docs/releases/v<version>.md
 - macOS codesign / notarization
 - Windows 签名
 - MSI / NSIS / Inno Setup
+
+在补齐 macOS codesign / notarization 之前：
+
+- 对外分发优先使用 macOS ZIP 包中的 `Robinne.app`
+- DMG 仅用于内部验证构建链路，不作为推荐安装方式
 
 ## 后续发布规划
 
@@ -107,7 +112,7 @@ git push origin v0.2.0
    - `Robinne-v0.2.0-macos.dmg`
    - `Robinne-v0.2.0-windows.zip`
    - `SHA256SUMS.txt`
-7. 分别下载并验证 macOS 和 Windows 产物可以启动
+7. 优先下载 macOS ZIP 包并验证其中的 `Robinne.app` 可以启动；DMG 仅用于内部验证
 8. 确认发布说明（手写或自动生成）与附件内容正确
 
 ## 手动补发
@@ -119,6 +124,7 @@ git push origin v0.2.0
 ## 已知提示
 
 - macOS 首次打开未签名应用时，系统可能提示无法验证开发者，需要手动放行
+- 在完成 codesign / notarization 前，GitHub Release 中的 `.dmg` 不应作为默认安装入口
 - 只有把 `Robinne.app` 拖入 `/Applications` 或 `~/Applications` 后，Spotlight / Launchpad 才更稳定地检索到它；仅在下载目录直接运行 `.app` 或在挂载的 `.dmg` 中直接运行，通常不会被当作已安装应用
 - Windows 首次运行未签名应用时，SmartScreen 可能提示未知发布者
 - 这属于当前阶段的预期行为，正式对外分发前再补签名和安装器

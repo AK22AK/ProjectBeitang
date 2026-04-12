@@ -49,6 +49,11 @@ cargo test
 pwsh ./scripts/package_windows.ps1
 ```
 
+当前对外分发建议：
+
+- macOS 优先使用 ZIP 包中的 `Robinne.app`
+- `.dmg` 当前仅用于验证构建链路，在补齐 codesign / notarization 前不作为推荐分发方式
+
 ## 使用说明
 
 ### 快捷输入
