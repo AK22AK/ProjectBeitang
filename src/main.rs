@@ -2,6 +2,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
@@ -10,10 +11,15 @@ use robinne::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, quick_add_overlay_keystroke, search_keystroke,
     settings_keystroke,
 };
-use robinne::config::ShortcutConfig;
+use robinne::config::{validate_shortcut_config, ShortcutConfig};
+use robinne::data_management::app_data_dir;
 use robinne::platform::{
     app_shortcut_scope_description, app_shortcuts_intro, build_app_menus,
     global_shortcut_scope_description, prewarm_file_dialog,
+};
+use robinne::settings::{
+    load_app_settings, save_app_settings, settings_file_path, AppSettings, QuickAddDefaultMode,
+    ShortcutSettings, StartupPanelPreference,
 };
 use robinne::store::{create_store, Store};
 use robinne::ui::dashboard::{Dashboard, DashboardAction};
@@ -78,47 +84,187 @@ impl MainWindowController {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
-    DataManagement,
     General,
     Shortcuts,
+    DataSync,
     About,
 }
 
 impl SettingsSection {
     fn label(self) -> &'static str {
         match self {
-            Self::DataManagement => "数据管理",
             Self::General => "通用",
             Self::Shortcuts => "快捷键",
+            Self::DataSync => "数据与同步",
             Self::About => "关于",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::DataManagement => "数据管理",
-            Self::General => "通用",
-            Self::Shortcuts => "快捷键",
-            Self::About => "关于",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::DataManagement => "本地数据统计、附件健康状态和导入导出能力统一放在这里。",
-            Self::General => "应用级偏好、显示方式等通用设置将在这里集中管理。",
-            Self::Shortcuts => "这里区分展示应用内快捷键和全局快捷键，避免混淆触发范围。",
-            Self::About => "版本信息、更新说明和相关说明将在这里统一展示。",
         }
     }
 
     fn all() -> [Self; 4] {
+        [Self::General, Self::Shortcuts, Self::DataSync, Self::About]
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GlobalShortcutAction {
+    QuickCapture,
+    OpenMain,
+    OpenTasks,
+    OpenRecords,
+}
+
+#[derive(Clone, Copy)]
+struct GlobalHotkeyBindings {
+    quick_capture: global_hotkey::hotkey::HotKey,
+    open_main: global_hotkey::hotkey::HotKey,
+    open_tasks: global_hotkey::hotkey::HotKey,
+    open_records: global_hotkey::hotkey::HotKey,
+}
+
+impl GlobalHotkeyBindings {
+    fn all(self) -> [global_hotkey::hotkey::HotKey; 4] {
         [
-            Self::DataManagement,
-            Self::General,
-            Self::Shortcuts,
-            Self::About,
+            self.quick_capture,
+            self.open_main,
+            self.open_tasks,
+            self.open_records,
         ]
+    }
+
+    fn action_for_id(self, id: u32) -> Option<GlobalShortcutAction> {
+        if id == self.quick_capture.id() {
+            Some(GlobalShortcutAction::QuickCapture)
+        } else if id == self.open_main.id() {
+            Some(GlobalShortcutAction::OpenMain)
+        } else if id == self.open_tasks.id() {
+            Some(GlobalShortcutAction::OpenTasks)
+        } else if id == self.open_records.id() {
+            Some(GlobalShortcutAction::OpenRecords)
+        } else {
+            None
+        }
+    }
+}
+
+struct GlobalHotkeyController {
+    manager: Option<GlobalHotKeyManager>,
+    bindings: Option<GlobalHotkeyBindings>,
+}
+
+impl GlobalHotkeyController {
+    fn new() -> Self {
+        match GlobalHotKeyManager::new() {
+            Ok(manager) => Self {
+                manager: Some(manager),
+                bindings: None,
+            },
+            Err(err) => {
+                eprintln!("[Global Hotkey] Initialization failed: {}", err);
+                Self {
+                    manager: None,
+                    bindings: None,
+                }
+            }
+        }
+    }
+
+    fn apply_shortcuts(&mut self, config: &ShortcutConfig) -> Result<(), String> {
+        validate_shortcut_config(config).map_err(|err| err.to_string())?;
+        let quick_capture = config
+            .quick_capture_hotkey()
+            .map_err(|err| format!("解析快捷输入失败: {}", err))?;
+        let open_main = config
+            .open_main_hotkey()
+            .map_err(|err| format!("解析打开主应用失败: {}", err))?;
+        let open_tasks = config
+            .open_tasks_hotkey()
+            .map_err(|err| format!("解析任务面板失败: {}", err))?;
+        let open_records = config
+            .open_records_hotkey()
+            .map_err(|err| format!("解析记录面板失败: {}", err))?;
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "全局快捷键管理器初始化失败".to_string())?;
+
+        if let Some(bindings) = self.bindings.take() {
+            for hotkey in bindings.all() {
+                if let Err(err) = manager.unregister(hotkey) {
+                    eprintln!(
+                        "[Global Hotkey] Failed to unregister {}: {}",
+                        hotkey.id(),
+                        err
+                    );
+                }
+            }
+        }
+
+        let bindings = GlobalHotkeyBindings {
+            quick_capture,
+            open_main,
+            open_tasks,
+            open_records,
+        };
+
+        for (hotkey, label) in [
+            (bindings.quick_capture, config.quick_capture.as_str()),
+            (bindings.open_main, config.open_main.as_str()),
+            (bindings.open_tasks, config.open_tasks.as_str()),
+            (bindings.open_records, config.open_records.as_str()),
+        ] {
+            manager
+                .register(hotkey)
+                .map_err(|err| format!("注册快捷键 `{label}` 失败: {}", err))?;
+            eprintln!("[Global Hotkey] Registered {}", label);
+        }
+
+        self.bindings = Some(bindings);
+        Ok(())
+    }
+
+    fn action_for_id(&self, id: u32) -> Option<GlobalShortcutAction> {
+        self.bindings
+            .and_then(|bindings| bindings.action_for_id(id))
+    }
+}
+
+fn load_settings_or_default() -> AppSettings {
+    load_app_settings().unwrap_or_else(|err| {
+        eprintln!("[Settings] Failed to load settings: {}", err);
+        AppSettings::default()
+    })
+}
+
+fn startup_panel_from_settings() -> Panel {
+    match load_settings_or_default().general.startup_panel {
+        StartupPanelPreference::Dashboard => Panel::Dashboard,
+        StartupPanelPreference::Tasks => Panel::Tasks,
+        StartupPanelPreference::Records => Panel::Records,
+        StartupPanelPreference::Timeline => Panel::Timeline,
+    }
+}
+
+fn quick_add_default_mode_from_settings() -> InputMode {
+    match load_settings_or_default().general.quick_add_default_mode {
+        QuickAddDefaultMode::Task => InputMode::Task,
+        QuickAddDefaultMode::Record => InputMode::Record,
+    }
+}
+
+fn current_platform_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macOS"
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        "Windows"
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        "Unknown"
     }
 }
 
@@ -133,6 +279,7 @@ fn install_app_shortcuts_and_menus(
     main_window: Rc<RefCell<MainWindowController>>,
     store: Store,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
 ) {
     cx.bind_keys([
         KeyBinding::new(quick_add_overlay_keystroke(), OpenQuickAddOverlay, None),
@@ -143,22 +290,32 @@ fn install_app_shortcuts_and_menus(
     let main_window_for_quick_add = main_window.clone();
     let store_for_quick_add = store.clone();
     let quick_add_for_quick_add = quick_add_session.clone();
+    let global_hotkeys_for_quick_add = global_hotkeys.clone();
     cx.on_action(move |_: &OpenQuickAddOverlay, cx| {
         let main_window = main_window_for_quick_add.clone();
         let store = store_for_quick_add.clone();
         let quick_add_session = quick_add_for_quick_add.clone();
+        let global_hotkeys = global_hotkeys_for_quick_add.clone();
         cx.defer(move |cx| {
-            open_or_focus_quick_add_overlay(cx, store, main_window, quick_add_session);
+            open_or_focus_quick_add_overlay(
+                cx,
+                store,
+                main_window,
+                quick_add_session,
+                global_hotkeys,
+            );
         });
     });
 
     let main_window_for_search = main_window.clone();
     let store_for_search = store.clone();
     let quick_add_for_search = quick_add_session.clone();
+    let global_hotkeys_for_search = global_hotkeys.clone();
     cx.on_action(move |_: &OpenSearch, cx| {
         let main_window = main_window_for_search.clone();
         let store = store_for_search.clone();
         let quick_add_session = quick_add_for_search.clone();
+        let global_hotkeys = global_hotkeys_for_search.clone();
         // Defer to avoid updating the active window while the action is being dispatched from it.
         cx.defer(move |cx| {
             ensure_main_window(
@@ -166,6 +323,7 @@ fn install_app_shortcuts_and_menus(
                 &main_window,
                 &store,
                 &quick_add_session,
+                &global_hotkeys,
                 Some(Panel::Search),
             );
         });
@@ -174,10 +332,12 @@ fn install_app_shortcuts_and_menus(
     let main_window_for_settings = main_window.clone();
     let store_for_settings = store.clone();
     let quick_add_for_settings = quick_add_session.clone();
+    let global_hotkeys_for_settings = global_hotkeys.clone();
     cx.on_action(move |_: &OpenSettings, cx| {
         let main_window = main_window_for_settings.clone();
         let store = store_for_settings.clone();
         let quick_add_session = quick_add_for_settings.clone();
+        let global_hotkeys = global_hotkeys_for_settings.clone();
         // Defer to avoid updating the active window while the action is being dispatched from it.
         cx.defer(move |cx| {
             ensure_main_window(
@@ -185,6 +345,7 @@ fn install_app_shortcuts_and_menus(
                 &main_window,
                 &store,
                 &quick_add_session,
+                &global_hotkeys,
                 Some(Panel::Settings),
             );
         });
@@ -204,20 +365,25 @@ fn main() {
     let app = application().with_assets(Assets);
 
     let (store, mut runtime) = create_store();
-    let shortcuts = ShortcutConfig::load();
+    let settings = load_settings_or_default();
+    let shortcuts = ShortcutConfig::from(&settings.shortcuts);
 
     let main_window = Rc::new(RefCell::new(MainWindowController::default()));
+    main_window.borrow_mut().current_panel = startup_panel_from_settings();
     let quick_add_session = Rc::new(RefCell::new(QuickAddSessionController::default()));
+    let global_hotkeys = Rc::new(RefCell::new(GlobalHotkeyController::new()));
 
     let main_window_for_reopen = main_window.clone();
     let store_for_reopen = store.clone();
     let quick_add_for_reopen = quick_add_session.clone();
+    let global_hotkeys_for_reopen = global_hotkeys.clone();
     app.on_reopen(move |cx| {
         ensure_main_window(
             cx,
             &main_window_for_reopen,
             &store_for_reopen,
             &quick_add_for_reopen,
+            &global_hotkeys_for_reopen,
             None,
         );
     });
@@ -225,6 +391,7 @@ fn main() {
     let main_window_for_run = main_window.clone();
     let quick_add_for_run = quick_add_session.clone();
     let store_for_run = store.clone();
+    let global_hotkeys_for_run = global_hotkeys.clone();
     app.run(move |cx| {
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
@@ -233,6 +400,7 @@ fn main() {
             main_window_for_run.clone(),
             store_for_run.clone(),
             quick_add_for_run.clone(),
+            global_hotkeys_for_run.clone(),
         );
         let main_window_for_closed = main_window_for_run.clone();
         cx.on_window_closed(move |cx| {
@@ -255,95 +423,70 @@ fn main() {
             prewarm_file_dialog();
         });
 
-        if let Ok(manager) = GlobalHotKeyManager::new() {
-            let quick_capture = shortcuts.quick_capture_hotkey();
-            let open_main = shortcuts.open_main_hotkey();
-            let open_tasks = shortcuts.open_tasks_hotkey();
-            let open_records = shortcuts.open_records_hotkey();
+        if let Err(err) = global_hotkeys_for_run
+            .borrow_mut()
+            .apply_shortcuts(&shortcuts)
+        {
+            eprintln!("[Global Hotkey] {}", err);
+        }
 
-            match (quick_capture, open_main, open_tasks, open_records) {
-                (Ok(quick_capture), Ok(open_main), Ok(open_tasks), Ok(open_records)) => {
-                    let registrations = [
-                        (quick_capture, shortcuts.quick_capture.as_str()),
-                        (open_main, shortcuts.open_main.as_str()),
-                        (open_tasks, shortcuts.open_tasks.as_str()),
-                        (open_records, shortcuts.open_records.as_str()),
-                    ];
+        let store_for_hotkey = store_for_run.clone();
+        let main_window_for_hotkey = main_window_for_run.clone();
+        let quick_add_for_hotkey = quick_add_for_run.clone();
+        let global_hotkeys_for_events = global_hotkeys_for_run.clone();
+        let global_hotkeys_for_actions = global_hotkeys_for_run.clone();
 
-                    let mut failed = false;
-                    for (hotkey, label) in registrations {
-                        if let Err(err) = manager.register(hotkey) {
-                            failed = true;
-                            eprintln!("[Global Hotkey] Failed to register {}: {}", label, err);
-                        } else {
-                            eprintln!("[Global Hotkey] Registered {}", label);
+        cx.spawn(async move |cx| {
+            let receiver = GlobalHotKeyEvent::receiver();
+
+            loop {
+                if let Ok(event) = receiver.try_recv() {
+                    if event.state == HotKeyState::Released {
+                        let action = global_hotkeys_for_events.borrow().action_for_id(event.id);
+                        if let Some(action) = action {
+                            cx.update(|cx| match action {
+                                GlobalShortcutAction::QuickCapture => handle_quick_capture_hotkey(
+                                    cx,
+                                    store_for_hotkey.clone(),
+                                    main_window_for_hotkey.clone(),
+                                    quick_add_for_hotkey.clone(),
+                                    global_hotkeys_for_actions.clone(),
+                                ),
+                                GlobalShortcutAction::OpenMain => ensure_main_window(
+                                    cx,
+                                    &main_window_for_hotkey,
+                                    &store_for_hotkey,
+                                    &quick_add_for_hotkey,
+                                    &global_hotkeys_for_actions,
+                                    None,
+                                ),
+                                GlobalShortcutAction::OpenTasks => ensure_main_window(
+                                    cx,
+                                    &main_window_for_hotkey,
+                                    &store_for_hotkey,
+                                    &quick_add_for_hotkey,
+                                    &global_hotkeys_for_actions,
+                                    Some(Panel::Tasks),
+                                ),
+                                GlobalShortcutAction::OpenRecords => ensure_main_window(
+                                    cx,
+                                    &main_window_for_hotkey,
+                                    &store_for_hotkey,
+                                    &quick_add_for_hotkey,
+                                    &global_hotkeys_for_actions,
+                                    Some(Panel::Records),
+                                ),
+                            });
                         }
                     }
-
-                    if !failed {
-                        let store_for_hotkey = store_for_run.clone();
-                        let main_window_for_hotkey = main_window_for_run.clone();
-                        let quick_add_for_hotkey = quick_add_for_run.clone();
-
-                        cx.spawn(async move |cx| {
-                            let _manager = manager;
-                            let receiver = GlobalHotKeyEvent::receiver();
-
-                            loop {
-                                if let Ok(event) = receiver.try_recv() {
-                                    if event.state == HotKeyState::Released {
-                                        cx.update(|cx| {
-                                            if event.id == quick_capture.id() {
-                                                handle_quick_capture_hotkey(
-                                                    cx,
-                                                    store_for_hotkey.clone(),
-                                                    main_window_for_hotkey.clone(),
-                                                    quick_add_for_hotkey.clone(),
-                                                );
-                                            } else if event.id == open_main.id() {
-                                                ensure_main_window(
-                                                    cx,
-                                                    &main_window_for_hotkey,
-                                                    &store_for_hotkey,
-                                                    &quick_add_for_hotkey,
-                                                    None,
-                                                );
-                                            } else if event.id == open_tasks.id() {
-                                                ensure_main_window(
-                                                    cx,
-                                                    &main_window_for_hotkey,
-                                                    &store_for_hotkey,
-                                                    &quick_add_for_hotkey,
-                                                    Some(Panel::Tasks),
-                                                );
-                                            } else if event.id == open_records.id() {
-                                                ensure_main_window(
-                                                    cx,
-                                                    &main_window_for_hotkey,
-                                                    &store_for_hotkey,
-                                                    &quick_add_for_hotkey,
-                                                    Some(Panel::Records),
-                                                );
-                                            }
-                                        });
-                                    }
-                                }
-
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_millis(100))
-                                    .await;
-                            }
-                        })
-                        .detach();
-                    }
                 }
-                _ => {
-                    eprintln!("[Global Hotkey] Failed to parse shortcut config");
-                }
+
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
             }
-        } else {
-            eprintln!("[Global Hotkey] Initialization failed!");
-        }
+        })
+        .detach();
     });
 }
 
@@ -352,6 +495,7 @@ fn handle_quick_capture_hotkey(
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
 ) {
     let now = std::time::Instant::now();
     {
@@ -384,6 +528,7 @@ fn handle_quick_capture_hotkey(
                 store,
                 main_window,
                 quick_add_session,
+                global_hotkeys,
                 None,
                 activate_app,
                 hide_app_on_close,
@@ -396,6 +541,7 @@ fn handle_quick_capture_hotkey(
                 store,
                 main_window,
                 quick_add_session,
+                global_hotkeys,
                 None,
                 activate_app,
                 false,
@@ -414,6 +560,7 @@ fn handle_quick_capture_hotkey(
                     store,
                     main_window,
                     quick_add_session,
+                    global_hotkeys,
                     None,
                     cx.active_window().is_none(),
                     false,
@@ -485,9 +632,7 @@ fn prime_quick_add_session(
     hide_app_on_close: bool,
 ) -> u64 {
     let mut session = quick_add_session.borrow_mut();
-    if let Some(mode) = preferred_mode {
-        session.mode = mode;
-    }
+    session.mode = preferred_mode.unwrap_or_else(quick_add_default_mode_from_settings);
     let request_serial = session.mark_visible(QuickAddPresentation::Window);
     session.handle = None;
     session.hide_app_on_close = hide_app_on_close;
@@ -541,6 +686,7 @@ fn open_or_focus_quick_add_window_only(
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
     preferred_mode: Option<InputMode>,
     activate_app: bool,
     hide_app_on_close: bool,
@@ -556,6 +702,7 @@ fn open_or_focus_quick_add_window_only(
         store,
         main_window,
         quick_add_session,
+        global_hotkeys,
         activate_app,
         hide_app_on_close,
         preferred_mode,
@@ -567,6 +714,7 @@ fn open_or_focus_quick_add_overlay(
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
 ) {
     let preferred_mode = {
         let panel = main_window.borrow().current_panel;
@@ -574,7 +722,14 @@ fn open_or_focus_quick_add_overlay(
         resolve_quick_add_mode(panel, last_mode)
     };
 
-    ensure_main_window(cx, &main_window, &store, &quick_add_session, None);
+    ensure_main_window(
+        cx,
+        &main_window,
+        &store,
+        &quick_add_session,
+        &global_hotkeys,
+        None,
+    );
     dismiss_quick_add_window_for_overlay(cx, &quick_add_session);
     let _ = show_quick_add_overlay(cx, &main_window, Some(preferred_mode));
 }
@@ -584,6 +739,7 @@ fn open_quick_add_window(
     store: Store,
     main_window: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
     activate_app: bool,
     hide_app_on_close: bool,
     preferred_mode: Option<InputMode>,
@@ -608,9 +764,17 @@ fn open_quick_add_window(
         let store = store.clone();
         let main_window = main_window.clone();
         let quick_add_session = quick_add_session.clone();
+        let global_hotkeys = global_hotkeys.clone();
         Arc::new(move |destination, cx| match destination {
             QuickAddDestination::Main => {
-                ensure_main_window(cx, &main_window, &store, &quick_add_session, None);
+                ensure_main_window(
+                    cx,
+                    &main_window,
+                    &store,
+                    &quick_add_session,
+                    &global_hotkeys,
+                    None,
+                );
             }
             QuickAddDestination::Tasks => {
                 ensure_main_window(
@@ -618,6 +782,7 @@ fn open_quick_add_window(
                     &main_window,
                     &store,
                     &quick_add_session,
+                    &global_hotkeys,
                     Some(Panel::Tasks),
                 );
             }
@@ -627,6 +792,7 @@ fn open_quick_add_window(
                     &main_window,
                     &store,
                     &quick_add_session,
+                    &global_hotkeys,
                     Some(Panel::Records),
                 );
             }
@@ -953,9 +1119,17 @@ fn ensure_main_window(
     controller: &Rc<RefCell<MainWindowController>>,
     store: &Store,
     quick_add_session: &Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: &Rc<RefCell<GlobalHotkeyController>>,
     target_panel: Option<Panel>,
 ) {
-    let desired_panel = target_panel.unwrap_or_else(|| controller.borrow().current_panel);
+    sync_main_window_controller(cx, controller);
+    let desired_panel = target_panel.unwrap_or_else(|| {
+        if controller.borrow().handle.is_some() {
+            controller.borrow().current_panel
+        } else {
+            startup_panel_from_settings()
+        }
+    });
 
     if switch_existing_main_window(cx, controller, desired_panel) {
         return;
@@ -966,6 +1140,7 @@ fn ensure_main_window(
         store.clone(),
         controller.clone(),
         quick_add_session.clone(),
+        global_hotkeys.clone(),
         desired_panel,
     ) {
         Ok(handle) => {
@@ -998,6 +1173,7 @@ fn open_main_window(
     store: Store,
     controller: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
     initial_panel: Panel,
 ) -> Result<AnyWindowHandle> {
     let window_size = size(px(900.0), px(600.0));
@@ -1013,11 +1189,13 @@ fn open_main_window(
             let store = store.clone();
             let controller = controller.clone();
             let quick_add_session = quick_add_session.clone();
+            let global_hotkeys = global_hotkeys.clone();
             let view = cx.new(|cx| {
                 MainView::new(
                     store,
                     controller,
                     quick_add_session,
+                    global_hotkeys,
                     initial_panel,
                     window,
                     cx,
@@ -1033,6 +1211,7 @@ pub struct MainView {
     store: Store,
     current_panel: Panel,
     current_settings_section: SettingsSection,
+    app_settings: AppSettings,
     dashboard_panel: Entity<Dashboard>,
     data_management_panel: Entity<DataManagementPanel>,
     search_panel: Entity<SearchPanel>,
@@ -1041,6 +1220,13 @@ pub struct MainView {
     notes_panel: Entity<NotePanel>,
     quick_add_overlay: Option<Entity<QuickAddWindow>>,
     shortcut_config: ShortcutConfig,
+    shortcut_quick_capture_input: Entity<InputState>,
+    shortcut_open_main_input: Entity<InputState>,
+    shortcut_open_tasks_input: Entity<InputState>,
+    shortcut_open_records_input: Entity<InputState>,
+    settings_notice: Option<String>,
+    settings_error: Option<String>,
+    global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
     window_state: Rc<RefCell<MainWindowController>>,
     quick_add_session: Rc<RefCell<QuickAddSessionController>>,
     focus_handle: FocusHandle,
@@ -1052,11 +1238,14 @@ impl MainView {
         store: Store,
         window_state: Rc<RefCell<MainWindowController>>,
         quick_add_session: Rc<RefCell<QuickAddSessionController>>,
+        global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
         initial_panel: Panel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let store_for_panels = store.clone();
+        let app_settings = load_settings_or_default();
+        let shortcut_config = ShortcutConfig::from(&app_settings.shortcuts);
         let dashboard_panel = cx.new(|cx| Dashboard::new(store_for_panels.clone(), window, cx));
         let data_management_panel =
             cx.new(|cx| DataManagementPanel::new(store_for_panels.clone(), window, cx));
@@ -1064,6 +1253,26 @@ impl MainView {
         let task_panel = cx.new(|cx| TaskPanel::new(store_for_panels.clone(), window, cx));
         let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels.clone(), window, cx));
         let notes_panel = cx.new(|cx| NotePanel::new(store_for_panels, window, cx));
+        let shortcut_quick_capture_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(&shortcut_config.quick_capture, window, cx);
+            input
+        });
+        let shortcut_open_main_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(&shortcut_config.open_main, window, cx);
+            input
+        });
+        let shortcut_open_tasks_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(&shortcut_config.open_tasks, window, cx);
+            input
+        });
+        let shortcut_open_records_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(&shortcut_config.open_records, window, cx);
+            input
+        });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -1087,7 +1296,8 @@ impl MainView {
         Self {
             store,
             current_panel: initial_panel,
-            current_settings_section: SettingsSection::DataManagement,
+            current_settings_section: SettingsSection::General,
+            app_settings,
             dashboard_panel,
             data_management_panel,
             search_panel,
@@ -1095,7 +1305,14 @@ impl MainView {
             timeline_panel,
             notes_panel,
             quick_add_overlay: None,
-            shortcut_config: ShortcutConfig::load(),
+            shortcut_config,
+            shortcut_quick_capture_input,
+            shortcut_open_main_input,
+            shortcut_open_tasks_input,
+            shortcut_open_records_input,
+            settings_notice: None,
+            settings_error: None,
+            global_hotkeys,
             window_state,
             quick_add_session,
             focus_handle,
@@ -1156,9 +1373,17 @@ impl MainView {
         let store = self.store.clone();
         let main_window = self.window_state.clone();
         let quick_add_session = self.quick_add_session.clone();
+        let global_hotkeys = self.global_hotkeys.clone();
         Arc::new(move |destination, cx| match destination {
             QuickAddDestination::Main => {
-                ensure_main_window(cx, &main_window, &store, &quick_add_session, None);
+                ensure_main_window(
+                    cx,
+                    &main_window,
+                    &store,
+                    &quick_add_session,
+                    &global_hotkeys,
+                    None,
+                );
             }
             QuickAddDestination::Tasks => {
                 ensure_main_window(
@@ -1166,6 +1391,7 @@ impl MainView {
                     &main_window,
                     &store,
                     &quick_add_session,
+                    &global_hotkeys,
                     Some(Panel::Tasks),
                 );
             }
@@ -1175,6 +1401,7 @@ impl MainView {
                     &main_window,
                     &store,
                     &quick_add_session,
+                    &global_hotkeys,
                     Some(Panel::Records),
                 );
             }
@@ -1268,10 +1495,17 @@ impl MainView {
         let store = self.store.clone();
         let main_window = self.window_state.clone();
         let quick_add_session = self.quick_add_session.clone();
+        let global_hotkeys = self.global_hotkeys.clone();
 
         window.activate_window();
         cx.defer(move |cx| {
-            open_or_focus_quick_add_overlay(cx, store, main_window, quick_add_session);
+            open_or_focus_quick_add_overlay(
+                cx,
+                store,
+                main_window,
+                quick_add_session,
+                global_hotkeys,
+            );
         });
     }
 
@@ -1301,9 +1535,8 @@ impl MainView {
 
     pub fn switch_to_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
         if panel == Panel::Settings && self.current_panel != Panel::Settings {
-            self.current_settings_section = SettingsSection::DataManagement;
-            self.data_management_panel
-                .update(cx, |panel, cx| panel.refresh(cx));
+            self.current_settings_section = SettingsSection::General;
+            self.refresh_settings_state(window, cx);
         }
 
         if self.current_panel != panel {
@@ -1331,6 +1564,148 @@ impl MainView {
         } else {
             SettingsLayoutMode::TopTabs
         }
+    }
+
+    fn sync_shortcut_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shortcut_quick_capture_input.update(cx, |input, cx| {
+            input.set_value(&self.shortcut_config.quick_capture, window, cx);
+        });
+        self.shortcut_open_main_input.update(cx, |input, cx| {
+            input.set_value(&self.shortcut_config.open_main, window, cx);
+        });
+        self.shortcut_open_tasks_input.update(cx, |input, cx| {
+            input.set_value(&self.shortcut_config.open_tasks, window, cx);
+        });
+        self.shortcut_open_records_input.update(cx, |input, cx| {
+            input.set_value(&self.shortcut_config.open_records, window, cx);
+        });
+    }
+
+    fn refresh_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.app_settings = load_settings_or_default();
+        self.shortcut_config = ShortcutConfig::from(&self.app_settings.shortcuts);
+        self.settings_notice = None;
+        self.settings_error = None;
+        self.sync_shortcut_inputs(window, cx);
+        self.data_management_panel
+            .update(cx, |panel, cx| panel.reload_settings(window, cx));
+    }
+
+    fn persist_settings(&mut self, message: &'static str, cx: &mut Context<Self>) {
+        match save_app_settings(&self.app_settings) {
+            Ok(_) => {
+                self.settings_error = None;
+                self.settings_notice = Some(message.to_string());
+            }
+            Err(err) => {
+                self.settings_notice = None;
+                self.settings_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    fn set_startup_panel_preference(
+        &mut self,
+        panel: StartupPanelPreference,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_settings.general.startup_panel = panel;
+        self.persist_settings("已保存启动默认面板", cx);
+    }
+
+    fn set_quick_add_default_mode_preference(
+        &mut self,
+        mode: QuickAddDefaultMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_settings.general.quick_add_default_mode = mode;
+        self.persist_settings("已保存快速输入默认模式", cx);
+    }
+
+    fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.app_settings.reminders.notifications_enabled = enabled;
+        self.persist_settings("已保存提醒通知设置", cx);
+    }
+
+    fn shortcut_config_from_inputs(&self, cx: &App) -> ShortcutConfig {
+        let quick_capture = self
+            .shortcut_quick_capture_input
+            .read(cx)
+            .text()
+            .to_string();
+        let open_main = self.shortcut_open_main_input.read(cx).text().to_string();
+        let open_tasks = self.shortcut_open_tasks_input.read(cx).text().to_string();
+        let open_records = self.shortcut_open_records_input.read(cx).text().to_string();
+
+        ShortcutConfig {
+            quick_capture: quick_capture.trim().to_string(),
+            open_main: open_main.trim().to_string(),
+            open_tasks: open_tasks.trim().to_string(),
+            open_records: open_records.trim().to_string(),
+        }
+    }
+
+    fn save_shortcut_settings(&mut self, cx: &mut Context<Self>) {
+        let next_config = self.shortcut_config_from_inputs(cx);
+        if let Err(err) = validate_shortcut_config(&next_config) {
+            self.settings_notice = None;
+            self.settings_error = Some(err.to_string());
+            cx.notify();
+            return;
+        }
+
+        if let Err(err) = self
+            .global_hotkeys
+            .borrow_mut()
+            .apply_shortcuts(&next_config)
+        {
+            self.settings_notice = None;
+            self.settings_error = Some(err);
+            cx.notify();
+            return;
+        }
+
+        self.shortcut_config = next_config.clone();
+        self.app_settings.shortcuts = ShortcutSettings::from(&next_config);
+        self.persist_settings("已保存全局快捷键", cx);
+    }
+
+    fn restore_default_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shortcut_config = ShortcutConfig::default();
+        self.sync_shortcut_inputs(window, cx);
+        self.settings_notice = Some("已恢复默认快捷键，点击保存后生效".to_string());
+        self.settings_error = None;
+        cx.notify();
+    }
+
+    fn render_settings_message(&self) -> Option<AnyElement> {
+        if let Some(message) = self.settings_notice.as_deref() {
+            return Some(render_settings_message_box(message, false));
+        }
+
+        self.settings_error
+            .as_deref()
+            .map(|message| render_settings_message_box(message, true))
+    }
+
+    fn render_settings_choice_button<F>(
+        &self,
+        id: impl Into<String>,
+        label: &'static str,
+        selected: bool,
+        on_click: F,
+    ) -> AnyElement
+    where
+        F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    {
+        Button::new(id.into())
+            .child(label)
+            .when(selected, |button| {
+                button.with_variant(gpui_component::button::ButtonVariant::Primary)
+            })
+            .on_click(on_click)
+            .into_any_element()
     }
 
     fn render_settings_nav_item(
@@ -1382,55 +1757,17 @@ impl MainView {
                     })
                     .child(section.label()),
             )
-            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 this.current_settings_section = section;
-                if section == SettingsSection::DataManagement {
+                if section == SettingsSection::DataSync {
                     this.data_management_panel
-                        .update(cx, |panel, cx| panel.refresh(cx));
+                        .update(cx, |panel, cx| panel.reload_settings(window, cx));
                 }
                 cx.notify();
             }))
     }
 
-    fn render_settings_placeholder(&self, section: SettingsSection) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x262626))
-                    .child(section.title()),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x8c8c8c))
-                    .line_height(relative(1.5))
-                    .child(section.description()),
-            )
-            .child(
-                div()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(999.0))
-                    .bg(rgb(0xf5f5f5))
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(0x8c8c8c))
-                    .child("开发中"),
-            )
-    }
-
-    fn render_shortcuts_settings(&self) -> impl IntoElement {
-        let global_shortcut_entries = self
-            .shortcut_config
-            .entries()
-            .into_iter()
-            .map(|(label, shortcut)| (label.to_string(), shortcut.to_string()))
-            .collect::<Vec<_>>();
+    fn render_shortcuts_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let app_shortcut_entries = app_shortcut_entries()
             .into_iter()
             .map(|(label, shortcut)| (label.to_string(), shortcut.to_string()))
@@ -1454,15 +1791,45 @@ impl MainView {
                     .line_height(relative(1.5))
                     .child(app_shortcuts_intro()),
             )
+            .when_some(self.render_settings_message(), |this, message| {
+                this.child(message)
+            })
             .child(self.render_shortcut_group(
                 "应用内快捷键",
                 app_shortcut_scope_description(),
                 app_shortcut_entries,
             ))
-            .child(self.render_shortcut_group(
+            .child(render_settings_card(
                 "全局快捷键",
                 global_shortcut_scope_description(),
-                global_shortcut_entries,
+                vec![
+                    render_shortcut_input_row("快捷输入", &self.shortcut_quick_capture_input)
+                        .into_any_element(),
+                    render_shortcut_input_row("打开主应用", &self.shortcut_open_main_input)
+                        .into_any_element(),
+                    render_shortcut_input_row("任务面板", &self.shortcut_open_tasks_input)
+                        .into_any_element(),
+                    render_shortcut_input_row("记录面板", &self.shortcut_open_records_input)
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .gap(px(10.0))
+                        .child(
+                            Button::new("save-global-shortcuts")
+                                .child("保存快捷键")
+                                .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                    this.save_shortcut_settings(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("restore-default-shortcuts")
+                                .child("恢复默认")
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.restore_default_shortcuts(window, cx);
+                                })),
+                        )
+                        .into_any_element(),
+                ],
             ))
     }
 
@@ -1526,18 +1893,180 @@ impl MainView {
             ))
     }
 
-    fn render_settings_content(&self) -> impl IntoElement {
+    fn render_general_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x262626))
+                    .child("通用"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .line_height(relative(1.5))
+                    .child("启动默认面板、快速输入默认模式和提醒通知总开关会立即保存。"),
+            )
+            .when_some(self.render_settings_message(), |this, message| {
+                this.child(message)
+            })
+            .child(render_settings_card(
+                "启动默认面板",
+                "仅在普通打开主窗口且当前没有主窗口实例时生效。",
+                vec![div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(self.render_settings_choice_button(
+                        "startup-panel-dashboard",
+                        "看板",
+                        self.app_settings.general.startup_panel
+                            == StartupPanelPreference::Dashboard,
+                        cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                            this.set_startup_panel_preference(
+                                StartupPanelPreference::Dashboard,
+                                cx,
+                            );
+                        }),
+                    ))
+                    .child(self.render_settings_choice_button(
+                        "startup-panel-tasks",
+                        "任务",
+                        self.app_settings.general.startup_panel == StartupPanelPreference::Tasks,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.set_startup_panel_preference(StartupPanelPreference::Tasks, cx);
+                        }),
+                    ))
+                    .child(self.render_settings_choice_button(
+                        "startup-panel-records",
+                        "记录",
+                        self.app_settings.general.startup_panel == StartupPanelPreference::Records,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.set_startup_panel_preference(StartupPanelPreference::Records, cx);
+                        }),
+                    ))
+                    .child(self.render_settings_choice_button(
+                        "startup-panel-timeline",
+                        "时间线",
+                        self.app_settings.general.startup_panel == StartupPanelPreference::Timeline,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.set_startup_panel_preference(StartupPanelPreference::Timeline, cx);
+                        }),
+                    ))
+                    .into_any_element()],
+            ))
+            .child(render_settings_card(
+                "快速输入默认模式",
+                "当全局快捷键直接唤起浮动快速输入时使用该默认值。",
+                vec![div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(self.render_settings_choice_button(
+                        "quick-add-default-task",
+                        "任务",
+                        self.app_settings.general.quick_add_default_mode
+                            == QuickAddDefaultMode::Task,
+                        cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                            this.set_quick_add_default_mode_preference(
+                                QuickAddDefaultMode::Task,
+                                cx,
+                            );
+                        }),
+                    ))
+                    .child(self.render_settings_choice_button(
+                        "quick-add-default-record",
+                        "记录",
+                        self.app_settings.general.quick_add_default_mode
+                            == QuickAddDefaultMode::Record,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.set_quick_add_default_mode_preference(
+                                QuickAddDefaultMode::Record,
+                                cx,
+                            );
+                        }),
+                    ))
+                    .into_any_element()],
+            ))
+            .child(render_settings_card(
+                "提醒通知",
+                "关闭后仍可设置任务提醒时间，但后台不会发送桌面通知。",
+                vec![div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(self.render_settings_choice_button(
+                        "notifications-enabled",
+                        "允许通知",
+                        self.app_settings.reminders.notifications_enabled,
+                        cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                            this.set_notifications_enabled(true, cx);
+                        }),
+                    ))
+                    .child(self.render_settings_choice_button(
+                        "notifications-disabled",
+                        "关闭通知",
+                        !self.app_settings.reminders.notifications_enabled,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.set_notifications_enabled(false, cx);
+                        }),
+                    ))
+                    .into_any_element()],
+            ))
+    }
+
+    fn render_about_settings(&self) -> impl IntoElement {
+        let data_dir = app_data_dir();
+        let db_path = data_dir.join("data.db");
+        let settings_path = settings_file_path();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x262626))
+                    .child("关于"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .line_height(relative(1.5))
+                    .child("当前版本信息和本地运行路径。"),
+            )
+            .child(render_settings_card(
+                "应用信息",
+                "这些信息直接来自当前运行包和平台环境。",
+                vec![
+                    render_info_row("版本", env!("CARGO_PKG_VERSION")).into_any_element(),
+                    render_info_row("平台", current_platform_label()).into_any_element(),
+                    render_info_row("许可证", "MIT").into_any_element(),
+                ],
+            ))
+            .child(render_settings_card(
+                "本地路径",
+                "Robinne 当前默认使用以下路径保存数据和设置。",
+                vec![
+                    render_path_row("数据目录", &data_dir.display().to_string()).into_any_element(),
+                    render_path_row("数据库文件", &db_path.display().to_string())
+                        .into_any_element(),
+                    render_path_row("设置文件", &settings_path.display().to_string())
+                        .into_any_element(),
+                ],
+            ))
+    }
+
+    fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.current_settings_section {
-            SettingsSection::DataManagement => {
-                self.data_management_panel.clone().into_any_element()
-            }
-            SettingsSection::General => self
-                .render_settings_placeholder(self.current_settings_section)
-                .into_any_element(),
-            SettingsSection::Shortcuts => self.render_shortcuts_settings().into_any_element(),
-            SettingsSection::About => self
-                .render_settings_placeholder(self.current_settings_section)
-                .into_any_element(),
+            SettingsSection::General => self.render_general_settings(cx).into_any_element(),
+            SettingsSection::Shortcuts => self.render_shortcuts_settings(cx).into_any_element(),
+            SettingsSection::DataSync => self.data_management_panel.clone().into_any_element(),
+            SettingsSection::About => self.render_about_settings().into_any_element(),
         }
     }
 
@@ -1592,7 +2121,7 @@ impl MainView {
                                     .size_full()
                                     .pr(px(16.0))
                                     .overflow_y_scrollbar()
-                                    .child(self.render_settings_content()),
+                                    .child(self.render_settings_content(cx)),
                             ),
                     )
                     .into_any_element(),
@@ -1619,12 +2148,131 @@ impl MainView {
                                 .size_full()
                                 .pr(px(16.0))
                                 .overflow_y_scrollbar()
-                                .child(self.render_settings_content()),
+                                .child(self.render_settings_content(cx)),
                         ),
                     )
                     .into_any_element(),
             })
     }
+}
+
+fn render_settings_message_box(message: &str, is_error: bool) -> AnyElement {
+    let (background, border, text) = if is_error {
+        (rgb(0xfff2f0), rgb(0xffccc7), rgb(0xcf1322))
+    } else {
+        (rgb(0xf6ffed), rgb(0xb7eb8f), rgb(0x389e0d))
+    };
+
+    div()
+        .p(px(12.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(border)
+        .bg(background)
+        .child(
+            div()
+                .text_sm()
+                .text_color(text)
+                .line_height(relative(1.5))
+                .child(message.to_string()),
+        )
+        .into_any_element()
+}
+
+fn render_settings_card(
+    title: &'static str,
+    description: &'static str,
+    children: Vec<AnyElement>,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .p(px(16.0))
+        .rounded(px(14.0))
+        .border_1()
+        .border_color(rgb(0xf0f0f0))
+        .bg(rgb(0xfcfcfc))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x262626))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x8c8c8c))
+                        .line_height(relative(1.5))
+                        .child(description),
+                ),
+        )
+        .children(children)
+        .into_any_element()
+}
+
+fn render_shortcut_input_row(label: &'static str, input: &Entity<InputState>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .child(
+            div()
+                .w(px(88.0))
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(0x262626))
+                .child(label),
+        )
+        .child(div().flex_1().child(Input::new(input)))
+}
+
+fn render_info_row(label: &'static str, value: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .justify_between()
+        .gap(px(16.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(0x595959))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x262626))
+                .child(value.to_string()),
+        )
+}
+
+fn render_path_row(label: &'static str, value: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(0x595959))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_family(".SystemUIFont")
+                .text_color(rgb(0x262626))
+                .line_height(relative(1.5))
+                .child(value.to_string()),
+        )
 }
 
 impl Focusable for MainView {

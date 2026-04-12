@@ -10,6 +10,7 @@ use tempfile::TempDir;
 const MAX_SNAPSHOT_BYTES: usize = 95 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct GitRemoteSyncConfig {
     pub remote_url: String,
     pub branch: String,

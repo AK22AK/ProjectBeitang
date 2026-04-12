@@ -24,11 +24,10 @@ fn test_default_shortcut_config() {
 }
 
 #[test]
-fn test_shortcut_config_load_returns_default() {
+fn test_shortcut_config_load_returns_valid_config() {
     let config = ShortcutConfig::load();
-    let defaults = default_global_shortcuts();
-    assert_eq!(config.quick_capture, defaults.quick_capture);
-    assert_eq!(config.open_main, defaults.open_main);
+    assert!(parse_hotkey(&config.quick_capture).is_ok());
+    assert!(parse_hotkey(&config.open_main).is_ok());
 }
 
 #[test]

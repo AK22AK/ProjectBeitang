@@ -1,5 +1,5 @@
 use crate::data_management::{
-    default_export_file_name, AttachmentHealthSummary, AttachmentListItem,
+    app_data_dir, default_export_file_name, AttachmentHealthSummary, AttachmentListItem,
     AttachmentStorageBackend, ConflictChoice, ConflictResolution, ImportConflict, ImportMode,
     ImportPreview, StorageUsageSummary,
 };
@@ -8,7 +8,9 @@ use crate::models::{AttachmentStatus, RecordType};
 use crate::platform::{
     open_saved_attachment, pick_archive_file, save_archive_file, ParentWindowHint,
 };
-use crate::settings::load_app_settings;
+use crate::settings::{
+    load_app_settings, save_app_settings, settings_file_path, DataSettings, ImportModePreference,
+};
 use crate::store::{GitRemoteSyncPullPreview, Store};
 use gpui::{prelude::*, *};
 use gpui_component::button::{Button, ButtonVariants};
@@ -63,6 +65,7 @@ pub struct DataManagementPanel {
     store: Store,
     page: DataManagementPage,
     attachment_filter: AttachmentFilter,
+    default_import_mode: ImportModePreference,
     git_sync_config: GitRemoteSyncConfig,
     git_sync_verification: Option<GitRemoteVerification>,
     remote_url_input: Entity<InputState>,
@@ -93,6 +96,7 @@ impl DataManagementPanel {
             store,
             page: DataManagementPage::Overview,
             attachment_filter: AttachmentFilter::All,
+            default_import_mode: ImportModePreference::ReplaceWithBackup,
             git_sync_config: GitRemoteSyncConfig::default(),
             git_sync_verification: None,
             remote_url_input,
@@ -113,7 +117,7 @@ impl DataManagementPanel {
             conflict_choices: HashMap::new(),
         };
         panel.load_overview(cx);
-        panel.load_git_sync_config(window, cx);
+        panel.load_settings_state(window, cx);
         panel
     }
 
@@ -122,6 +126,10 @@ impl DataManagementPanel {
         if self.page == DataManagementPage::Attachments {
             self.load_attachments(cx);
         }
+    }
+
+    pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_settings_state(window, cx);
     }
 
     fn load_overview(&mut self, cx: &mut Context<Self>) {
@@ -147,9 +155,11 @@ impl DataManagementPanel {
         .detach();
     }
 
-    fn load_git_sync_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match load_app_settings() {
             Ok(settings) => {
+                self.default_import_mode = settings.data.default_import_mode;
+                self.import_mode = self.default_import_mode.to_import_mode();
                 self.git_sync_config = settings.git_sync.normalized();
                 self.git_sync_verification = None;
                 let config = self.git_sync_config.clone();
@@ -208,6 +218,37 @@ impl DataManagementPanel {
             });
         })
         .detach();
+    }
+
+    fn save_default_import_mode(
+        &mut self,
+        preference: ImportModePreference,
+        cx: &mut Context<Self>,
+    ) {
+        match load_app_settings() {
+            Ok(mut settings) => {
+                settings.data = DataSettings {
+                    default_import_mode: preference,
+                };
+                match save_app_settings(&settings) {
+                    Ok(_) => {
+                        self.default_import_mode = preference;
+                        self.import_mode = preference.to_import_mode();
+                        self.notice = Some("已保存默认导入策略".to_string());
+                        self.error = None;
+                    }
+                    Err(err) => {
+                        self.error = Some(err);
+                        self.notice = None;
+                    }
+                }
+            }
+            Err(err) => {
+                self.error = Some(err);
+                self.notice = None;
+            }
+        }
+        cx.notify();
     }
 
     fn verify_git_remote(&mut self, cx: &mut Context<Self>) {
@@ -289,7 +330,7 @@ impl DataManagementPanel {
                         metadata,
                     }) => {
                         this.conflict_choices.clear();
-                        this.import_mode = ImportMode::Merge;
+                        this.import_mode = this.default_import_mode.to_import_mode();
                         this.import_preview = Some(preview);
                         this.pending_import_remote_commit = Some(remote_commit);
                         this.pending_import_remote_metadata = Some(metadata.clone());
@@ -419,7 +460,7 @@ impl DataManagementPanel {
                 match result {
                     Ok(preview) => {
                         this.conflict_choices.clear();
-                        this.import_mode = ImportMode::ReplaceWithBackup;
+                        this.import_mode = this.default_import_mode.to_import_mode();
                         this.import_preview = Some(preview);
                     }
                     Err(err) => this.error = Some(err),
@@ -595,14 +636,14 @@ impl DataManagementPanel {
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x262626))
-                            .child("数据管理"),
+                            .child("数据与同步"),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(rgb(0x8c8c8c))
                             .line_height(relative(1.5))
-                            .child("查看当前本地数据体积、附件健康状态，并执行数据导入导出。"),
+                            .child("查看本地数据体积、导入导出状态，并管理 Git 远端同步。"),
                     ),
             )
             .when(self.overview_loading, |this| {
@@ -645,6 +686,35 @@ impl DataManagementPanel {
                     true,
                 ))
             })
+            .child(render_card(
+                "默认导入策略",
+                "选择导入包后会默认使用这里的策略，你仍然可以在导入预检里临时切换。",
+                vec![div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(self.render_inline_action_button(
+                        "default-import-replace",
+                        "备份后替换",
+                        self.default_import_mode == ImportModePreference::ReplaceWithBackup,
+                        !self.busy,
+                        cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                            this.save_default_import_mode(
+                                ImportModePreference::ReplaceWithBackup,
+                                cx,
+                            );
+                        }),
+                    ))
+                    .child(self.render_inline_action_button(
+                        "default-import-merge",
+                        "合并导入",
+                        self.default_import_mode == ImportModePreference::Merge,
+                        !self.busy,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.save_default_import_mode(ImportModePreference::Merge, cx);
+                        }),
+                    ))
+                    .into_any_element()],
+            ))
             .child(render_card(
                 "容量概览",
                 "按业务数据逻辑体积统计，不包含 SQLite 页碎片和 WAL 文件。",
@@ -727,6 +797,18 @@ impl DataManagementPanel {
                             }),
                         ))
                         .into_any_element(),
+                ],
+            ))
+            .child(render_card(
+                "本地路径",
+                "这些路径用于保存数据库、设置和导入备份。",
+                vec![
+                    render_stat_block("数据目录", &app_data_dir().display().to_string()),
+                    render_stat_block(
+                        "数据库文件",
+                        &app_data_dir().join("data.db").display().to_string(),
+                    ),
+                    render_stat_block("设置文件", &settings_file_path().display().to_string()),
                 ],
             ))
             .child(self.render_git_sync_card(cx))

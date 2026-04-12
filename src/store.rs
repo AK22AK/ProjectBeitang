@@ -382,8 +382,14 @@ impl StoreRuntime {
                         if !records.is_empty() {
                             eprintln!("[Store] Found {} pending reminders", records.len());
                         }
+                        let notifications_enabled = load_app_settings()
+                            .map(|settings| settings.reminders.notifications_enabled)
+                            .unwrap_or(true);
                         for mut record in records {
                             eprintln!("[Store] Processing reminder for task: {}", record.id);
+                            if !notifications_enabled {
+                                continue;
+                            }
                             match crate::platform::send_reminder(&record) {
                                 Ok(_) => {
                                     eprintln!("[Store] Notification sent successfully");

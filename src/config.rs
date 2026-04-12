@@ -1,4 +1,5 @@
 use crate::platform;
+use crate::settings::ShortcutSettings;
 use anyhow::{anyhow, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,9 @@ impl Default for ShortcutConfig {
 
 impl ShortcutConfig {
     pub fn load() -> Self {
-        // 暂时返回默认配置，后续可从文件加载
-        Self::default()
+        crate::settings::load_app_settings()
+            .map(|settings| Self::from(&settings.shortcuts))
+            .unwrap_or_default()
     }
 
     pub fn quick_capture_hotkey(&self) -> Result<HotKey> {
@@ -55,7 +57,83 @@ impl ShortcutConfig {
     }
 }
 
+impl From<&ShortcutSettings> for ShortcutConfig {
+    fn from(value: &ShortcutSettings) -> Self {
+        Self {
+            quick_capture: value.quick_capture.clone(),
+            open_main: value.open_main.clone(),
+            open_tasks: value.open_tasks.clone(),
+            open_records: value.open_records.clone(),
+        }
+    }
+}
+
+impl From<&ShortcutConfig> for ShortcutSettings {
+    fn from(value: &ShortcutConfig) -> Self {
+        Self {
+            quick_capture: value.quick_capture.clone(),
+            open_main: value.open_main.clone(),
+            open_tasks: value.open_tasks.clone(),
+            open_records: value.open_records.clone(),
+        }
+    }
+}
+
 pub fn parse_hotkey(shortcut: &str) -> Result<HotKey> {
+    let (modifiers, code) = parse_hotkey_parts(shortcut)?;
+    let modifiers = if modifiers.is_empty() {
+        None
+    } else {
+        Some(modifiers)
+    };
+
+    Ok(HotKey::new(modifiers, code))
+}
+
+pub fn validate_shortcut_config(config: &ShortcutConfig) -> Result<()> {
+    let shortcuts = [
+        ("快捷输入", config.quick_capture.as_str()),
+        ("打开主应用", config.open_main.as_str()),
+        ("任务面板", config.open_tasks.as_str()),
+        ("记录面板", config.open_records.as_str()),
+    ];
+    let mut normalized = Vec::with_capacity(shortcuts.len());
+
+    for (label, shortcut) in shortcuts {
+        parse_hotkey(shortcut)?;
+        let normalized_shortcut = normalize_hotkey(shortcut)?;
+        if normalized
+            .iter()
+            .any(|existing| existing == &normalized_shortcut)
+        {
+            return Err(anyhow!("快捷键 `{label}` 与其他设置重复"));
+        }
+        normalized.push(normalized_shortcut);
+    }
+
+    Ok(())
+}
+
+pub fn normalize_hotkey(shortcut: &str) -> Result<String> {
+    let (modifiers, code) = parse_hotkey_parts(shortcut)?;
+    let mut tokens = Vec::new();
+    if modifiers.contains(Modifiers::META) {
+        tokens.push("cmd".to_string());
+    }
+    if modifiers.contains(Modifiers::CONTROL) {
+        tokens.push("ctrl".to_string());
+    }
+    if modifiers.contains(Modifiers::ALT) {
+        tokens.push("alt".to_string());
+    }
+    if modifiers.contains(Modifiers::SHIFT) {
+        tokens.push("shift".to_string());
+    }
+    tokens.push(code_to_token(code).to_string());
+    Ok(tokens.join("+"))
+}
+
+fn parse_hotkey_parts(shortcut: &str) -> Result<(Modifiers, Code)> {
     let mut modifiers = Modifiers::empty();
     let mut code = None;
 
@@ -79,13 +157,7 @@ pub fn parse_hotkey(shortcut: &str) -> Result<HotKey> {
     }
 
     let code = code.ok_or_else(|| anyhow!("快捷键 `{shortcut}` 缺少主键"))?;
-    let modifiers = if modifiers.is_empty() {
-        None
-    } else {
-        Some(modifiers)
-    };
-
-    Ok(HotKey::new(modifiers, code))
+    Ok((modifiers, code))
 }
 
 fn parse_key_code(key: &str) -> Result<Code> {
@@ -137,5 +209,50 @@ fn parse_key_code(key: &str) -> Result<Code> {
         "esc" | "escape" => Ok(Code::Escape),
         "tab" => Ok(Code::Tab),
         _ => Err(anyhow!("不支持的快捷键主键 `{key}`")),
+    }
+}
+
+fn code_to_token(code: Code) -> &'static str {
+    match code {
+        Code::Digit0 => "0",
+        Code::Digit1 => "1",
+        Code::Digit2 => "2",
+        Code::Digit3 => "3",
+        Code::Digit4 => "4",
+        Code::Digit5 => "5",
+        Code::Digit6 => "6",
+        Code::Digit7 => "7",
+        Code::Digit8 => "8",
+        Code::Digit9 => "9",
+        Code::KeyA => "a",
+        Code::KeyB => "b",
+        Code::KeyC => "c",
+        Code::KeyD => "d",
+        Code::KeyE => "e",
+        Code::KeyF => "f",
+        Code::KeyG => "g",
+        Code::KeyH => "h",
+        Code::KeyI => "i",
+        Code::KeyJ => "j",
+        Code::KeyK => "k",
+        Code::KeyL => "l",
+        Code::KeyM => "m",
+        Code::KeyN => "n",
+        Code::KeyO => "o",
+        Code::KeyP => "p",
+        Code::KeyQ => "q",
+        Code::KeyR => "r",
+        Code::KeyS => "s",
+        Code::KeyT => "t",
+        Code::KeyU => "u",
+        Code::KeyV => "v",
+        Code::KeyW => "w",
+        Code::KeyX => "x",
+        Code::KeyY => "y",
+        Code::KeyZ => "z",
+        Code::Enter => "enter",
+        Code::Escape => "esc",
+        Code::Tab => "tab",
+        _ => "unsupported",
     }
 }
