@@ -3,13 +3,16 @@ use crate::data_management::{
     AttachmentStorageBackend, ConflictChoice, ConflictResolution, ImportConflict, ImportMode,
     ImportPreview, StorageUsageSummary,
 };
+use crate::git_sync::{GitRemoteSyncConfig, GitRemoteSyncMetadata, GitRemoteVerification};
 use crate::models::{AttachmentStatus, RecordType};
 use crate::platform::{
     open_saved_attachment, pick_archive_file, save_archive_file, ParentWindowHint,
 };
-use crate::store::Store;
+use crate::settings::load_app_settings;
+use crate::store::{GitRemoteSyncPullPreview, Store};
 use gpui::{prelude::*, *};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::v_flex;
 use std::collections::HashMap;
@@ -60,6 +63,13 @@ pub struct DataManagementPanel {
     store: Store,
     page: DataManagementPage,
     attachment_filter: AttachmentFilter,
+    git_sync_config: GitRemoteSyncConfig,
+    git_sync_verification: Option<GitRemoteVerification>,
+    remote_url_input: Entity<InputState>,
+    branch_input: Entity<InputState>,
+    base_path_input: Entity<InputState>,
+    pending_import_remote_commit: Option<String>,
+    pending_import_remote_metadata: Option<GitRemoteSyncMetadata>,
     storage_summary: Option<StorageUsageSummary>,
     attachment_health: Option<AttachmentHealthSummary>,
     attachments: Vec<AttachmentPreviewEntry>,
@@ -74,11 +84,22 @@ pub struct DataManagementPanel {
 }
 
 impl DataManagementPanel {
-    pub fn new(store: Store, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let remote_url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("git@host:owner/repo.git"));
+        let branch_input = cx.new(|cx| InputState::new(window, cx).placeholder("main"));
+        let base_path_input = cx.new(|cx| InputState::new(window, cx).placeholder("robinne-sync"));
         let mut panel = Self {
             store,
             page: DataManagementPage::Overview,
             attachment_filter: AttachmentFilter::All,
+            git_sync_config: GitRemoteSyncConfig::default(),
+            git_sync_verification: None,
+            remote_url_input,
+            branch_input,
+            base_path_input,
+            pending_import_remote_commit: None,
+            pending_import_remote_metadata: None,
             storage_summary: None,
             attachment_health: None,
             attachments: Vec::new(),
@@ -92,6 +113,7 @@ impl DataManagementPanel {
             conflict_choices: HashMap::new(),
         };
         panel.load_overview(cx);
+        panel.load_git_sync_config(window, cx);
         panel
     }
 
@@ -118,6 +140,163 @@ impl DataManagementPanel {
                     (Err(err), _) | (_, Err(err)) => {
                         this.error = Some(err);
                     }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_git_sync_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match load_app_settings() {
+            Ok(settings) => {
+                self.git_sync_config = settings.git_sync.normalized();
+                self.git_sync_verification = None;
+                let config = self.git_sync_config.clone();
+                self.apply_git_sync_inputs(&config, window, cx);
+            }
+            Err(err) => {
+                self.error = Some(err);
+                cx.notify();
+            }
+        }
+    }
+
+    fn apply_git_sync_inputs(
+        &mut self,
+        config: &GitRemoteSyncConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_url_input.update(cx, |input, cx| {
+            input.set_value(&config.remote_url, window, cx);
+        });
+        self.branch_input.update(cx, |input, cx| {
+            input.set_value(&config.branch, window, cx);
+        });
+        self.base_path_input.update(cx, |input, cx| {
+            input.set_value(&config.base_path, window, cx);
+        });
+    }
+
+    fn current_git_sync_config(&self, cx: &App) -> GitRemoteSyncConfig {
+        let mut config = self.git_sync_config.clone();
+        config.remote_url = self.remote_url_input.read(cx).text().to_string();
+        config.branch = self.branch_input.read(cx).text().to_string();
+        config.base_path = self.base_path_input.read(cx).text().to_string();
+        config.normalized()
+    }
+
+    fn save_git_sync_config(&mut self, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.error = None;
+        self.notice = None;
+        let store = self.store.clone();
+        let config = self.current_git_sync_config(cx);
+        cx.spawn(async move |view, cx| {
+            let result = store.save_git_remote_sync_config(config).await;
+            let _ = view.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(state) => {
+                        this.git_sync_config = state.config;
+                        this.notice = Some("已保存 Git 远端同步配置".to_string());
+                    }
+                    Err(err) => this.error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn verify_git_remote(&mut self, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.error = None;
+        self.notice = None;
+        let store = self.store.clone();
+        let config = self.current_git_sync_config(cx);
+        cx.spawn(async move |view, cx| {
+            let result = store.verify_git_remote(config.clone()).await;
+            let _ = view.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(verification) => {
+                        this.git_sync_verification = Some(verification.clone());
+                        this.git_sync_config = config;
+                        this.notice = Some("已验证 Git 远端连接".to_string());
+                    }
+                    Err(err) => this.error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn push_to_git_remote(&mut self, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.error = None;
+        self.notice = None;
+        let store = self.store.clone();
+        let config = self.current_git_sync_config(cx);
+        cx.spawn(async move |view, cx| {
+            let result = store.push_snapshot_to_git_remote(config.clone()).await;
+            let _ = view.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(result) => {
+                        let mut updated = config.clone();
+                        updated.last_seen_remote_commit = Some(result.remote_commit.clone());
+                        updated.last_sync_at = Some(chrono::Utc::now());
+                        this.git_sync_config = updated;
+                        this.pending_import_remote_commit = None;
+                        this.pending_import_remote_metadata = None;
+                        this.git_sync_verification = Some(GitRemoteVerification {
+                            remote_url: config.remote_url.clone(),
+                            branch: config.branch.clone(),
+                            git_version: "git".to_string(),
+                            remote_head_commit: Some(result.remote_commit.clone()),
+                            remote_metadata: Some(result.metadata.clone()),
+                        });
+                        this.notice = Some(format!(
+                            "已推送到 Git 远端：{} 条记录，{} 个附件",
+                            result.metadata.record_count, result.metadata.attachment_count
+                        ));
+                    }
+                    Err(err) => this.error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn pull_from_git_remote(&mut self, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.error = None;
+        self.notice = None;
+        let store = self.store.clone();
+        let config = self.current_git_sync_config(cx);
+        cx.spawn(async move |view, cx| {
+            let result = store.pull_snapshot_from_git_remote(config.clone()).await;
+            let _ = view.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(GitRemoteSyncPullPreview {
+                        preview,
+                        remote_commit,
+                        metadata,
+                    }) => {
+                        this.conflict_choices.clear();
+                        this.import_mode = ImportMode::Merge;
+                        this.import_preview = Some(preview);
+                        this.pending_import_remote_commit = Some(remote_commit);
+                        this.pending_import_remote_metadata = Some(metadata.clone());
+                        this.git_sync_config = config;
+                        this.notice = Some("已从 Git 远端拉取快照，请确认导入策略".to_string());
+                    }
+                    Err(err) => this.error = Some(err),
                 }
                 cx.notify();
             });
@@ -287,6 +466,15 @@ impl DataManagementPanel {
         let store = self.store.clone();
         let archive_path = preview.archive_path.clone();
         let mode = self.import_mode;
+        let pending_sync_config = self
+            .pending_import_remote_commit
+            .as_ref()
+            .map(|remote_commit| {
+                let mut config = self.current_git_sync_config(cx);
+                config.last_seen_remote_commit = Some(remote_commit.clone());
+                config.last_sync_at = Some(chrono::Utc::now());
+                config
+            });
         let resolutions = preview
             .conflicts
             .iter()
@@ -303,6 +491,15 @@ impl DataManagementPanel {
 
         cx.spawn(async move |view, cx| {
             let result = store.apply_import(archive_path, mode, resolutions).await;
+            let sync_save_result = if result.is_ok() {
+                if let Some(config) = pending_sync_config {
+                    Some(store.save_git_remote_sync_config(config).await)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let _ = view.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
@@ -318,8 +515,17 @@ impl DataManagementPanel {
                             result.imported_attachment_count,
                             backup_message
                         ));
+                        if let Some(Err(err)) = sync_save_result.as_ref() {
+                            this.notice =
+                                Some(format!("导入已完成，但未能更新 Git 同步状态：{}", err));
+                        }
+                        if let Some(Ok(state)) = sync_save_result {
+                            this.git_sync_config = state.config;
+                        }
                         this.import_preview = None;
                         this.conflict_choices.clear();
+                        this.pending_import_remote_commit = None;
+                        this.pending_import_remote_metadata = None;
                         this.load_overview(cx);
                         if this.page == DataManagementPage::Attachments {
                             this.load_attachments(cx);
@@ -523,6 +729,7 @@ impl DataManagementPanel {
                         .into_any_element(),
                 ],
             ))
+            .child(self.render_git_sync_card(cx))
     }
 
     fn render_import_preview(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -590,6 +797,102 @@ impl DataManagementPanel {
                     ))
                 },
             )
+    }
+
+    fn render_git_sync_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let verification = self.git_sync_verification.clone();
+        let last_sync = self
+            .git_sync_config
+            .last_sync_at
+            .map(format_time)
+            .unwrap_or_else(|| "尚未同步".to_string());
+        let remote_commit = verification
+            .as_ref()
+            .and_then(|value| value.remote_head_commit.clone())
+            .or_else(|| self.git_sync_config.last_seen_remote_commit.clone())
+            .unwrap_or_else(|| "未知".to_string());
+        let metadata_text = verification
+            .as_ref()
+            .and_then(|value| value.remote_metadata.as_ref())
+            .map(|metadata| {
+                format!(
+                    "{} 条记录 · {} 个附件 · 导出于 {}",
+                    metadata.record_count,
+                    metadata.attachment_count,
+                    format_time(metadata.exported_at)
+                )
+            })
+            .unwrap_or_else(|| "远端尚未读取到同步元信息".to_string());
+
+        render_card(
+            "Git 远端同步",
+            "通过本机 Git 与任意兼容的远端仓库进行手动快照同步。建议提前配置 SSH 或凭据助手，应用不会托管账号密码。",
+            vec![
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(render_input_row("远端仓库", &self.remote_url_input))
+                    .child(render_input_row("分支", &self.branch_input))
+                    .child(render_input_row("同步目录", &self.base_path_input))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(self.render_inline_action_button(
+                        "save-git-sync-config",
+                        "保存配置",
+                        false,
+                        !self.busy,
+                        cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                            this.save_git_sync_config(cx);
+                        }),
+                    ))
+                    .child(self.render_inline_action_button(
+                        "verify-git-remote",
+                        "校验远端",
+                        false,
+                        !self.busy,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.verify_git_remote(cx);
+                        }),
+                    ))
+                    .child(self.render_inline_action_button(
+                        "push-git-remote",
+                        "推送到远端",
+                        true,
+                        !self.busy,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.push_to_git_remote(cx);
+                        }),
+                    ))
+                    .child(self.render_inline_action_button(
+                        "pull-git-remote",
+                        "从远端拉取",
+                        false,
+                        !self.busy,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.pull_from_git_remote(cx);
+                        }),
+                    ))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .gap(px(12.0))
+                    .child(render_stat_block("最近同步", &last_sync))
+                    .child(render_stat_block(
+                        "远端版本",
+                        &truncate_middle(&remote_commit, 18),
+                    ))
+                    .into_any_element(),
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .line_height(relative(1.5))
+                    .child(metadata_text)
+                    .into_any_element(),
+            ],
+        )
     }
 
     fn render_conflict_row(
@@ -942,6 +1245,23 @@ fn render_stat_block(label: &'static str, value: &str) -> AnyElement {
         .into_any_element()
 }
 
+fn render_input_row(label: &'static str, input: &Entity<InputState>) -> AnyElement {
+    v_flex()
+        .gap(px(6.0))
+        .child(div().text_xs().text_color(rgb(0x8c8c8c)).child(label))
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(rgb(0xf0f0f0))
+                .bg(rgb(0xffffff))
+                .child(Input::new(input)),
+        )
+        .into_any_element()
+}
+
 fn render_message_box(message: &str, is_error: bool) -> AnyElement {
     let (background, border, color) = if is_error {
         (rgb(0xfff2f0), rgb(0xffccc7), rgb(0xcf1322))
@@ -1042,6 +1362,20 @@ fn format_time(time: chrono::DateTime<chrono::Utc>) -> String {
     time.with_timezone(&chrono::Local)
         .format("%Y-%m-%d %H:%M")
         .to_string()
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return value.to_string();
+    }
+    let head = max_chars / 2 - 1;
+    let tail = max_chars.saturating_sub(head + 1);
+    format!(
+        "{}…{}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
 }
 
 fn record_type_label(record_type: RecordType) -> &'static str {

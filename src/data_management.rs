@@ -1,10 +1,11 @@
 use crate::db::Database;
+use crate::git_sync::ExportSummary;
 use crate::models::{Attachment, AttachmentStatus, Person, Record, RecordType, Tag};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zip::write::FileOptions;
@@ -182,6 +183,7 @@ pub struct ExportManifestV1 {
 #[derive(Debug, Clone)]
 pub struct ExportResult {
     pub destination: PathBuf,
+    pub schema_version: i64,
     pub record_count: usize,
     pub attachment_count: usize,
 }
@@ -258,73 +260,22 @@ pub fn export_archive(db: &Database, destination: &Path) -> Result<ExportResult,
             .map_err(|err| format!("创建导出目录失败 {}: {}", parent.display(), err))?;
     }
 
-    let records = db
-        .get_all_records()
-        .map_err(|err| format!("读取记录失败: {}", err))?;
-    let tags = db
-        .get_tags()
-        .map_err(|err| format!("读取标签失败: {}", err))?;
-    let persons = db
-        .get_persons()
-        .map_err(|err| format!("读取人物失败: {}", err))?;
-    let attachments = db
-        .get_all_attachments_metadata()
-        .map_err(|err| format!("读取附件失败: {}", err))?;
-
     let file = File::create(destination)
         .map_err(|err| format!("创建导出文件失败 {}: {}", destination.display(), err))?;
-    let mut zip = ZipWriter::new(file);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
-
-    let mut export_attachments = Vec::with_capacity(attachments.len());
-    for attachment in &attachments {
-        let should_have_payload = attachment.status == AttachmentStatus::Ready;
-        let payload = db
-            .get_attachment_bytes(&attachment.id)
-            .map_err(|err| format!("读取附件内容失败 {}: {}", attachment.file_name, err))?;
-
-        if should_have_payload {
-            let payload = payload.ok_or_else(|| {
-                format!(
-                    "附件 {} 处于可用状态，但没有可导出的文件内容",
-                    attachment.file_name
-                )
-            })?;
-            zip.start_file(attachment_payload_path(&attachment.id), options)
-                .map_err(|err| format!("写入附件归档失败 {}: {}", attachment.file_name, err))?;
-            zip.write_all(&payload)
-                .map_err(|err| format!("写入附件内容失败 {}: {}", attachment.file_name, err))?;
-            export_attachments.push(ExportAttachmentEntry::from_attachment(attachment, true));
-        } else {
-            export_attachments.push(ExportAttachmentEntry::from_attachment(attachment, false));
-        }
-    }
-
-    let manifest = ExportManifestV1 {
-        format_version: EXPORT_FORMAT_VERSION,
-        schema_version: db.schema_version(),
-        exported_at: Utc::now(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
-        records: records.iter().map(ExportRecord::from_record).collect(),
-        tags,
-        persons,
-        attachments: export_attachments,
-    };
-
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|err| format!("序列化导出清单失败: {}", err))?;
-    zip.start_file(MANIFEST_PATH, options)
-        .map_err(|err| format!("写入导出清单失败: {}", err))?;
-    zip.write_all(&manifest_bytes)
-        .map_err(|err| format!("写入导出清单失败: {}", err))?;
-    zip.finish()
-        .map_err(|err| format!("完成导出归档失败: {}", err))?;
+    let summary = write_export_archive(db, file)?;
 
     Ok(ExportResult {
         destination: destination.to_path_buf(),
-        record_count: manifest.records.len(),
-        attachment_count: manifest.attachments.len(),
+        schema_version: summary.schema_version,
+        record_count: summary.record_count,
+        attachment_count: summary.attachment_count,
     })
+}
+
+pub fn export_archive_to_bytes(db: &Database) -> Result<(Vec<u8>, ExportSummary), String> {
+    let cursor = Cursor::new(Vec::new());
+    let (cursor, summary) = write_export_archive_inner(db, cursor)?;
+    Ok((cursor.into_inner(), summary))
 }
 
 pub fn preview_import_archive(db: &Database, archive_path: &Path) -> Result<ImportPreview, String> {
@@ -540,6 +491,88 @@ fn read_manifest(archive: &mut ZipArchive<File>) -> Result<ExportManifestV1, Str
 
 fn attachment_payload_path(attachment_id: &str) -> String {
     format!("attachments/{attachment_id}/payload")
+}
+
+fn write_export_archive<W: Write + Seek>(
+    db: &Database,
+    writer: W,
+) -> Result<ExportSummary, String> {
+    let (_writer, summary) = write_export_archive_inner(db, writer)?;
+    Ok(summary)
+}
+
+fn write_export_archive_inner<W: Write + Seek>(
+    db: &Database,
+    writer: W,
+) -> Result<(W, ExportSummary), String> {
+    let records = db
+        .get_all_records()
+        .map_err(|err| format!("读取记录失败: {}", err))?;
+    let tags = db
+        .get_tags()
+        .map_err(|err| format!("读取标签失败: {}", err))?;
+    let persons = db
+        .get_persons()
+        .map_err(|err| format!("读取人物失败: {}", err))?;
+    let attachments = db
+        .get_all_attachments_metadata()
+        .map_err(|err| format!("读取附件失败: {}", err))?;
+
+    let mut zip = ZipWriter::new(writer);
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    let mut export_attachments = Vec::with_capacity(attachments.len());
+    for attachment in &attachments {
+        let should_have_payload = attachment.status == AttachmentStatus::Ready;
+        let payload = db
+            .get_attachment_bytes(&attachment.id)
+            .map_err(|err| format!("读取附件内容失败 {}: {}", attachment.file_name, err))?;
+
+        if should_have_payload {
+            let payload = payload.ok_or_else(|| {
+                format!(
+                    "附件 {} 处于可用状态，但没有可导出的文件内容",
+                    attachment.file_name
+                )
+            })?;
+            zip.start_file(attachment_payload_path(&attachment.id), options)
+                .map_err(|err| format!("写入附件归档失败 {}: {}", attachment.file_name, err))?;
+            zip.write_all(&payload)
+                .map_err(|err| format!("写入附件内容失败 {}: {}", attachment.file_name, err))?;
+            export_attachments.push(ExportAttachmentEntry::from_attachment(attachment, true));
+        } else {
+            export_attachments.push(ExportAttachmentEntry::from_attachment(attachment, false));
+        }
+    }
+
+    let manifest = ExportManifestV1 {
+        format_version: EXPORT_FORMAT_VERSION,
+        schema_version: db.schema_version(),
+        exported_at: Utc::now(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        records: records.iter().map(ExportRecord::from_record).collect(),
+        tags,
+        persons,
+        attachments: export_attachments,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|err| format!("序列化导出清单失败: {}", err))?;
+    zip.start_file(MANIFEST_PATH, options)
+        .map_err(|err| format!("写入导出清单失败: {}", err))?;
+    zip.write_all(&manifest_bytes)
+        .map_err(|err| format!("写入导出清单失败: {}", err))?;
+    let writer = zip
+        .finish()
+        .map_err(|err| format!("完成导出归档失败: {}", err))?;
+
+    Ok((
+        writer,
+        ExportSummary {
+            schema_version: manifest.schema_version,
+            record_count: manifest.records.len(),
+            attachment_count: manifest.attachments.len(),
+        },
+    ))
 }
 
 #[cfg(test)]

@@ -3,14 +3,19 @@ use crate::attachment_image::{
     PreparedImageAttachment,
 };
 use crate::data_management::{
-    app_data_dir, apply_import_archive, export_archive, preview_import_archive,
-    AttachmentHealthSummary, AttachmentListItem, ConflictResolution, ExportResult, ImportMode,
-    ImportPreview, ImportResult, StorageUsageSummary,
+    app_data_dir, apply_import_archive, export_archive, export_archive_to_bytes,
+    preview_import_archive, AttachmentHealthSummary, AttachmentListItem, ConflictResolution,
+    ExportResult, ImportMode, ImportPreview, ImportResult, StorageUsageSummary,
 };
 use crate::db::Database;
+use crate::git_sync::{
+    build_upload_payload, GitRemoteSyncClient, GitRemoteSyncConfig, GitRemoteSyncMetadata,
+    GitRemoteSyncPullResult, GitRemoteSyncPushResult, GitRemoteSyncState, GitRemoteVerification,
+};
 use crate::models::{
     Attachment, MetadataCatalogEntry, Person, Record, Tag, TaskStatus, TimelineQuery,
 };
+use crate::settings::{load_app_settings, save_app_settings};
 use async_channel::{unbounded, Receiver, Sender};
 use chrono::{DateTime, Duration, Local};
 use std::path::PathBuf;
@@ -47,6 +52,13 @@ pub struct StatsData {
 pub struct DailyCompletedCount {
     pub label: String,
     pub count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct GitRemoteSyncPullPreview {
+    pub preview: ImportPreview,
+    pub remote_commit: String,
+    pub metadata: GitRemoteSyncMetadata,
 }
 
 #[derive(Clone)]
@@ -201,6 +213,25 @@ pub enum StoreCommand {
         mode: ImportMode,
         resolutions: Vec<ConflictResolution>,
         respond_to: Sender<Result<ImportResult, String>>,
+    },
+    GetGitRemoteSyncConfig {
+        respond_to: Sender<Result<GitRemoteSyncState, String>>,
+    },
+    SaveGitRemoteSyncConfig {
+        config: GitRemoteSyncConfig,
+        respond_to: Sender<Result<GitRemoteSyncState, String>>,
+    },
+    VerifyGitRemote {
+        config: GitRemoteSyncConfig,
+        respond_to: Sender<Result<GitRemoteVerification, String>>,
+    },
+    PushSnapshotToGitRemote {
+        config: GitRemoteSyncConfig,
+        respond_to: Sender<Result<GitRemoteSyncPushResult, String>>,
+    },
+    PullSnapshotFromGitRemote {
+        config: GitRemoteSyncConfig,
+        respond_to: Sender<Result<GitRemoteSyncPullPreview, String>>,
     },
 }
 
@@ -579,6 +610,26 @@ impl StoreRuntime {
                     let result = self
                         .handle_apply_import(archive_path, mode, resolutions)
                         .await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetGitRemoteSyncConfig { respond_to } => {
+                    let result = self.handle_get_git_remote_sync_config().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::SaveGitRemoteSyncConfig { config, respond_to } => {
+                    let result = self.handle_save_git_remote_sync_config(config).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::VerifyGitRemote { config, respond_to } => {
+                    let result = self.handle_verify_git_remote(config).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::PushSnapshotToGitRemote { config, respond_to } => {
+                    let result = self.handle_push_snapshot_to_git_remote(config).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::PullSnapshotFromGitRemote { config, respond_to } => {
+                    let result = self.handle_pull_snapshot_from_git_remote(config).await;
                     let _ = respond_to.send(result).await;
                 }
             }
@@ -1201,6 +1252,95 @@ impl StoreRuntime {
             None => Err("Database not initialized".to_string()),
         }
     }
+
+    async fn handle_get_git_remote_sync_config(&self) -> Result<GitRemoteSyncState, String> {
+        load_git_remote_sync_state()
+    }
+
+    async fn handle_save_git_remote_sync_config(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteSyncState, String> {
+        persist_git_remote_sync_state(config)
+    }
+
+    async fn handle_verify_git_remote(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteVerification, String> {
+        let state = persist_git_remote_sync_state(config)?;
+        let client = GitRemoteSyncClient::new()?;
+        client.verify_remote(&state.config)
+    }
+
+    async fn handle_push_snapshot_to_git_remote(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteSyncPushResult, String> {
+        let state = persist_git_remote_sync_state(config)?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "Database not initialized".to_string())?;
+        let client = GitRemoteSyncClient::new()?;
+        let (snapshot_bytes, summary) = export_archive_to_bytes(db)?;
+        let payload = build_upload_payload(&summary, snapshot_bytes)?;
+        let result = client.push_snapshot(&state.config, payload)?;
+
+        let mut updated_config = state.config.clone();
+        updated_config.last_seen_remote_commit = Some(result.remote_commit.clone());
+        updated_config.last_sync_at = Some(chrono::Utc::now());
+        persist_git_remote_sync_state(updated_config)?;
+
+        Ok(result)
+    }
+
+    async fn handle_pull_snapshot_from_git_remote(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteSyncPullPreview, String> {
+        let state = persist_git_remote_sync_state(config)?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "Database not initialized".to_string())?;
+        let client = GitRemoteSyncClient::new()?;
+        let result: GitRemoteSyncPullResult = client.pull_snapshot(&state.config)?;
+        let archive_path = write_temp_git_remote_snapshot_archive(&result.archive_bytes)?;
+        let preview = preview_import_archive(db, &archive_path)?;
+
+        Ok(GitRemoteSyncPullPreview {
+            preview,
+            remote_commit: result.remote_commit,
+            metadata: result.metadata,
+        })
+    }
+}
+
+fn load_git_remote_sync_state() -> Result<GitRemoteSyncState, String> {
+    let settings = load_app_settings()?;
+    let config = settings.git_sync.normalized();
+    Ok(GitRemoteSyncState { config })
+}
+
+fn persist_git_remote_sync_state(
+    config: GitRemoteSyncConfig,
+) -> Result<GitRemoteSyncState, String> {
+    let normalized = config.normalized();
+    let mut settings = load_app_settings()?;
+    settings.git_sync = normalized.clone();
+    save_app_settings(&settings)?;
+    Ok(GitRemoteSyncState { config: normalized })
+}
+
+fn write_temp_git_remote_snapshot_archive(bytes: &[u8]) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("robinne-git-sync");
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("创建临时同步目录失败 {}: {}", dir.display(), err))?;
+    let path = dir.join(format!("snapshot-{}.zip", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes)
+        .map_err(|err| format!("写入临时同步归档失败 {}: {}", path.display(), err))?;
+    Ok(path)
 }
 
 pub fn create_store() -> (Store, StoreRuntime) {
@@ -1610,6 +1750,85 @@ impl Store {
         rx.recv()
             .await
             .unwrap_or_else(|_| Err("Failed to apply import".to_string()))
+    }
+
+    pub async fn get_git_remote_sync_config(&self) -> Result<GitRemoteSyncState, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetGitRemoteSyncConfig { respond_to: tx })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to load git sync config".to_string()))
+    }
+
+    pub async fn save_git_remote_sync_config(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteSyncState, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::SaveGitRemoteSyncConfig {
+                config,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to save git sync config".to_string()))
+    }
+
+    pub async fn verify_git_remote(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteVerification, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::VerifyGitRemote {
+                config,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to verify git remote".to_string()))
+    }
+
+    pub async fn push_snapshot_to_git_remote(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteSyncPushResult, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::PushSnapshotToGitRemote {
+                config,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to push git sync snapshot".to_string()))
+    }
+
+    pub async fn pull_snapshot_from_git_remote(
+        &self,
+        config: GitRemoteSyncConfig,
+    ) -> Result<GitRemoteSyncPullPreview, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::PullSnapshotFromGitRemote {
+                config,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to pull git sync snapshot".to_string()))
     }
 
     pub async fn start_task(&self, id: uuid::Uuid) -> Result<(), String> {
