@@ -33,10 +33,10 @@ impl AiProviderProtocol {
         }
     }
 
-    pub fn secret_account(self) -> &'static str {
+    pub fn api_key_env_var(self) -> &'static str {
         match self {
-            Self::OpenAiCompatible => "ai.openai-compatible.api-key",
-            Self::Anthropic => "ai.anthropic.api-key",
+            Self::OpenAiCompatible => "OPENAI_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
         }
     }
 }
