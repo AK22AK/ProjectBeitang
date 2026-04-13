@@ -1277,7 +1277,7 @@ impl MainView {
         let store_for_panels = store.clone();
         let app_settings = load_settings_or_default();
         let shortcut_config = ShortcutConfig::from(&app_settings.shortcuts);
-        let ai_api_key_present = load_secret(app_settings.ai.protocol.secret_account())
+        let ai_api_key_present = load_secret(app_settings.ai.protocol.api_key_env_var())
             .ok()
             .flatten()
             .is_some();
@@ -1295,7 +1295,9 @@ impl MainView {
             InputState::new(window, cx).placeholder("例如 gpt-4.1-mini / claude-sonnet-4-5")
         });
         let ai_api_key_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("输入新的 API Key，保存后写入系统钥匙串")
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("输入 API Key，设置到当前会话环境变量")
         });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -1602,10 +1604,7 @@ impl MainView {
     fn refresh_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.app_settings = load_settings_or_default();
         self.shortcut_config = ShortcutConfig::from(&self.app_settings.shortcuts);
-        self.ai_api_key_present = load_secret(self.app_settings.ai.protocol.secret_account())
-            .ok()
-            .flatten()
-            .is_some();
+        self.refresh_ai_api_key_presence(self.app_settings.ai.protocol);
         self.sync_ai_settings_inputs(window, cx);
         self.active_shortcut_capture = None;
         self.settings_notice = None;
@@ -1639,9 +1638,28 @@ impl MainView {
         self.ai_model_input.update(cx, |input, cx| {
             input.set_value(&model, window, cx);
         });
+        self.sync_ai_api_key_input(window, cx);
+    }
+
+    fn sync_ai_api_key_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = if self.ai_api_key_present {
+            "********（当前会话已设置，可输入新值覆盖）"
+        } else {
+            "输入 API Key，设置到当前会话环境变量"
+        };
         self.ai_api_key_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
+            input.set_placeholder(placeholder, window, cx);
+            input.set_masked(true, window, cx);
         });
+    }
+
+    fn refresh_ai_api_key_presence(&mut self, protocol: AiProviderProtocol) -> bool {
+        self.ai_api_key_present = load_secret(protocol.api_key_env_var())
+            .ok()
+            .flatten()
+            .is_some();
+        self.ai_api_key_present
     }
 
     fn reload_ai_panel_configuration(&mut self, cx: &mut Context<Self>) {
@@ -1666,10 +1684,7 @@ impl MainView {
         {
             self.app_settings.ai.base_url = protocol.default_base_url().to_string();
         }
-        self.ai_api_key_present = load_secret(protocol.secret_account())
-            .ok()
-            .flatten()
-            .is_some();
+        self.refresh_ai_api_key_presence(protocol);
         self.sync_ai_settings_inputs(window, cx);
         self.persist_settings("已保存 AI 协议设置", cx);
         self.reload_ai_panel_configuration(cx);
@@ -1700,14 +1715,15 @@ impl MainView {
             return;
         }
 
-        match save_secret(self.app_settings.ai.protocol.secret_account(), &api_key) {
+        match save_secret(self.app_settings.ai.protocol.api_key_env_var(), &api_key) {
             Ok(_) => {
-                self.ai_api_key_present = true;
-                self.ai_api_key_input.update(cx, |input, cx| {
-                    input.set_value("", window, cx);
-                });
+                self.refresh_ai_api_key_presence(self.app_settings.ai.protocol);
+                self.sync_ai_api_key_input(window, cx);
                 self.settings_error = None;
-                self.settings_notice = Some("已将 AI API Key 保存到系统钥匙串".to_string());
+                self.settings_notice = Some(format!(
+                    "已设置当前会话环境变量 {}",
+                    self.app_settings.ai.protocol.api_key_env_var()
+                ));
                 self.reload_ai_panel_configuration(cx);
             }
             Err(err) => {
@@ -1719,14 +1735,15 @@ impl MainView {
     }
 
     fn clear_ai_api_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match delete_secret(self.app_settings.ai.protocol.secret_account()) {
+        match delete_secret(self.app_settings.ai.protocol.api_key_env_var()) {
             Ok(_) => {
-                self.ai_api_key_present = false;
-                self.ai_api_key_input.update(cx, |input, cx| {
-                    input.set_value("", window, cx);
-                });
+                self.refresh_ai_api_key_presence(self.app_settings.ai.protocol);
+                self.sync_ai_api_key_input(window, cx);
                 self.settings_error = None;
-                self.settings_notice = Some("已清除当前协议的 AI API Key".to_string());
+                self.settings_notice = Some(format!(
+                    "已清除当前会话环境变量 {}",
+                    self.app_settings.ai.protocol.api_key_env_var()
+                ));
                 self.reload_ai_panel_configuration(cx);
             }
             Err(err) => {
@@ -2644,9 +2661,15 @@ impl MainView {
     fn render_ai_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let protocol = self.app_settings.ai.protocol;
         let key_status = if self.ai_api_key_present {
-            "已保存到系统钥匙串"
+            format!(
+                "当前会话已设置 {}",
+                self.app_settings.ai.protocol.api_key_env_var()
+            )
         } else {
-            "尚未保存"
+            format!(
+                "尚未检测到 {}",
+                self.app_settings.ai.protocol.api_key_env_var()
+            )
         };
 
         div()
@@ -2665,7 +2688,7 @@ impl MainView {
                     .text_sm()
                     .text_color(rgb(0x8c8c8c))
                     .line_height(relative(1.5))
-                    .child("AI 设置只保存协议、Base URL 和 Model。API Key 始终写入系统钥匙串，不参与导入导出与同步。"),
+                    .child("AI 设置只保存协议、Base URL 和 Model。API Key 按 Claude Code 的方式走环境变量，不写入系统钥匙串。"),
             )
             .when_some(self.render_settings_message(), |this, message| {
                 this.child(message)
@@ -2745,9 +2768,14 @@ impl MainView {
             ))
             .child(render_settings_card(
                 "API Key",
-                "当前仅针对所选协议保存一份 API Key。切换协议后，会读取该协议各自的密钥状态。",
+                "当前协议会读取对应环境变量。你也可以在这里直接把值写入当前应用会话，退出应用后不会保留。",
                 vec![
-                    render_info_row("当前状态", key_status).into_any_element(),
+                    render_info_row("当前状态", &key_status).into_any_element(),
+                    render_info_row(
+                        "环境变量",
+                        self.app_settings.ai.protocol.api_key_env_var(),
+                    )
+                    .into_any_element(),
                     div()
                         .flex()
                         .flex_col()
@@ -2762,11 +2790,18 @@ impl MainView {
                         .child(Input::new(&self.ai_api_key_input))
                         .child(
                             div()
+                                .text_sm()
+                                .text_color(rgb(0x8c8c8c))
+                                .line_height(relative(1.5))
+                                .child("如果当前会话已经有值，这里会显示 `********` 占位。输入新值会覆盖当前会话里的环境变量；清除则只清当前会话。"),
+                        )
+                        .child(
+                            div()
                                 .flex()
                                 .gap(px(10.0))
                                 .child(
                                     Button::new("save-ai-api-key")
-                                        .child("保存到系统钥匙串")
+                                        .child("设置到当前会话")
                                         .with_variant(
                                             gpui_component::button::ButtonVariant::Primary,
                                         )
@@ -2776,7 +2811,7 @@ impl MainView {
                                 )
                                 .child(
                                     Button::new("clear-ai-api-key")
-                                        .child("清除当前协议密钥")
+                                        .child("清除当前会话 Key")
                                         .on_click(cx.listener(|this, _event, window, cx| {
                                             this.clear_ai_api_key(window, cx);
                                         })),

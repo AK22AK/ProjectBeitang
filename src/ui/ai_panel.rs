@@ -98,7 +98,7 @@ impl AiPanel {
         let settings = load_app_settings()
             .map(|app_settings| app_settings.ai)
             .unwrap_or_default();
-        let has_api_key = load_secret(settings.protocol.secret_account())
+        let has_api_key = load_secret(settings.protocol.api_key_env_var())
             .ok()
             .flatten()
             .is_some();
@@ -283,11 +283,14 @@ impl AiPanel {
         self.refresh_configuration();
 
         let settings = self.config.settings.clone();
-        let api_key = match load_secret(settings.protocol.secret_account()) {
+        let api_key = match load_secret(settings.protocol.api_key_env_var()) {
             Ok(Some(api_key)) => api_key,
             Ok(None) => {
                 self.generating = false;
-                self.error = Some("当前协议还没有保存 API Key，请先去设置里配置".to_string());
+                self.error = Some(format!(
+                    "当前协议还没有检测到环境变量 {}，请先去设置里配置",
+                    settings.protocol.api_key_env_var()
+                ));
                 cx.notify();
                 return;
             }
@@ -406,19 +409,34 @@ impl AiPanel {
 
     fn render_analysis_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         render_card(
-            "分析条",
-            "先确定本次分析范围，再生成结果。筛选控件收敛在这一块，不再分散成多张表单卡片。",
+            "分析控制",
+            "先定模式和时间，再生成结果。",
             vec![
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(10.0))
+                    .gap(px(8.0))
                     .child(self.render_mode_button(AiSummaryMode::PastSummary, "ai-mode-past", cx))
                     .child(self.render_mode_button(
                         AiSummaryMode::FutureTasks,
                         "ai-mode-future",
                         cx,
                     ))
+                    .child(
+                        Button::new("ai-generate")
+                            .child(if self.generating {
+                                "生成中..."
+                            } else {
+                                "生成总结"
+                            })
+                            .when(!self.generating, |button| {
+                                button.with_variant(gpui_component::button::ButtonVariant::Primary)
+                            })
+                            .disabled(self.generating)
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.generate(cx);
+                            })),
+                    )
                     .into_any_element(),
                 div()
                     .flex()
@@ -452,15 +470,15 @@ impl AiPanel {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(12.0))
+                    .gap(px(10.0))
                     .items_end()
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(6.0))
-                            .min_w(px(220.0))
-                            .child(div().text_sm().text_color(rgb(0x595959)).child("开始日期"))
+                            .min_w(px(180.0))
+                            .child(div().text_xs().text_color(rgb(0x595959)).child("开始日期"))
                             .child(DatePicker::new(&self.start_date_picker)),
                     )
                     .child(
@@ -468,15 +486,15 @@ impl AiPanel {
                             .flex()
                             .flex_col()
                             .gap(px(6.0))
-                            .min_w(px(220.0))
-                            .child(div().text_sm().text_color(rgb(0x595959)).child("结束日期"))
+                            .min_w(px(180.0))
+                            .child(div().text_xs().text_color(rgb(0x595959)).child("结束日期"))
                             .child(DatePicker::new(&self.end_date_picker)),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
-                            .gap(px(10.0))
+                            .gap(px(8.0))
                             .child(
                                 Button::new("ai-refresh-preview")
                                     .child(if self.preview_loading {
@@ -490,44 +508,9 @@ impl AiPanel {
                                         this.reload_preview(cx);
                                     })),
                             )
-                            .child(
-                                Button::new("ai-generate")
-                                    .child(if self.generating {
-                                        "生成中..."
-                                    } else {
-                                        "生成总结"
-                                    })
-                                    .when(!self.generating, |button| {
-                                        button.with_variant(
-                                            gpui_component::button::ButtonVariant::Primary,
-                                        )
-                                    })
-                                    .disabled(self.generating)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.generate(cx);
-                                    })),
-                            )
                             .into_any_element(),
                     )
                     .into_any_element(),
-                self.render_filter_section(
-                    "标签",
-                    &self.available_tags,
-                    &self.selected_tags,
-                    "当前未建立标签，先按时间范围分析。",
-                    "清除标签",
-                    cx,
-                    true,
-                ),
-                self.render_filter_section(
-                    "人物",
-                    &self.available_persons,
-                    &self.selected_persons,
-                    "当前未建立人物关联，先按时间范围分析。",
-                    "清除人物",
-                    cx,
-                    false,
-                ),
             ],
         )
     }
@@ -624,6 +607,33 @@ impl AiPanel {
             )
             .child(chips)
             .into_any_element()
+    }
+
+    fn render_scope_filters_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        render_card(
+            "收窄范围",
+            "标签和人物是次级过滤器，只在你想进一步收窄分析对象时使用。",
+            vec![
+                self.render_filter_section(
+                    "标签",
+                    &self.available_tags,
+                    &self.selected_tags,
+                    "当前未建立标签，先按时间范围分析。",
+                    "清除标签",
+                    cx,
+                    true,
+                ),
+                self.render_filter_section(
+                    "人物",
+                    &self.available_persons,
+                    &self.selected_persons,
+                    "当前未建立人物关联，先按时间范围分析。",
+                    "清除人物",
+                    cx,
+                    false,
+                ),
+            ],
+        )
     }
 
     fn render_result_canvas(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -909,6 +919,29 @@ impl Render for AiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let config_ready = self.config.settings.has_connection_config() && self.config.has_api_key;
         let two_column = window.viewport_size().width >= AI_TWO_COLUMN_BREAKPOINT;
+        let status_badge = if config_ready {
+            "AI 连接已就绪"
+        } else {
+            "AI 连接未完成"
+        };
+        let status_detail = if !self.config.settings.has_connection_config() {
+            "请先在设置里保存 Base URL 和 Model".to_string()
+        } else if !self.config.has_api_key {
+            format!(
+                "当前协议还没有检测到 {}",
+                self.config.settings.protocol.api_key_env_var()
+            )
+        } else {
+            format!(
+                "{} · {}",
+                self.config.settings.protocol.label(),
+                if self.config.settings.model.trim().is_empty() {
+                    "未设置模型"
+                } else {
+                    self.config.settings.model.trim()
+                }
+            )
+        };
 
         div()
             .size_full()
@@ -930,7 +963,6 @@ impl Render for AiPanel {
                                 this.items_start().justify_between()
                             })
                             .when(!two_column, |this| this.flex_col().items_start())
-                            .flex_col()
                             .gap(px(16.0))
                             .child(
                                 div()
@@ -938,7 +970,7 @@ impl Render for AiPanel {
                                     .flex_col()
                                     .gap(px(6.0))
                                     .min_w(px(0.0))
-                                    .max_w(px(760.0))
+                                    .max_w(px(780.0))
                                     .child(
                                         div()
                                             .text_xl()
@@ -958,39 +990,35 @@ impl Render for AiPanel {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(4.0))
+                                    .gap(px(6.0))
                                     .min_w(px(0.0))
                                     .when(two_column, |this| this.items_end())
                                     .when(!two_column, |this| this.items_start())
                                     .child(
                                         div()
-                                            .text_sm()
+                                            .text_xs()
+                                            .px(px(10.0))
+                                            .py(px(6.0))
+                                            .rounded(px(999.0))
+                                            .bg(if config_ready {
+                                                rgb(0xf6ffed)
+                                            } else {
+                                                rgb(0xfff2f0)
+                                            })
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(if config_ready {
                                                 rgb(0x389e0d)
                                             } else {
                                                 rgb(0xcf1322)
                                             })
-                                            .child(if config_ready {
-                                                "AI 连接已就绪"
-                                            } else {
-                                                "AI 连接未完成"
-                                            }),
+                                            .child(status_badge),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(rgb(0x8c8c8c))
                                             .line_height(relative(1.5))
-                                            .child(format!(
-                                                "{} · {}",
-                                                self.config.settings.protocol.label(),
-                                                if self.config.settings.model.trim().is_empty() {
-                                                    "未设置模型"
-                                                } else {
-                                                    self.config.settings.model.trim()
-                                                }
-                                            )),
+                                            .child(status_detail),
                                     ),
                             ),
                     )
@@ -1009,15 +1037,19 @@ impl Render for AiPanel {
                                     .flex()
                                     .flex_col()
                                     .gap(px(16.0))
-                                    .child(self.render_analysis_bar(cx))
-                                    .child(self.render_result_canvas(cx)),
+                                    .child(self.render_result_canvas(cx))
+                                    .child(self.render_evidence_panel()),
                             )
                             .child(
                                 div()
                                     .w_full()
                                     .min_w(px(0.0))
                                     .when(two_column, |this| this.max_w(px(360.0)))
-                                    .child(self.render_evidence_panel()),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(16.0))
+                                    .child(self.render_analysis_bar(cx))
+                                    .child(self.render_scope_filters_card(cx)),
                             ),
                     ),
             )
