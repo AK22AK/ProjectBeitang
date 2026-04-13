@@ -1,7 +1,8 @@
 use crate::platform;
 use crate::settings::ShortcutSettings;
 use anyhow::{anyhow, Result};
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::hotkey::{Code, HotKey, Modifiers as HotkeyModifiers};
+use gpui::Keystroke;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,22 +36,10 @@ impl ShortcutConfig {
         parse_hotkey(&self.quick_capture)
     }
 
-    pub fn open_main_hotkey(&self) -> Result<HotKey> {
-        parse_hotkey(&self.open_main)
-    }
-
-    pub fn open_tasks_hotkey(&self) -> Result<HotKey> {
-        parse_hotkey(&self.open_tasks)
-    }
-
-    pub fn open_records_hotkey(&self) -> Result<HotKey> {
-        parse_hotkey(&self.open_records)
-    }
-
     pub fn entries(&self) -> [(&'static str, &str); 4] {
         [
             ("快捷输入", self.quick_capture.as_str()),
-            ("打开主应用", self.open_main.as_str()),
+            ("看板面板", self.open_main.as_str()),
             ("任务面板", self.open_tasks.as_str()),
             ("记录面板", self.open_records.as_str()),
         ]
@@ -93,7 +82,7 @@ pub fn parse_hotkey(shortcut: &str) -> Result<HotKey> {
 pub fn validate_shortcut_config(config: &ShortcutConfig) -> Result<()> {
     let shortcuts = [
         ("快捷输入", config.quick_capture.as_str()),
-        ("打开主应用", config.open_main.as_str()),
+        ("看板面板", config.open_main.as_str()),
         ("任务面板", config.open_tasks.as_str()),
         ("记录面板", config.open_records.as_str()),
     ];
@@ -117,24 +106,108 @@ pub fn validate_shortcut_config(config: &ShortcutConfig) -> Result<()> {
 pub fn normalize_hotkey(shortcut: &str) -> Result<String> {
     let (modifiers, code) = parse_hotkey_parts(shortcut)?;
     let mut tokens = Vec::new();
-    if modifiers.contains(Modifiers::META) {
+    if modifiers.contains(HotkeyModifiers::META) {
         tokens.push("cmd".to_string());
     }
-    if modifiers.contains(Modifiers::CONTROL) {
+    if modifiers.contains(HotkeyModifiers::CONTROL) {
         tokens.push("ctrl".to_string());
     }
-    if modifiers.contains(Modifiers::ALT) {
+    if modifiers.contains(HotkeyModifiers::ALT) {
         tokens.push("alt".to_string());
     }
-    if modifiers.contains(Modifiers::SHIFT) {
+    if modifiers.contains(HotkeyModifiers::SHIFT) {
         tokens.push("shift".to_string());
     }
     tokens.push(code_to_token(code).to_string());
     Ok(tokens.join("+"))
 }
 
-fn parse_hotkey_parts(shortcut: &str) -> Result<(Modifiers, Code)> {
-    let mut modifiers = Modifiers::empty();
+pub fn format_shortcut_for_display(shortcut: &str) -> Result<String> {
+    let (modifiers, code) = parse_hotkey_parts(shortcut)?;
+    let mut tokens = Vec::new();
+    if modifiers.contains(HotkeyModifiers::META) {
+        #[cfg(target_os = "macos")]
+        tokens.push("Cmd".to_string());
+
+        #[cfg(target_os = "windows")]
+        tokens.push("Win".to_string());
+
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        tokens.push("Super".to_string());
+    }
+    if modifiers.contains(HotkeyModifiers::CONTROL) {
+        tokens.push("Ctrl".to_string());
+    }
+    if modifiers.contains(HotkeyModifiers::ALT) {
+        #[cfg(target_os = "macos")]
+        tokens.push("Option".to_string());
+
+        #[cfg(not(target_os = "macos"))]
+        tokens.push("Alt".to_string());
+    }
+    if modifiers.contains(HotkeyModifiers::SHIFT) {
+        tokens.push("Shift".to_string());
+    }
+    tokens.push(code_to_display_token(code).to_string());
+    Ok(tokens.join("+"))
+}
+
+pub fn shortcut_from_keystroke(keystroke: &Keystroke) -> Result<Option<String>> {
+    if keystroke.modifiers.function {
+        return Err(anyhow!("暂不支持将 Fn 组合设为快捷键"));
+    }
+
+    if is_modifier_key(&keystroke.key) {
+        return Ok(None);
+    }
+
+    if !keystroke.modifiers.modified() {
+        return Err(anyhow!("快捷键必须至少包含一个修饰键"));
+    }
+
+    let mut tokens = Vec::new();
+    if keystroke.modifiers.platform {
+        #[cfg(target_os = "macos")]
+        tokens.push("Cmd".to_string());
+
+        #[cfg(target_os = "windows")]
+        tokens.push("Win".to_string());
+
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        tokens.push("Super".to_string());
+    }
+    if keystroke.modifiers.control {
+        tokens.push("Ctrl".to_string());
+    }
+    if keystroke.modifiers.alt {
+        #[cfg(target_os = "macos")]
+        tokens.push("Option".to_string());
+
+        #[cfg(not(target_os = "macos"))]
+        tokens.push("Alt".to_string());
+    }
+    if keystroke.modifiers.shift {
+        tokens.push("Shift".to_string());
+    }
+    tokens.push(display_key_from_keystroke(&keystroke.key)?);
+    Ok(Some(tokens.join("+")))
+}
+
+pub fn keystroke_matches_shortcut(keystroke: &Keystroke, shortcut: &str) -> bool {
+    let Ok(Some(recorded_shortcut)) = shortcut_from_keystroke(keystroke) else {
+        return false;
+    };
+    let Ok(recorded_shortcut) = normalize_hotkey(&recorded_shortcut) else {
+        return false;
+    };
+    let Ok(expected_shortcut) = normalize_hotkey(shortcut) else {
+        return false;
+    };
+    recorded_shortcut == expected_shortcut
+}
+
+fn parse_hotkey_parts(shortcut: &str) -> Result<(HotkeyModifiers, Code)> {
+    let mut modifiers = HotkeyModifiers::empty();
     let mut code = None;
 
     for token in shortcut.split('+').map(|part| part.trim()) {
@@ -143,10 +216,10 @@ fn parse_hotkey_parts(shortcut: &str) -> Result<(Modifiers, Code)> {
         }
 
         match token.to_ascii_lowercase().as_str() {
-            "cmd" | "command" => modifiers |= Modifiers::META,
-            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
-            "alt" | "option" => modifiers |= Modifiers::ALT,
-            "shift" => modifiers |= Modifiers::SHIFT,
+            "cmd" | "command" | "win" | "super" => modifiers |= HotkeyModifiers::META,
+            "ctrl" | "control" => modifiers |= HotkeyModifiers::CONTROL,
+            "alt" | "option" => modifiers |= HotkeyModifiers::ALT,
+            "shift" => modifiers |= HotkeyModifiers::SHIFT,
             key => {
                 if code.is_some() {
                     return Err(anyhow!("快捷键 `{shortcut}` 包含多个主键"));
@@ -254,5 +327,64 @@ fn code_to_token(code: Code) -> &'static str {
         Code::Escape => "esc",
         Code::Tab => "tab",
         _ => "unsupported",
+    }
+}
+
+fn code_to_display_token(code: Code) -> &'static str {
+    match code {
+        Code::KeyA => "A",
+        Code::KeyB => "B",
+        Code::KeyC => "C",
+        Code::KeyD => "D",
+        Code::KeyE => "E",
+        Code::KeyF => "F",
+        Code::KeyG => "G",
+        Code::KeyH => "H",
+        Code::KeyI => "I",
+        Code::KeyJ => "J",
+        Code::KeyK => "K",
+        Code::KeyL => "L",
+        Code::KeyM => "M",
+        Code::KeyN => "N",
+        Code::KeyO => "O",
+        Code::KeyP => "P",
+        Code::KeyQ => "Q",
+        Code::KeyR => "R",
+        Code::KeyS => "S",
+        Code::KeyT => "T",
+        Code::KeyU => "U",
+        Code::KeyV => "V",
+        Code::KeyW => "W",
+        Code::KeyX => "X",
+        Code::KeyY => "Y",
+        Code::KeyZ => "Z",
+        Code::Enter => "Enter",
+        Code::Escape => "Esc",
+        Code::Tab => "Tab",
+        _ => code_to_token(code),
+    }
+}
+
+fn is_modifier_key(key: &str) -> bool {
+    matches!(
+        key,
+        "control" | "alt" | "shift" | "platform" | "command" | "cmd" | "super" | "win" | "fn"
+    )
+}
+
+fn display_key_from_keystroke(key: &str) -> Result<String> {
+    if is_modifier_key(key) {
+        return Err(anyhow!("请继续按下主键完成快捷键录制"));
+    }
+
+    if key.len() == 1 {
+        return Ok(key.to_ascii_uppercase());
+    }
+
+    match key {
+        "enter" | "return" => Ok("Enter".to_string()),
+        "escape" | "esc" => Ok("Esc".to_string()),
+        "tab" => Ok("Tab".to_string()),
+        _ => Err(anyhow!("不支持将 `{key}` 设为快捷键")),
     }
 }

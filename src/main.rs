@@ -2,7 +2,6 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
@@ -11,11 +10,13 @@ use robinne::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, quick_add_overlay_keystroke, search_keystroke,
     settings_keystroke,
 };
-use robinne::config::{validate_shortcut_config, ShortcutConfig};
+use robinne::config::{
+    format_shortcut_for_display, keystroke_matches_shortcut, shortcut_from_keystroke,
+    validate_shortcut_config, ShortcutConfig,
+};
 use robinne::data_management::app_data_dir;
 use robinne::platform::{
-    app_shortcut_scope_description, app_shortcuts_intro, build_app_menus,
-    global_shortcut_scope_description, prewarm_file_dialog,
+    app_shortcut_scope_description, app_shortcuts_intro, build_app_menus, prewarm_file_dialog,
 };
 use robinne::settings::{
     load_app_settings, save_app_settings, settings_file_path, AppSettings, QuickAddDefaultMode,
@@ -108,38 +109,21 @@ impl SettingsSection {
 #[derive(Clone, Copy)]
 enum GlobalShortcutAction {
     QuickCapture,
-    OpenMain,
-    OpenTasks,
-    OpenRecords,
 }
 
 #[derive(Clone, Copy)]
 struct GlobalHotkeyBindings {
     quick_capture: global_hotkey::hotkey::HotKey,
-    open_main: global_hotkey::hotkey::HotKey,
-    open_tasks: global_hotkey::hotkey::HotKey,
-    open_records: global_hotkey::hotkey::HotKey,
 }
 
 impl GlobalHotkeyBindings {
-    fn all(self) -> [global_hotkey::hotkey::HotKey; 4] {
-        [
-            self.quick_capture,
-            self.open_main,
-            self.open_tasks,
-            self.open_records,
-        ]
+    fn all(self) -> [global_hotkey::hotkey::HotKey; 1] {
+        [self.quick_capture]
     }
 
     fn action_for_id(self, id: u32) -> Option<GlobalShortcutAction> {
         if id == self.quick_capture.id() {
             Some(GlobalShortcutAction::QuickCapture)
-        } else if id == self.open_main.id() {
-            Some(GlobalShortcutAction::OpenMain)
-        } else if id == self.open_tasks.id() {
-            Some(GlobalShortcutAction::OpenTasks)
-        } else if id == self.open_records.id() {
-            Some(GlobalShortcutAction::OpenRecords)
         } else {
             None
         }
@@ -169,19 +153,9 @@ impl GlobalHotkeyController {
     }
 
     fn apply_shortcuts(&mut self, config: &ShortcutConfig) -> Result<(), String> {
-        validate_shortcut_config(config).map_err(|err| err.to_string())?;
         let quick_capture = config
             .quick_capture_hotkey()
             .map_err(|err| format!("解析快捷输入失败: {}", err))?;
-        let open_main = config
-            .open_main_hotkey()
-            .map_err(|err| format!("解析打开主应用失败: {}", err))?;
-        let open_tasks = config
-            .open_tasks_hotkey()
-            .map_err(|err| format!("解析任务面板失败: {}", err))?;
-        let open_records = config
-            .open_records_hotkey()
-            .map_err(|err| format!("解析记录面板失败: {}", err))?;
         let manager = self
             .manager
             .as_ref()
@@ -199,24 +173,12 @@ impl GlobalHotkeyController {
             }
         }
 
-        let bindings = GlobalHotkeyBindings {
-            quick_capture,
-            open_main,
-            open_tasks,
-            open_records,
-        };
+        let bindings = GlobalHotkeyBindings { quick_capture };
 
-        for (hotkey, label) in [
-            (bindings.quick_capture, config.quick_capture.as_str()),
-            (bindings.open_main, config.open_main.as_str()),
-            (bindings.open_tasks, config.open_tasks.as_str()),
-            (bindings.open_records, config.open_records.as_str()),
-        ] {
-            manager
-                .register(hotkey)
-                .map_err(|err| format!("注册快捷键 `{label}` 失败: {}", err))?;
-            eprintln!("[Global Hotkey] Registered {}", label);
-        }
+        manager
+            .register(bindings.quick_capture)
+            .map_err(|err| format!("注册快捷键 `{}` 失败: {}", config.quick_capture, err))?;
+        eprintln!("[Global Hotkey] Registered {}", config.quick_capture);
 
         self.bindings = Some(bindings);
         Ok(())
@@ -272,6 +234,52 @@ fn current_platform_label() -> &'static str {
 enum SettingsLayoutMode {
     Sidebar,
     TopTabs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShortcutField {
+    QuickCapture,
+    OpenMain,
+    OpenTasks,
+    OpenRecords,
+}
+
+impl ShortcutField {
+    fn label(self) -> &'static str {
+        match self {
+            Self::QuickCapture => "快捷输入",
+            Self::OpenMain => "看板面板",
+            Self::OpenTasks => "任务面板",
+            Self::OpenRecords => "记录面板",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::QuickCapture => "quick-capture",
+            Self::OpenMain => "open-main",
+            Self::OpenTasks => "open-tasks",
+            Self::OpenRecords => "open-records",
+        }
+    }
+
+    fn value(self, config: &ShortcutConfig) -> &str {
+        match self {
+            Self::QuickCapture => &config.quick_capture,
+            Self::OpenMain => &config.open_main,
+            Self::OpenTasks => &config.open_tasks,
+            Self::OpenRecords => &config.open_records,
+        }
+    }
+
+    fn set_value(self, config: &mut ShortcutConfig, value: String) {
+        match self {
+            Self::QuickCapture => config.quick_capture = value,
+            Self::OpenMain => config.open_main = value,
+            Self::OpenTasks => config.open_tasks = value,
+            Self::OpenRecords => config.open_records = value,
+        }
+    }
 }
 
 fn install_app_shortcuts_and_menus(
@@ -451,30 +459,6 @@ fn main() {
                                     main_window_for_hotkey.clone(),
                                     quick_add_for_hotkey.clone(),
                                     global_hotkeys_for_actions.clone(),
-                                ),
-                                GlobalShortcutAction::OpenMain => ensure_main_window(
-                                    cx,
-                                    &main_window_for_hotkey,
-                                    &store_for_hotkey,
-                                    &quick_add_for_hotkey,
-                                    &global_hotkeys_for_actions,
-                                    None,
-                                ),
-                                GlobalShortcutAction::OpenTasks => ensure_main_window(
-                                    cx,
-                                    &main_window_for_hotkey,
-                                    &store_for_hotkey,
-                                    &quick_add_for_hotkey,
-                                    &global_hotkeys_for_actions,
-                                    Some(Panel::Tasks),
-                                ),
-                                GlobalShortcutAction::OpenRecords => ensure_main_window(
-                                    cx,
-                                    &main_window_for_hotkey,
-                                    &store_for_hotkey,
-                                    &quick_add_for_hotkey,
-                                    &global_hotkeys_for_actions,
-                                    Some(Panel::Records),
                                 ),
                             });
                         }
@@ -1220,10 +1204,8 @@ pub struct MainView {
     notes_panel: Entity<NotePanel>,
     quick_add_overlay: Option<Entity<QuickAddWindow>>,
     shortcut_config: ShortcutConfig,
-    shortcut_quick_capture_input: Entity<InputState>,
-    shortcut_open_main_input: Entity<InputState>,
-    shortcut_open_tasks_input: Entity<InputState>,
-    shortcut_open_records_input: Entity<InputState>,
+    draft_shortcut_config: ShortcutConfig,
+    active_shortcut_capture: Option<ShortcutField>,
     settings_notice: Option<String>,
     settings_error: Option<String>,
     global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
@@ -1253,26 +1235,6 @@ impl MainView {
         let task_panel = cx.new(|cx| TaskPanel::new(store_for_panels.clone(), window, cx));
         let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels.clone(), window, cx));
         let notes_panel = cx.new(|cx| NotePanel::new(store_for_panels, window, cx));
-        let shortcut_quick_capture_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_value(&shortcut_config.quick_capture, window, cx);
-            input
-        });
-        let shortcut_open_main_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_value(&shortcut_config.open_main, window, cx);
-            input
-        });
-        let shortcut_open_tasks_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_value(&shortcut_config.open_tasks, window, cx);
-            input
-        });
-        let shortcut_open_records_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_value(&shortcut_config.open_records, window, cx);
-            input
-        });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -1305,11 +1267,9 @@ impl MainView {
             timeline_panel,
             notes_panel,
             quick_add_overlay: None,
-            shortcut_config,
-            shortcut_quick_capture_input,
-            shortcut_open_main_input,
-            shortcut_open_tasks_input,
-            shortcut_open_records_input,
+            shortcut_config: shortcut_config.clone(),
+            draft_shortcut_config: shortcut_config,
+            active_shortcut_capture: None,
             settings_notice: None,
             settings_error: None,
             global_hotkeys,
@@ -1537,6 +1497,8 @@ impl MainView {
         if panel == Panel::Settings && self.current_panel != Panel::Settings {
             self.current_settings_section = SettingsSection::General;
             self.refresh_settings_state(window, cx);
+        } else if panel != Panel::Settings {
+            self.active_shortcut_capture = None;
         }
 
         if self.current_panel != panel {
@@ -1566,27 +1528,13 @@ impl MainView {
         }
     }
 
-    fn sync_shortcut_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.shortcut_quick_capture_input.update(cx, |input, cx| {
-            input.set_value(&self.shortcut_config.quick_capture, window, cx);
-        });
-        self.shortcut_open_main_input.update(cx, |input, cx| {
-            input.set_value(&self.shortcut_config.open_main, window, cx);
-        });
-        self.shortcut_open_tasks_input.update(cx, |input, cx| {
-            input.set_value(&self.shortcut_config.open_tasks, window, cx);
-        });
-        self.shortcut_open_records_input.update(cx, |input, cx| {
-            input.set_value(&self.shortcut_config.open_records, window, cx);
-        });
-    }
-
     fn refresh_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.app_settings = load_settings_or_default();
         self.shortcut_config = ShortcutConfig::from(&self.app_settings.shortcuts);
+        self.draft_shortcut_config = self.shortcut_config.clone();
+        self.active_shortcut_capture = None;
         self.settings_notice = None;
         self.settings_error = None;
-        self.sync_shortcut_inputs(window, cx);
         self.data_management_panel
             .update(cx, |panel, cx| panel.reload_settings(window, cx));
     }
@@ -1628,26 +1576,31 @@ impl MainView {
         self.persist_settings("已保存提醒通知设置", cx);
     }
 
-    fn shortcut_config_from_inputs(&self, cx: &App) -> ShortcutConfig {
-        let quick_capture = self
-            .shortcut_quick_capture_input
-            .read(cx)
-            .text()
-            .to_string();
-        let open_main = self.shortcut_open_main_input.read(cx).text().to_string();
-        let open_tasks = self.shortcut_open_tasks_input.read(cx).text().to_string();
-        let open_records = self.shortcut_open_records_input.read(cx).text().to_string();
-
-        ShortcutConfig {
-            quick_capture: quick_capture.trim().to_string(),
-            open_main: open_main.trim().to_string(),
-            open_tasks: open_tasks.trim().to_string(),
-            open_records: open_records.trim().to_string(),
+    fn panel_for_keystroke(&self, keystroke: &Keystroke) -> Option<Panel> {
+        if keystroke_matches_shortcut(keystroke, &self.shortcut_config.open_main) {
+            return Some(Panel::Dashboard);
         }
+
+        if keystroke_matches_shortcut(keystroke, &self.shortcut_config.open_tasks) {
+            return Some(Panel::Tasks);
+        }
+
+        if keystroke_matches_shortcut(keystroke, &self.shortcut_config.open_records) {
+            return Some(Panel::Records);
+        }
+
+        if !keystroke.modifiers.platform {
+            return None;
+        }
+
+        main_panel_shortcuts()
+            .into_iter()
+            .find(|(key, _)| *key == keystroke.key.as_str())
+            .map(|(_, panel)| panel)
     }
 
     fn save_shortcut_settings(&mut self, cx: &mut Context<Self>) {
-        let next_config = self.shortcut_config_from_inputs(cx);
+        let next_config = self.draft_shortcut_config.clone();
         if let Err(err) = validate_shortcut_config(&next_config) {
             self.settings_notice = None;
             self.settings_error = Some(err.to_string());
@@ -1667,16 +1620,72 @@ impl MainView {
         }
 
         self.shortcut_config = next_config.clone();
+        self.draft_shortcut_config = next_config.clone();
+        self.active_shortcut_capture = None;
         self.app_settings.shortcuts = ShortcutSettings::from(&next_config);
-        self.persist_settings("已保存全局快捷键", cx);
+        self.persist_settings("已保存快捷键设置", cx);
     }
 
-    fn restore_default_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.shortcut_config = ShortcutConfig::default();
-        self.sync_shortcut_inputs(window, cx);
+    fn restore_default_shortcuts(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.draft_shortcut_config = ShortcutConfig::default();
+        self.active_shortcut_capture = None;
         self.settings_notice = Some("已恢复默认快捷键，点击保存后生效".to_string());
         self.settings_error = None;
         cx.notify();
+    }
+
+    fn start_shortcut_capture(
+        &mut self,
+        field: ShortcutField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_shortcut_capture = Some(field);
+        self.settings_notice = None;
+        self.settings_error = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn handle_shortcut_capture_keydown(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(field) = self.active_shortcut_capture else {
+            return false;
+        };
+
+        window.prevent_default();
+        cx.stop_propagation();
+
+        if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
+            self.active_shortcut_capture = None;
+            self.settings_notice = Some("已取消快捷键录制".to_string());
+            self.settings_error = None;
+            cx.notify();
+            return true;
+        }
+
+        match shortcut_from_keystroke(&event.keystroke) {
+            Ok(Some(shortcut)) => {
+                field.set_value(&mut self.draft_shortcut_config, shortcut);
+                self.active_shortcut_capture = None;
+                self.settings_notice =
+                    Some(format!("已更新{}，点击保存快捷键后生效", field.label()));
+                self.settings_error = None;
+                cx.notify();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.settings_notice = None;
+                self.settings_error = Some(err.to_string());
+                cx.notify();
+            }
+        }
+
+        true
     }
 
     fn render_settings_message(&self) -> Option<AnyElement> {
@@ -1759,6 +1768,7 @@ impl MainView {
             )
             .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 this.current_settings_section = section;
+                this.active_shortcut_capture = None;
                 if section == SettingsSection::DataSync {
                     this.data_management_panel
                         .update(cx, |panel, cx| panel.reload_settings(window, cx));
@@ -1795,28 +1805,30 @@ impl MainView {
                 this.child(message)
             })
             .child(self.render_shortcut_group(
-                "应用内快捷键",
+                "固定应用内快捷键",
                 app_shortcut_scope_description(),
                 app_shortcut_entries,
             ))
             .child(render_settings_card(
-                "全局快捷键",
-                global_shortcut_scope_description(),
+                "应用内面板切换",
+                "仅在 Robinne 前台时生效，用于切换看板、任务和记录面板。",
                 vec![
-                    render_shortcut_input_row("快捷输入", &self.shortcut_quick_capture_input)
-                        .into_any_element(),
-                    render_shortcut_input_row("打开主应用", &self.shortcut_open_main_input)
-                        .into_any_element(),
-                    render_shortcut_input_row("任务面板", &self.shortcut_open_tasks_input)
-                        .into_any_element(),
-                    render_shortcut_input_row("记录面板", &self.shortcut_open_records_input)
-                        .into_any_element(),
+                    self.render_shortcut_capture_row(ShortcutField::OpenMain, cx),
+                    self.render_shortcut_capture_row(ShortcutField::OpenTasks, cx),
+                    self.render_shortcut_capture_row(ShortcutField::OpenRecords, cx),
+                ],
+            ))
+            .child(render_settings_card(
+                "全局快捷键",
+                "即使 Robinne 不在前台也可触发，目前只保留快捷输入。",
+                vec![
+                    self.render_shortcut_capture_row(ShortcutField::QuickCapture, cx),
                     div()
                         .flex()
                         .gap(px(10.0))
                         .child(
                             Button::new("save-global-shortcuts")
-                                .child("保存快捷键")
+                                .child("保存快捷键设置")
                                 .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                     this.save_shortcut_settings(cx);
                                 })),
@@ -1891,6 +1903,108 @@ impl MainView {
                         )
                 }),
             ))
+    }
+
+    fn render_shortcut_capture_row(
+        &self,
+        field: ShortcutField,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_active = self.active_shortcut_capture == Some(field);
+        let shortcut_value = field.value(&self.draft_shortcut_config);
+        let display_value = format_shortcut_for_display(shortcut_value)
+            .unwrap_or_else(|_| shortcut_value.to_string());
+        let row_id = format!("shortcut-capture-row-{}", field.id());
+        let button_id = format!("shortcut-capture-button-{}", field.id());
+
+        div()
+            .id(row_id)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.0))
+            .p(px(14.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(if is_active {
+                rgb(0x91caff)
+            } else {
+                rgb(0xf0f0f0)
+            })
+            .bg(if is_active {
+                rgb(0xe6f4ff)
+            } else {
+                rgb(0xfafafa)
+            })
+            .cursor_pointer()
+            .hover(|style| {
+                style.bg(if is_active {
+                    rgb(0xe6f4ff)
+                } else {
+                    rgb(0xf5f5f5)
+                })
+            })
+            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                this.start_shortcut_capture(field, window, cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x262626))
+                            .child(field.label()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x8c8c8c))
+                            .line_height(relative(1.5))
+                            .child(if is_active {
+                                "按下新的快捷键组合，单独按 Esc 取消".to_string()
+                            } else {
+                                "点击后开始录制新的快捷键组合".to_string()
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(999.0))
+                            .bg(if is_active {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(0xf0f5ff)
+                            })
+                            .text_sm()
+                            .font_family(".SystemUIFont")
+                            .text_color(if is_active {
+                                rgb(0x0958d9)
+                            } else {
+                                rgb(0x262626)
+                            })
+                            .child(display_value),
+                    )
+                    .child(
+                        Button::new(button_id)
+                            .child(if is_active { "重新录制" } else { "录制" })
+                            .small()
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                this.start_shortcut_capture(field, window, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_general_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2217,22 +2331,6 @@ fn render_settings_card(
         .into_any_element()
 }
 
-fn render_shortcut_input_row(label: &'static str, input: &Entity<InputState>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .child(
-            div()
-                .w(px(88.0))
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(0x262626))
-                .child(label),
-        )
-        .child(div().flex_1().child(Input::new(input)))
-}
-
 fn render_info_row(label: &'static str, value: &str) -> impl IntoElement {
     div()
         .flex()
@@ -2301,19 +2399,13 @@ impl Render for MainView {
             .bg(rgb(0xf0f0f0))
             .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if !event.keystroke.modifiers.platform {
-                    return;
-                }
-
-                if event.keystroke.key == "0" {
-                    window.activate_window();
-                    return;
-                }
-
-                if let Some((_, panel)) = main_panel_shortcuts()
-                    .into_iter()
-                    .find(|(key, _)| *key == event.keystroke.key.as_str())
+                if this.current_panel == Panel::Settings
+                    && this.handle_shortcut_capture_keydown(event, window, cx)
                 {
+                    return;
+                }
+
+                if let Some(panel) = this.panel_for_keystroke(&event.keystroke) {
                     this.switch_to_panel(panel, window, cx);
                 }
             }))

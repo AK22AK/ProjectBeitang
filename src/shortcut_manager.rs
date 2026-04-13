@@ -26,14 +26,6 @@ impl ShortcutManager {
             config.quick_capture_hotkey()?,
             &config.quick_capture,
         )?;
-        let open_main = register_hotkey(&manager, config.open_main_hotkey()?, &config.open_main)?;
-        let open_tasks =
-            register_hotkey(&manager, config.open_tasks_hotkey()?, &config.open_tasks)?;
-        let open_records = register_hotkey(
-            &manager,
-            config.open_records_hotkey()?,
-            &config.open_records,
-        )?;
 
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
@@ -43,9 +35,6 @@ impl ShortcutManager {
                     if event.state == HotKeyState::Released {
                         let shortcut_event = match event.id {
                             id if id == quick_capture.id() => Some(ShortcutEvent::QuickCapture),
-                            id if id == open_main.id() => Some(ShortcutEvent::OpenMain),
-                            id if id == open_tasks.id() => Some(ShortcutEvent::OpenTasks),
-                            id if id == open_records.id() => Some(ShortcutEvent::OpenRecords),
                             _ => None,
                         };
 

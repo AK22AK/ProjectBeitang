@@ -1333,12 +1333,10 @@ impl QuickAddWindow {
                                         .map(|(_, _, border_color, _)| *border_color)
                                         .unwrap_or_else(|| rgb(0xd9e7f5).into()),
                                 )
-                                .bg(
-                                    feedback_style
-                                        .as_ref()
-                                        .map(|(_, bg_color, _, _)| *bg_color)
-                                        .unwrap_or_else(|| rgb(0xffffff).into()),
-                                )
+                                .bg(feedback_style
+                                    .as_ref()
+                                    .map(|(_, bg_color, _, _)| *bg_color)
+                                    .unwrap_or_else(|| rgb(0xffffff).into()))
                                 .p(px(4.0))
                                 .child(
                                     v_flex()
@@ -1350,10 +1348,9 @@ impl QuickAddWindow {
                                                 .items_start()
                                                 .gap(px(4.0))
                                                 .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w(px(0.0))
-                                                        .child(Input::new(&self.input_state).flex_1()),
+                                                    div().flex_1().min_w(px(0.0)).child(
+                                                        Input::new(&self.input_state).flex_1(),
+                                                    ),
                                                 )
                                                 .child(self.render_inline_attachment_trigger(cx)),
                                         )
@@ -1374,16 +1371,13 @@ impl QuickAddWindow {
                             el.child(div().text_sm().text_color(rgb(0xff4d4f)).child(err))
                         })
                         .when(!self.pending_attachments.is_empty(), |el| {
-                            el.child(
-                                h_flex().gap(px(8.0)).flex_wrap().children(
-                                    self.pending_attachments
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(idx, attachment)| {
-                                            self.render_pending_attachment_card(idx, attachment, cx)
-                                        }),
+                            el.child(h_flex().gap(px(8.0)).flex_wrap().children(
+                                self.pending_attachments.iter().enumerate().map(
+                                    |(idx, attachment)| {
+                                        self.render_pending_attachment_card(idx, attachment, cx)
+                                    },
                                 ),
-                            )
+                            ))
                         })
                         .children(self.render_feedback_message())
                         .child(
@@ -1418,12 +1412,10 @@ impl QuickAddWindow {
                             .map(|(_, _, border_color, _)| *border_color)
                             .unwrap_or_else(|| rgb(0xd6e4f0).into()),
                     )
-                    .bg(
-                        feedback_style
-                            .as_ref()
-                            .map(|(_, bg_color, _, _)| *bg_color)
-                            .unwrap_or_else(|| rgb(0xffffff).into()),
-                    )
+                    .bg(feedback_style
+                        .as_ref()
+                        .map(|(_, bg_color, _, _)| *bg_color)
+                        .unwrap_or_else(|| rgb(0xffffff).into()))
                     .shadow_lg()
                     .p(px(6.0))
                     .child(
@@ -1599,12 +1591,7 @@ impl Render for QuickAddWindow {
                 window.prevent_default();
                 cx.stop_propagation();
                 let draft_text = this.session.borrow().draft_text.clone();
-                this.try_submit_and_open_with_text(
-                    draft_text,
-                    this.mode.destination(),
-                    window,
-                    cx,
-                );
+                this.try_submit_and_open_with_text(draft_text, this.mode.destination(), window, cx);
                 return;
             }
 

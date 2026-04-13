@@ -1,6 +1,9 @@
-use gpui::px;
+use gpui::{px, Keystroke, Modifiers};
 use robinne::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
-use robinne::config::{parse_hotkey, ShortcutConfig};
+use robinne::config::{
+    format_shortcut_for_display, keystroke_matches_shortcut, parse_hotkey, shortcut_from_keystroke,
+    ShortcutConfig,
+};
 use robinne::models::{Priority, Record};
 use robinne::platform::{
     app_shortcut_keystrokes, default_global_shortcuts, primary_modifier_label,
@@ -47,6 +50,47 @@ fn test_parse_hotkey_rejects_invalid_shortcuts() {
 }
 
 #[test]
+fn test_format_shortcut_for_display_normalizes_tokens() {
+    assert_eq!(
+        format_shortcut_for_display("cmd+shift+t").unwrap(),
+        "Cmd+Shift+T"
+    );
+    assert_eq!(format_shortcut_for_display("ctrl+2").unwrap(), "Ctrl+2");
+}
+
+#[test]
+fn test_shortcut_from_keystroke_formats_modifier_combo() {
+    let keystroke = Keystroke {
+        modifiers: Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        },
+        key: "t".to_string(),
+        key_char: None,
+    };
+
+    assert_eq!(
+        shortcut_from_keystroke(&keystroke).unwrap(),
+        Some("Ctrl+Shift+T".to_string())
+    );
+}
+
+#[test]
+fn test_shortcut_from_keystroke_ignores_modifier_only_input() {
+    let keystroke = Keystroke {
+        modifiers: Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        key: "shift".to_string(),
+        key_char: None,
+    };
+
+    assert_eq!(shortcut_from_keystroke(&keystroke).unwrap(), None);
+}
+
+#[test]
 fn test_app_shortcut_entries_are_not_in_global_shortcut_config() {
     let config_labels = ShortcutConfig::default()
         .entries()
@@ -82,8 +126,6 @@ fn test_main_panel_shortcuts_exclude_bottom_sidebar_panels() {
         main_panel_shortcuts(),
         [
             ("1", Panel::Dashboard),
-            ("2", Panel::Tasks),
-            ("3", Panel::Records),
             ("4", Panel::Timeline),
             ("5", Panel::AI),
         ]
@@ -92,6 +134,22 @@ fn test_main_panel_shortcuts_exclude_bottom_sidebar_panels() {
     assert!(main_panel_shortcuts()
         .into_iter()
         .all(|(_, panel)| !matches!(panel, Panel::Search | Panel::Settings)));
+}
+
+#[test]
+fn test_keystroke_matches_shortcut_uses_normalized_tokens() {
+    let keystroke = Keystroke {
+        modifiers: Modifiers {
+            platform: true,
+            shift: true,
+            ..Default::default()
+        },
+        key: "u".to_string(),
+        key_char: None,
+    };
+
+    assert!(keystroke_matches_shortcut(&keystroke, "cmd+shift+u"));
+    assert!(!keystroke_matches_shortcut(&keystroke, "cmd+shift+t"));
 }
 
 #[test]

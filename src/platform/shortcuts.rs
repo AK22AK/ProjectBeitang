@@ -91,12 +91,12 @@ pub fn app_shortcut_entries() -> [(&'static str, &'static str); 3] {
 pub fn app_shortcuts_intro() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        "应用内快捷键由系统菜单统一管理，全局快捷键继续用于跨应用唤起。"
+        "固定应用内快捷键会显示在系统菜单中；面板切换类快捷键只在 Robinne 前台时生效。"
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        "应用内快捷键只在 Robinne 前台时生效，全局快捷键继续用于跨应用唤起。"
+        "固定应用内快捷键和面板切换快捷键都只在 Robinne 前台时生效。"
     }
 }
 
@@ -113,7 +113,7 @@ pub fn app_shortcut_scope_description() -> &'static str {
 }
 
 pub fn global_shortcut_scope_description() -> &'static str {
-    "即使应用未聚焦也可触发，后续版本会在这里补充自定义编辑能力。"
+    "即使应用未聚焦也可触发。"
 }
 
 pub fn quick_add_placeholder(is_task: bool) -> String {

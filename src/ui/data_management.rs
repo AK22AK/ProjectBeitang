@@ -17,6 +17,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::v_flex;
+use gpui_component::Sizable;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -920,8 +921,9 @@ impl DataManagementPanel {
                     .into_any_element(),
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(10.0))
-                    .child(self.render_inline_action_button(
+                    .child(self.render_compact_inline_action_button(
                         "save-git-sync-config",
                         "保存配置",
                         false,
@@ -930,7 +932,7 @@ impl DataManagementPanel {
                             this.save_git_sync_config(cx);
                         }),
                     ))
-                    .child(self.render_inline_action_button(
+                    .child(self.render_compact_inline_action_button(
                         "verify-git-remote",
                         "校验远端",
                         false,
@@ -939,7 +941,7 @@ impl DataManagementPanel {
                             this.verify_git_remote(cx);
                         }),
                     ))
-                    .child(self.render_inline_action_button(
+                    .child(self.render_compact_inline_action_button(
                         "push-git-remote",
                         "推送到远端",
                         true,
@@ -948,7 +950,7 @@ impl DataManagementPanel {
                             this.push_to_git_remote(cx);
                         }),
                     ))
-                    .child(self.render_inline_action_button(
+                    .child(self.render_compact_inline_action_button(
                         "pull-git-remote",
                         "从远端拉取",
                         false,
@@ -1250,6 +1252,32 @@ impl DataManagementPanel {
     {
         let button = Button::new(id.into())
             .child(label)
+            .when(selected, |button| {
+                button.with_variant(gpui_component::button::ButtonVariant::Primary)
+            })
+            .when(!enabled, |button| button.text_color(rgb(0x8c8c8c)));
+
+        if enabled {
+            button.on_click(on_click).into_any_element()
+        } else {
+            button.into_any_element()
+        }
+    }
+
+    fn render_compact_inline_action_button<F>(
+        &self,
+        id: impl Into<String>,
+        label: &'static str,
+        selected: bool,
+        enabled: bool,
+        on_click: F,
+    ) -> AnyElement
+    where
+        F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    {
+        let button = Button::new(id.into())
+            .child(label)
+            .small()
             .when(selected, |button| {
                 button.with_variant(gpui_component::button::ButtonVariant::Primary)
             })

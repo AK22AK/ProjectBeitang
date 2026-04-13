@@ -17,11 +17,9 @@ pub fn app_shortcut_entries() -> [(&'static str, &'static str); 3] {
     platform::app_shortcut_entries()
 }
 
-pub fn main_panel_shortcuts() -> [(&'static str, Panel); 5] {
+pub fn main_panel_shortcuts() -> [(&'static str, Panel); 3] {
     [
         ("1", Panel::Dashboard),
-        ("2", Panel::Tasks),
-        ("3", Panel::Records),
         ("4", Panel::Timeline),
         ("5", Panel::AI),
     ]
