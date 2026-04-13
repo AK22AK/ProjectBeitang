@@ -5,7 +5,7 @@ use crate::ai::{
 use crate::platform::load_secret;
 use crate::settings::load_app_settings;
 use crate::store::Store;
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use gpui::{prelude::*, ClipboardItem, *};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::date_picker::{DatePicker, DatePickerState};
@@ -14,6 +14,7 @@ use gpui_component::{Disableable, Sizable};
 use std::collections::BTreeSet;
 
 const AI_TWO_COLUMN_BREAKPOINT: Pixels = px(1280.0);
+const AI_EVIDENCE_SAMPLE_LIMIT: usize = 6;
 
 #[derive(Clone)]
 struct AiRuntimeConfig {
@@ -320,6 +321,32 @@ impl AiPanel {
         .detach();
     }
 
+    fn set_quick_range(&mut self, days: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let end = Local::now().date_naive();
+        let start = end - Duration::days(days.saturating_sub(1));
+        self.start_date_picker.update(cx, |picker, cx| {
+            picker.set_date(start, window, cx);
+        });
+        self.end_date_picker.update(cx, |picker, cx| {
+            picker.set_date(end, window, cx);
+        });
+        self.result = None;
+        self.reload_preview(cx);
+    }
+
+    fn set_current_week_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let end = Local::now().date_naive();
+        let start = end - Duration::days(end.weekday().num_days_from_monday() as i64);
+        self.start_date_picker.update(cx, |picker, cx| {
+            picker.set_date(start, window, cx);
+        });
+        self.end_date_picker.update(cx, |picker, cx| {
+            picker.set_date(end, window, cx);
+        });
+        self.result = None;
+        self.reload_preview(cx);
+    }
+
     fn copy_result(&mut self, cx: &mut Context<Self>) {
         let Some(result) = self.result.clone() else {
             return;
@@ -377,43 +404,502 @@ impl AiPanel {
             .map(|message| render_message_box(message, true))
     }
 
-    fn render_preview_card(&self) -> AnyElement {
-        let Some(preview) = self.preview.as_ref() else {
-            return render_card(
-                "上下文预览",
-                "根据当前筛选范围预估将发送给 AI 的上下文。",
-                vec![div()
-                    .text_sm()
-                    .text_color(rgb(0x8c8c8c))
-                    .child("还没有可用的上下文。")
-                    .into_any_element()],
-            );
+    fn render_analysis_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        render_card(
+            "分析条",
+            "先确定本次分析范围，再生成结果。筛选控件收敛在这一块，不再分散成多张表单卡片。",
+            vec![
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(10.0))
+                    .child(self.render_mode_button(AiSummaryMode::PastSummary, "ai-mode-past", cx))
+                    .child(self.render_mode_button(
+                        AiSummaryMode::FutureTasks,
+                        "ai-mode-future",
+                        cx,
+                    ))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(self.render_filter_chip(
+                        "ai-range-7d",
+                        "最近 7 天",
+                        false,
+                        cx.listener(|this, _event, window, cx| {
+                            this.set_quick_range(7, window, cx);
+                        }),
+                    ))
+                    .child(self.render_filter_chip(
+                        "ai-range-week",
+                        "本周",
+                        false,
+                        cx.listener(|this, _event, window, cx| {
+                            this.set_current_week_range(window, cx);
+                        }),
+                    ))
+                    .child(self.render_filter_chip(
+                        "ai-range-30d",
+                        "最近 30 天",
+                        false,
+                        cx.listener(|this, _event, window, cx| {
+                            this.set_quick_range(30, window, cx);
+                        }),
+                    ))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(12.0))
+                    .items_end()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .min_w(px(220.0))
+                            .child(div().text_sm().text_color(rgb(0x595959)).child("开始日期"))
+                            .child(DatePicker::new(&self.start_date_picker)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .min_w(px(220.0))
+                            .child(div().text_sm().text_color(rgb(0x595959)).child("结束日期"))
+                            .child(DatePicker::new(&self.end_date_picker)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(10.0))
+                            .child(
+                                Button::new("ai-refresh-preview")
+                                    .child(if self.preview_loading {
+                                        "刷新中..."
+                                    } else {
+                                        "刷新预览"
+                                    })
+                                    .when(self.preview_loading, |button| button.disabled(true))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.result = None;
+                                        this.reload_preview(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("ai-generate")
+                                    .child(if self.generating {
+                                        "生成中..."
+                                    } else {
+                                        "生成总结"
+                                    })
+                                    .when(!self.generating, |button| {
+                                        button.with_variant(
+                                            gpui_component::button::ButtonVariant::Primary,
+                                        )
+                                    })
+                                    .disabled(self.generating)
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.generate(cx);
+                                    })),
+                            )
+                            .into_any_element(),
+                    )
+                    .into_any_element(),
+                self.render_filter_section(
+                    "标签",
+                    &self.available_tags,
+                    &self.selected_tags,
+                    "当前未建立标签，先按时间范围分析。",
+                    "清除标签",
+                    cx,
+                    true,
+                ),
+                self.render_filter_section(
+                    "人物",
+                    &self.available_persons,
+                    &self.selected_persons,
+                    "当前未建立人物关联，先按时间范围分析。",
+                    "清除人物",
+                    cx,
+                    false,
+                ),
+            ],
+        )
+    }
+
+    fn render_filter_section(
+        &self,
+        title: &'static str,
+        values: &[String],
+        selected: &BTreeSet<String>,
+        empty_hint: &'static str,
+        clear_label: &'static str,
+        cx: &mut Context<Self>,
+        is_tag: bool,
+    ) -> AnyElement {
+        let chips = if values.is_empty() {
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .child(empty_hint)
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.0))
+                .children(values.iter().enumerate().map(|(idx, value)| {
+                    if is_tag {
+                        self.render_filter_chip(
+                            format!("ai-tag-{idx}"),
+                            value,
+                            selected.contains(value),
+                            cx.listener({
+                                let value = value.clone();
+                                move |this, _event, _window, cx| {
+                                    this.toggle_tag(&value, cx);
+                                }
+                            }),
+                        )
+                    } else {
+                        self.render_filter_chip(
+                            format!("ai-person-{idx}"),
+                            value,
+                            selected.contains(value),
+                            cx.listener({
+                                let value = value.clone();
+                                move |this, _event, _window, cx| {
+                                    this.toggle_person(&value, cx);
+                                }
+                            }),
+                        )
+                    }
+                }))
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x595959))
+                            .child(title),
+                    )
+                    .child(div().text_xs().text_color(rgb(0x8c8c8c)).child(
+                        if selected.is_empty() {
+                            "未筛选"
+                        } else {
+                            "已筛选"
+                        },
+                    ))
+                    .when(!selected.is_empty(), |this| {
+                        this.child(
+                            Button::new(format!("ai-clear-{title}"))
+                                .child(clear_label)
+                                .small()
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    if is_tag {
+                                        this.clear_tags(cx);
+                                    } else {
+                                        this.clear_persons(cx);
+                                    }
+                                })),
+                        )
+                    }),
+            )
+            .child(chips)
+            .into_any_element()
+    }
+
+    fn render_result_canvas(&self, cx: &mut Context<Self>) -> AnyElement {
+        let header =
+            div()
+                .flex()
+                .gap(px(12.0))
+                .when(self.result.is_some(), |this| {
+                    this.items_center().justify_between()
+                })
+                .when(self.result.is_none(), |this| this.flex_col())
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x262626))
+                                .child("结果画布"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x8c8c8c))
+                                .line_height(relative(1.5))
+                                .child(if self.generating {
+                                    "正在整理上下文、分层压缩并请求模型。"
+                                } else if self.result.is_some() {
+                                    "结果已经生成，可以继续阅读、复制或调整范围后重跑。"
+                                } else {
+                                    "这里展示本次分析的最终结果。先设定范围，再点击生成。"
+                                }),
+                        ),
+                )
+                .when(self.result.is_some(), |this| {
+                    this.child(Button::new("ai-copy-result").child("复制结果").on_click(
+                        cx.listener(|this, _event, _window, cx| {
+                            this.copy_result(cx);
+                        }),
+                    ))
+                });
+
+        let body = if self.generating {
+            div()
+                .min_h(px(360.0))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0x262626))
+                        .child("正在生成 AI 总结…"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x8c8c8c))
+                        .line_height(relative(1.6))
+                        .child("这一步会先根据当前筛选范围构建上下文，再按需要分批压缩后生成最终结果。"),
+                )
+                .into_any_element()
+        } else if let Some(result) = self.result.as_ref() {
+            div()
+                .min_h(px(360.0))
+                .max_h(px(760.0))
+                .overflow_y_scrollbar()
+                .p(px(18.0))
+                .rounded(px(14.0))
+                .bg(rgb(0xfcfcfc))
+                .border_1()
+                .border_color(rgb(0xf0f0f0))
+                .child(
+                    div()
+                        .text_sm()
+                        .line_height(relative(1.7))
+                        .text_color(rgb(0x262626))
+                        .child(result.clone()),
+                )
+                .into_any_element()
+        } else {
+            let preview = self.preview.as_ref();
+            div()
+                .min_h(px(360.0))
+                .p(px(22.0))
+                .rounded(px(14.0))
+                .bg(rgb(0xfcfcfc))
+                .border_1()
+                .border_color(rgb(0xf0f0f0))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(14.0))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0x262626))
+                        .child("选择一个范围开始分析"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x8c8c8c))
+                        .line_height(relative(1.6))
+                        .child(
+                            preview.map_or_else(
+                                || "你可以直接用“最近 7 天”或“本周”，再按标签、人物收窄范围。".to_string(),
+                                |preview| {
+                                    format!(
+                                        "当前范围已命中 {} 条记录，其中 {} 条任务、{} 条记录/想法/事件。准备好后点击“生成总结”。",
+                                        preview.records.len(),
+                                        preview.task_count,
+                                        preview.note_like_count
+                                    )
+                                },
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(10.0))
+                        .child(
+                            self.render_filter_chip(
+                                "ai-empty-7d",
+                                "最近 7 天",
+                                false,
+                                cx.listener(|this, _event, window, cx| {
+                                    this.set_quick_range(7, window, cx);
+                                }),
+                            ),
+                        )
+                        .child(
+                            self.render_filter_chip(
+                                "ai-empty-week",
+                                "本周",
+                                false,
+                                cx.listener(|this, _event, window, cx| {
+                                    this.set_current_week_range(window, cx);
+                                }),
+                            ),
+                        )
+                        .child(
+                            self.render_filter_chip(
+                                "ai-empty-30d",
+                                "最近 30 天",
+                                false,
+                                cx.listener(|this, _event, window, cx| {
+                                    this.set_quick_range(30, window, cx);
+                                }),
+                            ),
+                        )
+                        .into_any_element(),
+                )
+                .into_any_element()
         };
 
         render_card(
-            "上下文预览",
-            "先由本地筛选和压缩，再交给模型生成结果，不直接让模型反查数据库。",
-            vec![
-                render_info_line("时间范围", &preview.date_span_label).into_any_element(),
-                render_info_line("命中记录", &format!("{} 条", preview.records.len()))
-                    .into_any_element(),
-                render_info_line(
-                    "任务构成",
+            "分析结果",
+            "结果区是主画布，整个面板围绕这次分析展开。",
+            vec![header.into_any_element(), body],
+        )
+    }
+
+    fn render_evidence_panel(&self) -> AnyElement {
+        let metrics = if let Some(preview) = self.preview.as_ref() {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(10.0))
+                .child(render_metric_tile("时间范围", &preview.date_span_label))
+                .child(render_metric_tile(
+                    "命中记录",
+                    &format!("{} 条", preview.records.len()),
+                ))
+                .child(render_metric_tile(
+                    "任务",
                     &format!(
-                        "{} 条任务，其中 {} 条未完成，{} 条已完成",
-                        preview.task_count, preview.open_task_count, preview.completed_task_count
+                        "{} 条 / 未完成 {} 条",
+                        preview.task_count, preview.open_task_count
                     ),
-                )
-                .into_any_element(),
-                render_info_line("记录/想法/事件", &format!("{} 条", preview.note_like_count))
-                    .into_any_element(),
-                render_info_line("分层摘要批次", &format!("{} 批", preview.chunk_count))
-                    .into_any_element(),
-                render_info_line(
-                    "估算上下文长度",
+                ))
+                .child(render_metric_tile(
+                    "记录/想法",
+                    &format!("{} 条", preview.note_like_count),
+                ))
+                .child(render_metric_tile(
+                    "摘要批次",
+                    &format!("{} 批", preview.chunk_count),
+                ))
+                .child(render_metric_tile(
+                    "上下文估算",
                     &format!("约 {} 字符", preview.estimated_chars),
-                )
-                .into_any_element(),
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .child("当前还没有可展示的分析证据。")
+                .into_any_element()
+        };
+
+        let samples = if let Some(preview) = self.preview.as_ref() {
+            if preview.records.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .child("当前筛选范围没有命中记录。")
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .children(
+                        preview
+                            .records
+                            .iter()
+                            .take(AI_EVIDENCE_SAMPLE_LIMIT)
+                            .map(render_record_sample),
+                    )
+                    .into_any_element()
+            }
+        } else {
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .child("等待本地预览完成后，会在这里显示 AI 这次会看到的证据样本。")
+                .into_any_element()
+        };
+
+        render_card(
+            "证据栏",
+            "这里解释 AI 这次会看什么，以及为什么会得到当前结果。",
+            vec![
+                metrics,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x595959))
+                            .child("命中记录样本"),
+                    )
+                    .child(samples)
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x595959))
+                            .child("处理说明"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x8c8c8c))
+                            .line_height(relative(1.6))
+                            .child("本次分析先由本地做确定性筛选；如果上下文过大，会先分批压缩，再合并成最终结果，不让模型自由反查数据库。"),
+                    )
+                    .into_any_element(),
             ],
         )
     }
@@ -517,237 +1003,21 @@ impl Render for AiPanel {
                             .when(!two_column, |this| this.flex_col())
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(16.0))
-                                    .min_w(px(0.0))
-                                    .w_full()
-                                    .when(two_column, |this| this.max_w(px(520.0)))
-                                    .child(render_card(
-                                        "生成模式",
-                                        "过去总结适合复盘，未来提炼会额外纳入当前未完成任务。",
-                                        vec![
-                                            div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .gap(px(10.0))
-                                                .child(
-                                                    self.render_mode_button(
-                                                        AiSummaryMode::PastSummary,
-                                                        "ai-mode-past",
-                                                        cx,
-                                                    ),
-                                                )
-                                                .child(
-                                                    self.render_mode_button(
-                                                        AiSummaryMode::FutureTasks,
-                                                        "ai-mode-future",
-                                                        cx,
-                                                    ),
-                                                )
-                                                .into_any_element(),
-                                        ],
-                                    ))
-                                    .child(render_card(
-                                        "时间范围",
-                                        "时间范围由本地先做确定性筛选。",
-                                        vec![
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(8.0))
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(0x595959))
-                                                        .child("开始日期"),
-                                                )
-                                                .child(DatePicker::new(&self.start_date_picker))
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(0x595959))
-                                                        .child("结束日期"),
-                                                )
-                                                .child(DatePicker::new(&self.end_date_picker))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_wrap()
-                                                        .gap(px(10.0))
-                                                        .child(
-                                                            Button::new("ai-refresh-preview")
-                                                                .child(if self.preview_loading {
-                                                                    "刷新中..."
-                                                                } else {
-                                                                    "刷新预览"
-                                                                })
-                                                                .when(self.preview_loading, |button| {
-                                                                    button.disabled(true)
-                                                                })
-                                                                .on_click(cx.listener(
-                                                                    |this, _event, _window, cx| {
-                                                                        this.result = None;
-                                                                        this.reload_preview(cx);
-                                                                    },
-                                                                )),
-                                                        )
-                                                        .child(
-                                                            Button::new("ai-generate")
-                                                                .child(if self.generating {
-                                                                    "生成中..."
-                                                                } else {
-                                                                    "生成总结"
-                                                                })
-                                                                .when(!self.generating, |button| {
-                                                                    button.with_variant(
-                                                                        gpui_component::button::ButtonVariant::Primary,
-                                                                    )
-                                                                })
-                                                                .disabled(self.generating)
-                                                                .on_click(cx.listener(
-                                                                    |this, _event, _window, cx| {
-                                                                        this.generate(cx);
-                                                                    },
-                                                                )),
-                                                        )
-                                                        .into_any_element(),
-                                                )
-                                                .into_any_element(),
-                                        ],
-                                    ))
-                                    .child(render_card(
-                                        "标签筛选",
-                                        "多选时按“同时命中”处理。",
-                                        vec![
-                                            div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .gap(px(8.0))
-                                                .children(self.available_tags.iter().enumerate().map(
-                                                    |(idx, tag)| {
-                                                        self.render_filter_chip(
-                                                            format!("ai-tag-{idx}"),
-                                                            tag,
-                                                            self.selected_tags.contains(tag),
-                                                            cx.listener({
-                                                                let tag = tag.clone();
-                                                                move |this, _event, _window, cx| {
-                                                                    this.toggle_tag(&tag, cx);
-                                                                }
-                                                            }),
-                                                        )
-                                                    },
-                                                ))
-                                                .into_any_element(),
-                                            Button::new("ai-clear-tags")
-                                                .child("清除标签筛选")
-                                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                                    this.clear_tags(cx);
-                                                }))
-                                                .into_any_element(),
-                                        ],
-                                    ))
-                                    .child(render_card(
-                                        "人物筛选",
-                                        "多选时同样按“同时命中”处理。",
-                                        vec![
-                                            div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .gap(px(8.0))
-                                                .children(self.available_persons.iter().enumerate().map(
-                                                    |(idx, person)| {
-                                                        self.render_filter_chip(
-                                                            format!("ai-person-{idx}"),
-                                                            person,
-                                                            self.selected_persons.contains(person),
-                                                            cx.listener({
-                                                                let person = person.clone();
-                                                                move |this, _event, _window, cx| {
-                                                                    this.toggle_person(&person, cx);
-                                                                }
-                                                            }),
-                                                        )
-                                                    },
-                                                ))
-                                                .into_any_element(),
-                                            Button::new("ai-clear-persons")
-                                                .child("清除人物筛选")
-                                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                                    this.clear_persons(cx);
-                                                }))
-                                                .into_any_element(),
-                                        ],
-                                    )),
-                            )
-                            .child(
-                                div()
                                     .flex_1()
                                     .min_w(px(0.0))
                                     .w_full()
                                     .flex()
                                     .flex_col()
                                     .gap(px(16.0))
-                                    .child(self.render_preview_card())
-                                    .child(render_card(
-                                        "结果",
-                                        "生成完成后可直接复制。",
-                                        vec![
-                                            div()
-                                                .flex()
-                                                .gap(px(16.0))
-                                                .when(two_column, |this| {
-                                                    this.items_center().justify_between()
-                                                })
-                                                .when(!two_column, |this| this.flex_col())
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(0x8c8c8c))
-                                                        .line_height(relative(1.5))
-                                                        .child(if self.generating {
-                                                            "正在分层压缩上下文并请求模型…"
-                                                        } else if self.result.is_some() {
-                                                            "最近一次结果已生成。"
-                                                        } else {
-                                                            "还没有生成结果。"
-                                                        }),
-                                                )
-                                                .child(
-                                                    Button::new("ai-copy-result")
-                                                        .child("复制结果")
-                                                        .disabled(self.result.is_none())
-                                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                                            this.copy_result(cx);
-                                                        })),
-                                                )
-                                                .into_any_element(),
-                                            div()
-                                                .w_full()
-                                                .min_h(px(320.0))
-                                                .max_h(px(720.0))
-                                                .overflow_y_scrollbar()
-                                                .p(px(14.0))
-                                                .rounded(px(12.0))
-                                                .bg(rgb(0xfcfcfc))
-                                                .border_1()
-                                                .border_color(rgb(0xf0f0f0))
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .line_height(relative(1.6))
-                                                        .text_color(rgb(0x262626))
-                                                        .child(
-                                                            self.result.clone().unwrap_or_else(|| {
-                                                                "选择范围后点击“生成总结”，这里会显示结构化结果。"
-                                                                    .to_string()
-                                                            }),
-                                                        ),
-                                                )
-                                                .into_any_element(),
-                                        ],
-                                    )),
+                                    .child(self.render_analysis_bar(cx))
+                                    .child(self.render_result_canvas(cx)),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w(px(0.0))
+                                    .when(two_column, |this| this.max_w(px(360.0)))
+                                    .child(self.render_evidence_panel()),
                             ),
                     ),
             )
@@ -792,16 +1062,22 @@ fn render_card(
         .into_any_element()
 }
 
-fn render_info_line(label: &'static str, value: &str) -> impl IntoElement {
+fn render_metric_tile(label: &'static str, value: &str) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap(px(4.0))
+        .min_w(px(140.0))
+        .p(px(12.0))
+        .rounded(px(12.0))
+        .bg(rgb(0xfcfcfc))
+        .border_1()
+        .border_color(rgb(0xf0f0f0))
         .child(
             div()
-                .text_sm()
+                .text_xs()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(0x595959))
+                .text_color(rgb(0x8c8c8c))
                 .child(label),
         )
         .child(
@@ -811,6 +1087,67 @@ fn render_info_line(label: &'static str, value: &str) -> impl IntoElement {
                 .line_height(relative(1.5))
                 .child(value.to_string()),
         )
+        .into_any_element()
+}
+
+fn render_record_sample(record: &crate::models::Record) -> AnyElement {
+    let kind = match record.record_type {
+        crate::models::RecordType::Task => "任务",
+        crate::models::RecordType::Note => "记录",
+        crate::models::RecordType::Idea => "想法",
+        crate::models::RecordType::Event => "事件",
+    };
+    let body = truncate_preview(&record.content, 88);
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .p(px(12.0))
+        .rounded(px(12.0))
+        .bg(rgb(0xfcfcfc))
+        .border_1()
+        .border_color(rgb(0xf0f0f0))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.0))
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0x8c8c8c))
+                        .child(kind),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0x262626))
+                        .child(record.display_title()),
+                ),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .line_height(relative(1.5))
+                .child(body),
+        )
+        .into_any_element()
+}
+
+fn truncate_preview(input: &str, limit: usize) -> String {
+    let trimmed = input.replace('\n', " ");
+    let mut chars = trimmed.chars();
+    let preview = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
 }
 
 fn render_message_box(message: &str, is_error: bool) -> AnyElement {
