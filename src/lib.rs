@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod app_shortcuts;
 pub mod attachment_image;
 pub mod clipboard_attachment;

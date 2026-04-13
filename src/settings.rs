@@ -1,3 +1,4 @@
+use crate::ai::AiSettings;
 use crate::data_management::app_data_dir;
 use crate::data_management::ImportMode;
 use crate::git_sync::GitRemoteSyncConfig;
@@ -110,6 +111,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub general: GeneralSettings,
     #[serde(default)]
+    pub ai: AiSettings,
+    #[serde(default)]
     pub reminders: ReminderSettings,
     #[serde(default)]
     pub shortcuts: ShortcutSettings,
@@ -154,6 +157,7 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{AppSettings, ImportModePreference};
+    use crate::ai::AiProviderProtocol;
     use std::fs;
 
     #[test]
@@ -181,6 +185,8 @@ mod tests {
             settings.general.startup_panel,
             super::StartupPanelPreference::Dashboard
         );
+        assert_eq!(settings.ai.protocol, AiProviderProtocol::OpenAiCompatible);
+        assert!(settings.ai.model.is_empty());
         assert!(settings.reminders.notifications_enabled);
         assert_eq!(
             settings.data.default_import_mode,
