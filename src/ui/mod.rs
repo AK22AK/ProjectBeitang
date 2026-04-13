@@ -1,3 +1,4 @@
+pub mod ai_panel;
 pub mod attachment_draft;
 pub mod dashboard;
 pub mod data_management;
