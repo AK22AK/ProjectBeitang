@@ -1204,7 +1204,6 @@ pub struct MainView {
     notes_panel: Entity<NotePanel>,
     quick_add_overlay: Option<Entity<QuickAddWindow>>,
     shortcut_config: ShortcutConfig,
-    draft_shortcut_config: ShortcutConfig,
     active_shortcut_capture: Option<ShortcutField>,
     settings_notice: Option<String>,
     settings_error: Option<String>,
@@ -1267,8 +1266,7 @@ impl MainView {
             timeline_panel,
             notes_panel,
             quick_add_overlay: None,
-            shortcut_config: shortcut_config.clone(),
-            draft_shortcut_config: shortcut_config,
+            shortcut_config,
             active_shortcut_capture: None,
             settings_notice: None,
             settings_error: None,
@@ -1531,7 +1529,6 @@ impl MainView {
     fn refresh_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.app_settings = load_settings_or_default();
         self.shortcut_config = ShortcutConfig::from(&self.app_settings.shortcuts);
-        self.draft_shortcut_config = self.shortcut_config.clone();
         self.active_shortcut_capture = None;
         self.settings_notice = None;
         self.settings_error = None;
@@ -1599,13 +1596,17 @@ impl MainView {
             .map(|(_, panel)| panel)
     }
 
-    fn save_shortcut_settings(&mut self, cx: &mut Context<Self>) {
-        let next_config = self.draft_shortcut_config.clone();
+    fn apply_shortcut_config_change(
+        &mut self,
+        next_config: ShortcutConfig,
+        success_message: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Err(err) = validate_shortcut_config(&next_config) {
             self.settings_notice = None;
             self.settings_error = Some(err.to_string());
             cx.notify();
-            return;
+            return false;
         }
 
         if let Err(err) = self
@@ -1616,22 +1617,47 @@ impl MainView {
             self.settings_notice = None;
             self.settings_error = Some(err);
             cx.notify();
-            return;
+            return false;
         }
 
+        let previous_config = self.shortcut_config.clone();
+        let previous_settings = self.app_settings.shortcuts.clone();
         self.shortcut_config = next_config.clone();
-        self.draft_shortcut_config = next_config.clone();
-        self.active_shortcut_capture = None;
         self.app_settings.shortcuts = ShortcutSettings::from(&next_config);
-        self.persist_settings("已保存快捷键设置", cx);
+        match save_app_settings(&self.app_settings) {
+            Ok(_) => {
+                self.settings_notice = Some(success_message);
+                self.settings_error = None;
+                cx.notify();
+                true
+            }
+            Err(err) => {
+                self.shortcut_config = previous_config.clone();
+                self.app_settings.shortcuts = previous_settings;
+                if let Err(revert_err) = self
+                    .global_hotkeys
+                    .borrow_mut()
+                    .apply_shortcuts(&previous_config)
+                {
+                    eprintln!(
+                        "[Settings] Failed to revert shortcuts after save error: {revert_err}"
+                    );
+                }
+                self.settings_notice = None;
+                self.settings_error = Some(err);
+                cx.notify();
+                false
+            }
+        }
     }
 
     fn restore_default_shortcuts(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.draft_shortcut_config = ShortcutConfig::default();
         self.active_shortcut_capture = None;
-        self.settings_notice = Some("已恢复默认快捷键，点击保存后生效".to_string());
-        self.settings_error = None;
-        cx.notify();
+        let _ = self.apply_shortcut_config_change(
+            ShortcutConfig::default(),
+            "已恢复默认快捷键".to_string(),
+            cx,
+        );
     }
 
     fn start_shortcut_capture(
@@ -1670,12 +1696,15 @@ impl MainView {
 
         match shortcut_from_keystroke(&event.keystroke) {
             Ok(Some(shortcut)) => {
-                field.set_value(&mut self.draft_shortcut_config, shortcut);
-                self.active_shortcut_capture = None;
-                self.settings_notice =
-                    Some(format!("已更新{}，点击保存快捷键后生效", field.label()));
-                self.settings_error = None;
-                cx.notify();
+                let mut next_config = self.shortcut_config.clone();
+                field.set_value(&mut next_config, shortcut);
+                if self.apply_shortcut_config_change(
+                    next_config,
+                    format!("已更新{}快捷键", field.label()),
+                    cx,
+                ) {
+                    self.active_shortcut_capture = None;
+                }
             }
             Ok(None) => {}
             Err(err) => {
@@ -1811,7 +1840,7 @@ impl MainView {
             ))
             .child(render_settings_card(
                 "应用内面板切换",
-                "仅在 Robinne 前台时生效，用于切换看板、任务和记录面板。",
+                "仅在 Robinne 前台时生效，录制成功后会立即保存并生效。",
                 vec![
                     self.render_shortcut_capture_row(ShortcutField::OpenMain, cx),
                     self.render_shortcut_capture_row(ShortcutField::OpenTasks, cx),
@@ -1820,22 +1849,15 @@ impl MainView {
             ))
             .child(render_settings_card(
                 "全局快捷键",
-                "即使 Robinne 不在前台也可触发，目前只保留快捷输入。",
+                "即使 Robinne 不在前台也可触发，录制成功后会立即保存并生效。",
                 vec![
                     self.render_shortcut_capture_row(ShortcutField::QuickCapture, cx),
                     div()
                         .flex()
                         .gap(px(10.0))
                         .child(
-                            Button::new("save-global-shortcuts")
-                                .child("保存快捷键设置")
-                                .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                    this.save_shortcut_settings(cx);
-                                })),
-                        )
-                        .child(
                             Button::new("restore-default-shortcuts")
-                                .child("恢复默认")
+                                .child("恢复全部默认")
                                 .on_click(cx.listener(|this, _event, window, cx| {
                                     this.restore_default_shortcuts(window, cx);
                                 })),
@@ -1911,7 +1933,7 @@ impl MainView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = self.active_shortcut_capture == Some(field);
-        let shortcut_value = field.value(&self.draft_shortcut_config);
+        let shortcut_value = field.value(&self.shortcut_config);
         let display_value = format_shortcut_for_display(shortcut_value)
             .unwrap_or_else(|_| shortcut_value.to_string());
         let row_id = format!("shortcut-capture-row-{}", field.id());
@@ -1936,20 +1958,11 @@ impl MainView {
             } else {
                 rgb(0xfafafa)
             })
-            .cursor_pointer()
-            .hover(|style| {
-                style.bg(if is_active {
-                    rgb(0xe6f4ff)
-                } else {
-                    rgb(0xf5f5f5)
-                })
-            })
-            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
-                this.start_shortcut_capture(field, window, cx);
-            }))
             .child(
                 div()
                     .flex()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .flex_col()
                     .gap(px(4.0))
                     .child(
@@ -1967,17 +1980,21 @@ impl MainView {
                             .child(if is_active {
                                 "按下新的快捷键组合，单独按 Esc 取消".to_string()
                             } else {
-                                "点击后开始录制新的快捷键组合".to_string()
+                                "点击右侧按钮开始录制新的快捷键组合".to_string()
                             }),
                     ),
             )
             .child(
                 div()
                     .flex()
+                    .min_w(px(0.0))
                     .items_center()
                     .gap(px(10.0))
                     .child(
                         div()
+                            .max_w(px(240.0))
+                            .min_w(px(0.0))
+                            .overflow_hidden()
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(px(999.0))
@@ -1995,14 +2012,13 @@ impl MainView {
                             })
                             .child(display_value),
                     )
-                    .child(
-                        Button::new(button_id)
-                            .child(if is_active { "重新录制" } else { "录制" })
-                            .small()
-                            .on_click(cx.listener(move |this, _event, window, cx| {
+                    .when(!is_active, |this| {
+                        this.child(Button::new(button_id).child("录制").small().on_click(
+                            cx.listener(move |this, _event, window, cx| {
                                 this.start_shortcut_capture(field, window, cx);
-                            })),
-                    ),
+                            }),
+                        ))
+                    }),
             )
             .into_any_element()
     }
