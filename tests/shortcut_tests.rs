@@ -17,6 +17,23 @@ use robinne::ui::sidebar::{
     main_sidebar_layout_mode, main_sidebar_width, Panel, SidebarLayoutMode,
 };
 
+fn platform_hotkey_display_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd"
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        "Win"
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        "Super"
+    }
+}
+
 #[test]
 fn test_default_shortcut_config() {
     let config = ShortcutConfig::default();
@@ -54,7 +71,7 @@ fn test_parse_hotkey_rejects_invalid_shortcuts() {
 fn test_format_shortcut_for_display_normalizes_tokens() {
     assert_eq!(
         format_shortcut_for_display("cmd+shift+t").unwrap(),
-        "Cmd+Shift+T"
+        format!("{}+Shift+T", platform_hotkey_display_label())
     );
     assert_eq!(format_shortcut_for_display("ctrl+2").unwrap(), "Ctrl+2");
 }
@@ -102,7 +119,10 @@ fn test_preview_shortcut_from_keystroke_shows_modifier_only_input() {
         key_char: None,
     };
 
-    assert_eq!(preview_shortcut_from_keystroke(&keystroke).unwrap(), "Cmd");
+    assert_eq!(
+        preview_shortcut_from_keystroke(&keystroke).unwrap(),
+        platform_hotkey_display_label()
+    );
 }
 
 #[test]
@@ -119,7 +139,7 @@ fn test_preview_shortcut_from_keystroke_shows_full_combo() {
 
     assert_eq!(
         preview_shortcut_from_keystroke(&keystroke).unwrap(),
-        "Cmd+Shift+U"
+        format!("{}+Shift+U", platform_hotkey_display_label())
     );
 }
 
@@ -131,7 +151,10 @@ fn test_preview_shortcut_from_modifiers_shows_modifier_only_input() {
         ..Default::default()
     });
 
-    assert_eq!(preview.as_deref(), Some("Cmd+Shift"));
+    assert_eq!(
+        preview,
+        Some(format!("{}+Shift", platform_hotkey_display_label()))
+    );
 }
 
 #[test]
@@ -148,7 +171,7 @@ fn test_preview_shortcut_from_keystroke_keeps_unsupported_main_key_visible() {
 
     assert_eq!(
         preview_shortcut_from_keystroke(&keystroke).unwrap(),
-        "Cmd+Shift+{"
+        format!("{}+Shift+{{", platform_hotkey_display_label())
     );
 }
 
