@@ -11,8 +11,9 @@ use robinne::app_shortcuts::{
     settings_keystroke,
 };
 use robinne::config::{
-    format_shortcut_for_display, keystroke_matches_shortcut, shortcut_from_keystroke,
-    validate_shortcut_config, ShortcutConfig,
+    format_shortcut_for_display, keystroke_matches_shortcut, preview_shortcut_from_keystroke,
+    preview_shortcut_from_modifiers, shortcut_from_keystroke, validate_shortcut_config,
+    ShortcutConfig,
 };
 use robinne::data_management::app_data_dir;
 use robinne::platform::{
@@ -37,6 +38,7 @@ use robinne::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, 
 use robinne::ui::task_panel::TaskPanel;
 use robinne::ui::timeline::Timeline;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -280,6 +282,36 @@ impl ShortcutField {
             Self::OpenRecords => config.open_records = value,
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShortcutCapturePhase {
+    Waiting,
+    Success,
+    Failure,
+}
+
+#[derive(Clone)]
+struct ShortcutCaptureState {
+    field: ShortcutField,
+    phase: ShortcutCapturePhase,
+    preview_display: Option<String>,
+    held_keys: BTreeSet<String>,
+    held_modifiers: Modifiers,
+    retry_ready: bool,
+    message: Option<String>,
+    serial: u64,
+}
+
+fn capture_held_keys_for_keystroke(key: &str) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    if !matches!(
+        key,
+        "" | "control" | "alt" | "shift" | "platform" | "command" | "cmd" | "super" | "win" | "fn"
+    ) {
+        keys.insert(key.to_string());
+    }
+    keys
 }
 
 fn install_app_shortcuts_and_menus(
@@ -1204,7 +1236,8 @@ pub struct MainView {
     notes_panel: Entity<NotePanel>,
     quick_add_overlay: Option<Entity<QuickAddWindow>>,
     shortcut_config: ShortcutConfig,
-    active_shortcut_capture: Option<ShortcutField>,
+    active_shortcut_capture: Option<ShortcutCaptureState>,
+    shortcut_capture_serial: u64,
     settings_notice: Option<String>,
     settings_error: Option<String>,
     global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
@@ -1268,6 +1301,7 @@ impl MainView {
             quick_add_overlay: None,
             shortcut_config,
             active_shortcut_capture: None,
+            shortcut_capture_serial: 0,
             settings_notice: None,
             settings_error: None,
             global_hotkeys,
@@ -1596,17 +1630,9 @@ impl MainView {
             .map(|(_, panel)| panel)
     }
 
-    fn apply_shortcut_config_change(
-        &mut self,
-        next_config: ShortcutConfig,
-        success_message: String,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn apply_shortcut_config_change(&mut self, next_config: ShortcutConfig) -> Result<(), String> {
         if let Err(err) = validate_shortcut_config(&next_config) {
-            self.settings_notice = None;
-            self.settings_error = Some(err.to_string());
-            cx.notify();
-            return false;
+            return Err(err.to_string());
         }
 
         if let Err(err) = self
@@ -1614,10 +1640,7 @@ impl MainView {
             .borrow_mut()
             .apply_shortcuts(&next_config)
         {
-            self.settings_notice = None;
-            self.settings_error = Some(err);
-            cx.notify();
-            return false;
+            return Err(err);
         }
 
         let previous_config = self.shortcut_config.clone();
@@ -1625,12 +1648,7 @@ impl MainView {
         self.shortcut_config = next_config.clone();
         self.app_settings.shortcuts = ShortcutSettings::from(&next_config);
         match save_app_settings(&self.app_settings) {
-            Ok(_) => {
-                self.settings_notice = Some(success_message);
-                self.settings_error = None;
-                cx.notify();
-                true
-            }
+            Ok(_) => Ok(()),
             Err(err) => {
                 self.shortcut_config = previous_config.clone();
                 self.app_settings.shortcuts = previous_settings;
@@ -1643,21 +1661,110 @@ impl MainView {
                         "[Settings] Failed to revert shortcuts after save error: {revert_err}"
                     );
                 }
-                self.settings_notice = None;
-                self.settings_error = Some(err);
-                cx.notify();
-                false
+                Err(err)
             }
         }
     }
 
     fn restore_default_shortcuts(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.active_shortcut_capture = None;
-        let _ = self.apply_shortcut_config_change(
-            ShortcutConfig::default(),
-            "已恢复默认快捷键".to_string(),
-            cx,
-        );
+        match self.apply_shortcut_config_change(ShortcutConfig::default()) {
+            Ok(_) => {
+                self.settings_notice = Some("已恢复默认快捷键".to_string());
+                self.settings_error = None;
+            }
+            Err(err) => {
+                self.settings_notice = None;
+                self.settings_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    fn next_shortcut_capture_serial(&mut self) -> u64 {
+        self.shortcut_capture_serial = self.shortcut_capture_serial.wrapping_add(1);
+        self.shortcut_capture_serial
+    }
+
+    fn schedule_shortcut_capture_transition(
+        &self,
+        serial: u64,
+        phase: ShortcutCapturePhase,
+        delay: std::time::Duration,
+        next_state: Option<ShortcutCaptureState>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = view.update(cx, |this, cx| {
+                let should_apply = this
+                    .active_shortcut_capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.serial == serial && capture.phase == phase);
+                if should_apply {
+                    this.active_shortcut_capture = next_state.clone();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn enter_shortcut_capture_waiting(
+        &mut self,
+        field: ShortcutField,
+        preview_display: Option<String>,
+        serial: u64,
+    ) {
+        self.active_shortcut_capture = Some(ShortcutCaptureState {
+            field,
+            phase: ShortcutCapturePhase::Waiting,
+            preview_display,
+            held_keys: BTreeSet::new(),
+            held_modifiers: Modifiers::default(),
+            retry_ready: false,
+            message: None,
+            serial,
+        });
+    }
+
+    fn enter_shortcut_capture_success(
+        &mut self,
+        field: ShortcutField,
+        display_value: String,
+        serial: u64,
+    ) {
+        self.active_shortcut_capture = Some(ShortcutCaptureState {
+            field,
+            phase: ShortcutCapturePhase::Success,
+            preview_display: Some(display_value),
+            held_keys: BTreeSet::new(),
+            held_modifiers: Modifiers::default(),
+            retry_ready: false,
+            message: Some("快捷键已保存并生效".to_string()),
+            serial,
+        });
+    }
+
+    fn enter_shortcut_capture_failure(
+        &mut self,
+        field: ShortcutField,
+        preview_display: Option<String>,
+        held_keys: BTreeSet<String>,
+        held_modifiers: Modifiers,
+        error_message: String,
+        serial: u64,
+    ) {
+        self.active_shortcut_capture = Some(ShortcutCaptureState {
+            field,
+            phase: ShortcutCapturePhase::Failure,
+            preview_display,
+            held_keys,
+            held_modifiers,
+            retry_ready: false,
+            message: Some(format!("{error_message}。继续按键重新录制，或按 Esc 退出")),
+            serial,
+        });
     }
 
     fn start_shortcut_capture(
@@ -1666,7 +1773,8 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.active_shortcut_capture = Some(field);
+        let serial = self.next_shortcut_capture_serial();
+        self.enter_shortcut_capture_waiting(field, None, serial);
         self.settings_notice = None;
         self.settings_error = None;
         self.focus_handle.focus(window, cx);
@@ -1679,41 +1787,231 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(field) = self.active_shortcut_capture else {
+        let Some(capture) = self.active_shortcut_capture.clone() else {
+            return false;
+        };
+        let field = capture.field;
+        let mut effective_keystroke = event.keystroke.clone();
+        effective_keystroke.modifiers = window.modifiers();
+
+        window.prevent_default();
+        cx.stop_propagation();
+
+        if effective_keystroke.key == "escape" && !effective_keystroke.modifiers.modified() {
+            self.active_shortcut_capture = None;
+            self.settings_notice = None;
+            self.settings_error = None;
+            cx.notify();
+            return true;
+        }
+
+        if capture.phase == ShortcutCapturePhase::Success {
+            return true;
+        }
+
+        if capture.phase == ShortcutCapturePhase::Failure && !capture.retry_ready {
+            let mut held_keys = capture.held_keys.clone();
+            held_keys.extend(capture_held_keys_for_keystroke(&effective_keystroke.key));
+            self.active_shortcut_capture = Some(ShortcutCaptureState {
+                held_keys,
+                held_modifiers: effective_keystroke.modifiers,
+                ..capture
+            });
+            cx.notify();
+            return true;
+        }
+
+        let preview_display = match preview_shortcut_from_keystroke(&effective_keystroke) {
+            Ok(display) => display,
+            Err(err) => {
+                let serial = self.next_shortcut_capture_serial();
+                self.enter_shortcut_capture_failure(
+                    field,
+                    capture.preview_display.clone(),
+                    capture_held_keys_for_keystroke(&effective_keystroke.key),
+                    effective_keystroke.modifiers,
+                    err.to_string(),
+                    serial,
+                );
+                self.settings_notice = None;
+                self.settings_error = None;
+                cx.notify();
+                return true;
+            }
+        };
+
+        let waiting_serial = if capture.phase == ShortcutCapturePhase::Waiting {
+            capture.serial
+        } else {
+            self.next_shortcut_capture_serial()
+        };
+        self.enter_shortcut_capture_waiting(field, Some(preview_display.clone()), waiting_serial);
+        self.settings_notice = None;
+        self.settings_error = None;
+        cx.notify();
+
+        match shortcut_from_keystroke(&effective_keystroke) {
+            Ok(Some(shortcut)) => {
+                let mut next_config = self.shortcut_config.clone();
+                field.set_value(&mut next_config, shortcut);
+                match self.apply_shortcut_config_change(next_config) {
+                    Ok(_) => {
+                        let serial = self.next_shortcut_capture_serial();
+                        self.enter_shortcut_capture_success(field, preview_display, serial);
+                        self.schedule_shortcut_capture_transition(
+                            serial,
+                            ShortcutCapturePhase::Success,
+                            std::time::Duration::from_secs(1),
+                            None,
+                            cx,
+                        );
+                    }
+                    Err(err) => {
+                        let serial = self.next_shortcut_capture_serial();
+                        self.enter_shortcut_capture_failure(
+                            field,
+                            Some(preview_display),
+                            capture_held_keys_for_keystroke(&effective_keystroke.key),
+                            effective_keystroke.modifiers,
+                            err,
+                            serial,
+                        );
+                    }
+                }
+                self.settings_notice = None;
+                self.settings_error = None;
+                cx.notify();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let serial = self.next_shortcut_capture_serial();
+                self.enter_shortcut_capture_failure(
+                    field,
+                    Some(preview_display),
+                    capture_held_keys_for_keystroke(&effective_keystroke.key),
+                    effective_keystroke.modifiers,
+                    err.to_string(),
+                    serial,
+                );
+                self.settings_notice = None;
+                self.settings_error = None;
+                cx.notify();
+            }
+        }
+
+        true
+    }
+
+    fn handle_shortcut_capture_keyup(
+        &mut self,
+        event: &KeyUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(capture) = self.active_shortcut_capture.clone() else {
             return false;
         };
 
         window.prevent_default();
         cx.stop_propagation();
 
-        if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
-            self.active_shortcut_capture = None;
-            self.settings_notice = Some("已取消快捷键录制".to_string());
-            self.settings_error = None;
-            cx.notify();
+        if capture.phase != ShortcutCapturePhase::Failure || capture.retry_ready {
             return true;
         }
 
-        match shortcut_from_keystroke(&event.keystroke) {
-            Ok(Some(shortcut)) => {
-                let mut next_config = self.shortcut_config.clone();
-                field.set_value(&mut next_config, shortcut);
-                if self.apply_shortcut_config_change(
-                    next_config,
-                    format!("已更新{}快捷键", field.label()),
-                    cx,
-                ) {
-                    self.active_shortcut_capture = None;
-                }
-            }
-            Ok(None) => {}
-            Err(err) => {
-                self.settings_notice = None;
-                self.settings_error = Some(err.to_string());
-                cx.notify();
-            }
+        let mut held_keys = capture.held_keys.clone();
+        held_keys.remove(&event.keystroke.key);
+        let held_modifiers = window.modifiers();
+        let retry_ready = held_keys.is_empty() && !held_modifiers.modified();
+
+        if held_keys != capture.held_keys
+            || held_modifiers != capture.held_modifiers
+            || retry_ready != capture.retry_ready
+        {
+            self.active_shortcut_capture = Some(ShortcutCaptureState {
+                held_keys,
+                held_modifiers,
+                retry_ready,
+                ..capture
+            });
+            cx.notify();
         }
 
+        true
+    }
+
+    fn handle_shortcut_capture_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(capture) = self.active_shortcut_capture.clone() else {
+            return false;
+        };
+
+        window.prevent_default();
+        cx.stop_propagation();
+
+        if capture.phase == ShortcutCapturePhase::Success {
+            return true;
+        }
+
+        if capture.phase == ShortcutCapturePhase::Failure {
+            if capture.retry_ready && event.modifiers.modified() {
+                let Some(preview_display) = preview_shortcut_from_modifiers(event.modifiers) else {
+                    return true;
+                };
+                let serial = self.next_shortcut_capture_serial();
+                self.enter_shortcut_capture_waiting(capture.field, Some(preview_display), serial);
+                self.settings_notice = None;
+                self.settings_error = None;
+                cx.notify();
+                return true;
+            }
+
+            let held_modifiers = event.modifiers;
+            let held_keys = if held_modifiers.modified() {
+                capture.held_keys.clone()
+            } else {
+                BTreeSet::new()
+            };
+            let retry_ready = held_keys.is_empty() && !held_modifiers.modified();
+            if held_keys != capture.held_keys
+                || held_modifiers != capture.held_modifiers
+                || retry_ready != capture.retry_ready
+            {
+                self.active_shortcut_capture = Some(ShortcutCaptureState {
+                    held_keys,
+                    held_modifiers,
+                    retry_ready,
+                    ..capture
+                });
+                cx.notify();
+            }
+
+            return true;
+        }
+
+        let Some(preview_display) = preview_shortcut_from_modifiers(event.modifiers) else {
+            if capture.phase == ShortcutCapturePhase::Waiting {
+                self.enter_shortcut_capture_waiting(capture.field, None, capture.serial);
+                self.settings_notice = None;
+                self.settings_error = None;
+                cx.notify();
+            }
+            return true;
+        };
+
+        let serial = if capture.phase == ShortcutCapturePhase::Waiting {
+            capture.serial
+        } else {
+            self.next_shortcut_capture_serial()
+        };
+        self.enter_shortcut_capture_waiting(capture.field, Some(preview_display), serial);
+        self.settings_notice = None;
+        self.settings_error = None;
+        cx.notify();
         true
     }
 
@@ -1932,10 +2230,28 @@ impl MainView {
         field: ShortcutField,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_active = self.active_shortcut_capture == Some(field);
+        let capture_state = self
+            .active_shortcut_capture
+            .as_ref()
+            .filter(|capture| capture.field == field);
+        let is_active = capture_state.is_some();
+        let phase = capture_state
+            .map(|capture| capture.phase)
+            .unwrap_or(ShortcutCapturePhase::Waiting);
         let shortcut_value = field.value(&self.shortcut_config);
-        let display_value = format_shortcut_for_display(shortcut_value)
-            .unwrap_or_else(|_| shortcut_value.to_string());
+        let display_value = capture_state
+            .and_then(|capture| capture.preview_display.clone())
+            .unwrap_or_else(|| {
+                format_shortcut_for_display(shortcut_value)
+                    .unwrap_or_else(|_| shortcut_value.to_string())
+            });
+        let subtitle = match capture_state {
+            Some(capture) => capture
+                .message
+                .clone()
+                .unwrap_or_else(|| "按下新的快捷键组合，单独按 Esc 取消".to_string()),
+            None => "点击右侧按钮开始录制新的快捷键组合".to_string(),
+        };
         let row_id = format!("shortcut-capture-row-{}", field.id());
         let button_id = format!("shortcut-capture-button-{}", field.id());
 
@@ -1975,13 +2291,13 @@ impl MainView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x8c8c8c))
-                            .line_height(relative(1.5))
-                            .child(if is_active {
-                                "按下新的快捷键组合，单独按 Esc 取消".to_string()
+                            .text_color(if phase == ShortcutCapturePhase::Failure {
+                                rgb(0xcf1322)
                             } else {
-                                "点击右侧按钮开始录制新的快捷键组合".to_string()
-                            }),
+                                rgb(0x8c8c8c)
+                            })
+                            .line_height(relative(1.5))
+                            .child(subtitle),
                     ),
             )
             .child(
@@ -1998,19 +2314,44 @@ impl MainView {
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(px(999.0))
-                            .bg(if is_active {
-                                rgb(0xffffff)
-                            } else {
-                                rgb(0xf0f5ff)
+                            .bg(match phase {
+                                ShortcutCapturePhase::Success => rgb(0xf6ffed),
+                                ShortcutCapturePhase::Failure => rgb(0xfff2f0),
+                                ShortcutCapturePhase::Waiting if is_active => rgb(0xffffff),
+                                ShortcutCapturePhase::Waiting => rgb(0xf0f5ff),
                             })
                             .text_sm()
                             .font_family(".SystemUIFont")
-                            .text_color(if is_active {
-                                rgb(0x0958d9)
-                            } else {
-                                rgb(0x262626)
+                            .text_color(match phase {
+                                ShortcutCapturePhase::Success => rgb(0x389e0d),
+                                ShortcutCapturePhase::Failure => rgb(0xcf1322),
+                                ShortcutCapturePhase::Waiting if is_active => rgb(0x0958d9),
+                                ShortcutCapturePhase::Waiting => rgb(0x262626),
                             })
                             .child(display_value),
+                    )
+                    .when(
+                        matches!(
+                            phase,
+                            ShortcutCapturePhase::Success | ShortcutCapturePhase::Failure
+                        ),
+                        |this| {
+                            this.child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(match phase {
+                                        ShortcutCapturePhase::Success => rgb(0x389e0d),
+                                        ShortcutCapturePhase::Failure => rgb(0xcf1322),
+                                        ShortcutCapturePhase::Waiting => rgb(0x262626),
+                                    })
+                                    .child(match phase {
+                                        ShortcutCapturePhase::Success => "✅",
+                                        ShortcutCapturePhase::Failure => "❌",
+                                        ShortcutCapturePhase::Waiting => "",
+                                    }),
+                            )
+                        },
                     )
                     .when(!is_active, |this| {
                         this.child(Button::new(button_id).child("录制").small().on_click(
@@ -2414,6 +2755,22 @@ impl Render for MainView {
             .flex_col()
             .bg(rgb(0xf0f0f0))
             .track_focus(&self.focus_handle(cx))
+            .on_modifiers_changed(cx.listener(
+                move |this, event: &ModifiersChangedEvent, window, cx| {
+                    if this.current_panel == Panel::Settings
+                        && this.handle_shortcut_capture_modifiers_changed(event, window, cx)
+                    {
+                        return;
+                    }
+                },
+            ))
+            .on_key_up(cx.listener(move |this, event: &KeyUpEvent, window, cx| {
+                if this.current_panel == Panel::Settings
+                    && this.handle_shortcut_capture_keyup(event, window, cx)
+                {
+                    return;
+                }
+            }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if this.current_panel == Panel::Settings
                     && this.handle_shortcut_capture_keydown(event, window, cx)

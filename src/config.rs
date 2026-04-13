@@ -2,7 +2,7 @@ use crate::platform;
 use crate::settings::ShortcutSettings;
 use anyhow::{anyhow, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers as HotkeyModifiers};
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +150,28 @@ pub fn format_shortcut_for_display(shortcut: &str) -> Result<String> {
     }
     tokens.push(code_to_display_token(code).to_string());
     Ok(tokens.join("+"))
+}
+
+pub fn preview_shortcut_from_keystroke(keystroke: &Keystroke) -> Result<String> {
+    let mut tokens = modifier_preview_tokens(keystroke.modifiers);
+    if let Some(key_preview) = preview_key_from_keystroke(&keystroke.key) {
+        tokens.push(key_preview);
+    }
+
+    if tokens.is_empty() {
+        return Err(anyhow!("请按下新的快捷键组合"));
+    }
+
+    Ok(tokens.join("+"))
+}
+
+pub fn preview_shortcut_from_modifiers(modifiers: Modifiers) -> Option<String> {
+    let tokens = modifier_preview_tokens(modifiers);
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join("+"))
+    }
 }
 
 pub fn shortcut_from_keystroke(keystroke: &Keystroke) -> Result<Option<String>> {
@@ -387,4 +409,52 @@ fn display_key_from_keystroke(key: &str) -> Result<String> {
         "tab" => Ok("Tab".to_string()),
         _ => Err(anyhow!("不支持将 `{key}` 设为快捷键")),
     }
+}
+
+fn modifier_preview_tokens(modifiers: Modifiers) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if modifiers.platform {
+        #[cfg(target_os = "macos")]
+        tokens.push("Cmd".to_string());
+
+        #[cfg(target_os = "windows")]
+        tokens.push("Win".to_string());
+
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        tokens.push("Super".to_string());
+    }
+    if modifiers.control {
+        tokens.push("Ctrl".to_string());
+    }
+    if modifiers.alt {
+        #[cfg(target_os = "macos")]
+        tokens.push("Option".to_string());
+
+        #[cfg(not(target_os = "macos"))]
+        tokens.push("Alt".to_string());
+    }
+    if modifiers.shift {
+        tokens.push("Shift".to_string());
+    }
+    if modifiers.function {
+        tokens.push("Fn".to_string());
+    }
+    tokens
+}
+
+fn preview_key_from_keystroke(key: &str) -> Option<String> {
+    if key.is_empty() || is_modifier_key(key) {
+        return None;
+    }
+
+    if key.len() == 1 {
+        return Some(key.to_ascii_uppercase());
+    }
+
+    Some(match key {
+        "enter" | "return" => "Enter".to_string(),
+        "escape" | "esc" => "Esc".to_string(),
+        "tab" => "Tab".to_string(),
+        _ => key.to_string(),
+    })
 }

@@ -1,7 +1,8 @@
 use gpui::{px, Keystroke, Modifiers};
 use robinne::app_shortcuts::{app_shortcut_entries, main_panel_shortcuts};
 use robinne::config::{
-    format_shortcut_for_display, keystroke_matches_shortcut, parse_hotkey, shortcut_from_keystroke,
+    format_shortcut_for_display, keystroke_matches_shortcut, parse_hotkey,
+    preview_shortcut_from_keystroke, preview_shortcut_from_modifiers, shortcut_from_keystroke,
     ShortcutConfig,
 };
 use robinne::models::{Priority, Record};
@@ -88,6 +89,67 @@ fn test_shortcut_from_keystroke_ignores_modifier_only_input() {
     };
 
     assert_eq!(shortcut_from_keystroke(&keystroke).unwrap(), None);
+}
+
+#[test]
+fn test_preview_shortcut_from_keystroke_shows_modifier_only_input() {
+    let keystroke = Keystroke {
+        modifiers: Modifiers {
+            platform: true,
+            ..Default::default()
+        },
+        key: "command".to_string(),
+        key_char: None,
+    };
+
+    assert_eq!(preview_shortcut_from_keystroke(&keystroke).unwrap(), "Cmd");
+}
+
+#[test]
+fn test_preview_shortcut_from_keystroke_shows_full_combo() {
+    let keystroke = Keystroke {
+        modifiers: Modifiers {
+            platform: true,
+            shift: true,
+            ..Default::default()
+        },
+        key: "u".to_string(),
+        key_char: None,
+    };
+
+    assert_eq!(
+        preview_shortcut_from_keystroke(&keystroke).unwrap(),
+        "Cmd+Shift+U"
+    );
+}
+
+#[test]
+fn test_preview_shortcut_from_modifiers_shows_modifier_only_input() {
+    let preview = preview_shortcut_from_modifiers(Modifiers {
+        platform: true,
+        shift: true,
+        ..Default::default()
+    });
+
+    assert_eq!(preview.as_deref(), Some("Cmd+Shift"));
+}
+
+#[test]
+fn test_preview_shortcut_from_keystroke_keeps_unsupported_main_key_visible() {
+    let keystroke = Keystroke {
+        modifiers: Modifiers {
+            platform: true,
+            shift: true,
+            ..Default::default()
+        },
+        key: "{".to_string(),
+        key_char: None,
+    };
+
+    assert_eq!(
+        preview_shortcut_from_keystroke(&keystroke).unwrap(),
+        "Cmd+Shift+{"
+    );
 }
 
 #[test]
