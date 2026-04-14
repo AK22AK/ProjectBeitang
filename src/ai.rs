@@ -233,7 +233,7 @@ pub fn build_context_bundle(records: &[Record], query: &AiContextQuery) -> AiCon
     }
 }
 
-pub async fn generate_summary(
+pub fn generate_summary(
     settings: &AiSettings,
     api_key: &str,
     query: &AiContextQuery,
@@ -253,24 +253,18 @@ pub async fn generate_summary(
     let chunks = split_day_blocks(&bundle.day_blocks);
     if chunks.len() <= 1 {
         let user_prompt = build_final_prompt(query, bundle, &render_chunks(&chunks));
-        return client
-            .request(summary_system_prompt(query.mode), &user_prompt, 1_600)
-            .await;
+        return client.request(summary_system_prompt(query.mode), &user_prompt, 1_600);
     }
 
     let mut partials = Vec::with_capacity(chunks.len());
     for (idx, chunk) in chunks.iter().enumerate() {
         let prompt = build_chunk_prompt(query, bundle, idx + 1, chunks.len(), chunk);
-        let partial = client
-            .request(chunk_system_prompt(query.mode), &prompt, 1_100)
-            .await?;
+        let partial = client.request(chunk_system_prompt(query.mode), &prompt, 1_100)?;
         partials.push(partial);
     }
 
     let merge_prompt = build_merge_prompt(query, bundle, &partials);
-    client
-        .request(summary_system_prompt(query.mode), &merge_prompt, 1_600)
-        .await
+    client.request(summary_system_prompt(query.mode), &merge_prompt, 1_600)
 }
 
 fn record_matches_query(record: &Record, query: &AiContextQuery) -> bool {
@@ -527,14 +521,14 @@ fn build_merge_prompt(
 }
 
 struct AiClient {
-    client: reqwest::Client,
+    client: reqwest::blocking::Client,
     settings: AiSettings,
     api_key: String,
 }
 
 impl AiClient {
     fn new(settings: &AiSettings, api_key: &str) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
+        let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(settings.request_timeout_secs.max(10)))
             .build()
             .map_err(|err| format!("创建 AI 请求客户端失败: {err}"))?;
@@ -545,7 +539,7 @@ impl AiClient {
         })
     }
 
-    async fn request(
+    fn request(
         &self,
         system_prompt: &str,
         user_prompt: &str,
@@ -554,16 +548,14 @@ impl AiClient {
         match self.settings.protocol {
             AiProviderProtocol::OpenAiCompatible => {
                 self.request_openai_compatible(system_prompt, user_prompt)
-                    .await
             }
             AiProviderProtocol::Anthropic => {
                 self.request_anthropic(system_prompt, user_prompt, max_tokens)
-                    .await
             }
         }
     }
 
-    async fn request_openai_compatible(
+    fn request_openai_compatible(
         &self,
         system_prompt: &str,
         user_prompt: &str,
@@ -583,13 +575,11 @@ impl AiClient {
                 ]
             }))
             .send()
-            .await
             .map_err(|err| format!("请求 OpenAI 兼容接口失败: {err}"))?;
 
         let status = response.status();
         let body = response
             .text()
-            .await
             .map_err(|err| format!("读取 OpenAI 兼容响应失败: {err}"))?;
         if !status.is_success() {
             return Err(format!("OpenAI 兼容接口返回错误 {}: {}", status, body));
@@ -599,7 +589,7 @@ impl AiClient {
         extract_openai_text(&value)
     }
 
-    async fn request_anthropic(
+    fn request_anthropic(
         &self,
         system_prompt: &str,
         user_prompt: &str,
@@ -622,13 +612,11 @@ impl AiClient {
                 ]
             }))
             .send()
-            .await
             .map_err(|err| format!("请求 Anthropic 接口失败: {err}"))?;
 
         let status = response.status();
         let body = response
             .text()
-            .await
             .map_err(|err| format!("读取 Anthropic 响应失败: {err}"))?;
         if !status.is_success() {
             return Err(format!("Anthropic 接口返回错误 {}: {}", status, body));

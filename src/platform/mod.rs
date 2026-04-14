@@ -11,7 +11,9 @@ pub use file_dialog::{
 pub use menu::build_app_menus;
 pub use notifications::send_reminder;
 pub use preview::{open_path, open_saved_attachment};
-pub use secrets::{delete_secret, load_secret, save_secret};
+pub use secrets::{
+    delete_secret, load_secret, save_secret, secrets_file_path, LoadedSecret, SecretSource,
+};
 pub use shortcuts::{
     app_shortcut_entries, app_shortcut_keystrokes, app_shortcut_scope_description,
     app_shortcuts_intro, default_global_shortcuts, global_shortcut_scope_description,
