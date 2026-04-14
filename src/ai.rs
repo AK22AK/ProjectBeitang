@@ -586,7 +586,6 @@ impl AiClient {
             .header(CONTENT_TYPE, "application/json")
             .json(&json!({
                 "model": self.settings.model.trim(),
-                "temperature": 0.2,
                 "messages": [
                     { "role": "system", "content": system_prompt },
                     { "role": "user", "content": user_prompt }
