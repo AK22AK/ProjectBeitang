@@ -21,7 +21,8 @@ use robinne::config::{
 use robinne::data_management::app_data_dir;
 use robinne::platform::{
     app_shortcut_scope_description, app_shortcuts_intro, build_app_menus, delete_secret,
-    load_secret, prewarm_file_dialog, save_secret, secrets_file_path, SecretSource,
+    load_secret, prewarm_file_dialog, record_ai_usage, save_secret, secrets_file_path,
+    AiUsageEventKind, SecretSource,
 };
 use robinne::settings::{
     load_app_settings, save_app_settings, settings_file_path, AppSettings, QuickAddDefaultMode,
@@ -1737,6 +1738,8 @@ impl MainView {
         }
 
         let settings = self.draft_ai_settings(cx);
+        let protocol = settings.protocol;
+        let model_label = settings.model.trim().to_string();
         let input_api_key = self.ai_api_key_input.read(cx).text().to_string();
         let input_api_key = input_api_key.trim().to_string();
         let api_key = if input_api_key.is_empty() {
@@ -1775,13 +1778,50 @@ impl MainView {
             let _ = view.update(cx, |this, cx| {
                 this.ai_connection_testing = false;
                 match result {
-                    Ok(message) => {
-                        this.settings_notice = Some(message);
-                        this.settings_error = None;
+                    Ok(response) => {
+                        let usage_message = response.usage.map(|usage| {
+                            format!(
+                                "（上行 {}，下行 {}）",
+                                usage.input_tokens, usage.output_tokens
+                            )
+                        });
+                        let base_message = format!(
+                            "测试连接成功：{} / {}{}",
+                            protocol.label(),
+                            model_label,
+                            usage_message.unwrap_or_default()
+                        );
+                        match record_ai_usage(
+                            protocol,
+                            AiUsageEventKind::TestConnection,
+                            response.usage,
+                        ) {
+                            Ok(_) => {
+                                this.settings_notice = Some(base_message);
+                                this.settings_error = None;
+                                this.reload_ai_panel_configuration(cx);
+                            }
+                            Err(err) => {
+                                this.settings_notice = None;
+                                this.settings_error =
+                                    Some(format!("{base_message}，但写入 token 统计失败: {err}"));
+                            }
+                        }
                     }
                     Err(err) => {
+                        if let Err(record_err) =
+                            record_ai_usage(protocol, AiUsageEventKind::TestConnection, err.usage)
+                        {
+                            this.settings_error = Some(format!(
+                                "{}；另外写入 token 统计失败: {}",
+                                err.message, record_err
+                            ));
+                            cx.notify();
+                            return;
+                        }
+                        this.reload_ai_panel_configuration(cx);
                         this.settings_notice = None;
-                        this.settings_error = Some(err);
+                        this.settings_error = Some(err.message);
                     }
                 }
                 cx.notify();
