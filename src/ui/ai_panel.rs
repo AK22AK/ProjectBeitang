@@ -2,7 +2,10 @@ use crate::ai::{
     build_context_bundle, generate_summary, local_day_range_to_utc, AiContextBundle,
     AiContextQuery, AiSettings, AiSummaryMode,
 };
-use crate::platform::{load_secret, SecretSource};
+use crate::platform::{
+    load_latest_ai_usage, load_secret, load_today_ai_usage, record_ai_usage, AiDailyUsageEntry,
+    AiLatestUsageSnapshot, AiUsageEventKind, SecretSource,
+};
 use crate::settings::load_app_settings;
 use crate::store::Store;
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -35,6 +38,8 @@ pub struct AiPanel {
     config: AiRuntimeConfig,
     preview_loading: bool,
     generating: bool,
+    today_usage: Option<AiDailyUsageEntry>,
+    last_request_usage: Option<AiLatestUsageSnapshot>,
     result: Option<String>,
     notice: Option<String>,
     error: Option<String>,
@@ -70,6 +75,8 @@ impl AiPanel {
             config: Self::load_runtime_config(),
             preview_loading: false,
             generating: false,
+            today_usage: None,
+            last_request_usage: None,
             result: None,
             notice: None,
             error: None,
@@ -79,11 +86,13 @@ impl AiPanel {
                 |this, window, cx| {
                     if window.is_window_active() {
                         this.refresh_configuration();
+                        this.refresh_usage_metrics();
                         this.reload_preview(cx);
                     }
                 },
             ),
         };
+        panel.refresh_usage_metrics();
         panel.load_filters(cx);
         panel.reload_preview(cx);
         panel
@@ -91,6 +100,7 @@ impl AiPanel {
 
     pub fn reload_configuration(&mut self, cx: &mut Context<Self>) {
         self.refresh_configuration();
+        self.refresh_usage_metrics();
         cx.notify();
     }
 
@@ -111,6 +121,12 @@ impl AiPanel {
 
     fn refresh_configuration(&mut self) {
         self.config = Self::load_runtime_config();
+    }
+
+    fn refresh_usage_metrics(&mut self) {
+        let protocol = self.config.settings.protocol;
+        self.today_usage = load_today_ai_usage(protocol).ok().flatten();
+        self.last_request_usage = load_latest_ai_usage(protocol).ok().flatten();
     }
 
     fn load_filters(&mut self, cx: &mut Context<Self>) {
@@ -284,6 +300,7 @@ impl AiPanel {
         self.refresh_configuration();
 
         let settings = self.config.settings.clone();
+        let protocol = settings.protocol;
         let api_key = match load_secret(settings.protocol) {
             Ok(Some(secret)) => secret.value,
             Ok(None) => {
@@ -311,15 +328,48 @@ impl AiPanel {
             let _ = view.update(cx, |panel, cx| {
                 panel.generating = false;
                 match result {
-                    Ok(text) => {
-                        panel.result = Some(text);
-                        panel.notice = Some("AI 总结已生成，可以复制结果".to_string());
+                    Ok(generation) => {
+                        let usage_store_result = record_ai_usage(
+                            protocol,
+                            AiUsageEventKind::GenerateSummary,
+                            generation.usage,
+                        );
+                        panel.result = Some(generation.text);
+                        panel.notice = Some(match generation.usage {
+                            Some(usage) => format!(
+                                "AI 总结已生成，可以复制结果。本次上行 {}，下行 {}。",
+                                usage.input_tokens, usage.output_tokens
+                            ),
+                            None => {
+                                "AI 总结已生成，可以复制结果。当前响应未返回 usage。".to_string()
+                            }
+                        });
                         panel.error = None;
+                        match usage_store_result {
+                            Ok(_) => {
+                                panel.refresh_usage_metrics();
+                            }
+                            Err(err) => {
+                                panel.notice = None;
+                                panel.error =
+                                    Some(format!("AI 总结已生成，但写入 token 统计失败: {err}"));
+                            }
+                        }
                     }
                     Err(err) => {
+                        let usage_store_result =
+                            record_ai_usage(protocol, AiUsageEventKind::GenerateSummary, err.usage);
                         panel.result = None;
                         panel.notice = None;
-                        panel.error = Some(err);
+                        panel.error = Some(match usage_store_result {
+                            Ok(_) => {
+                                panel.refresh_usage_metrics();
+                                err.message
+                            }
+                            Err(record_err) => {
+                                format!("{}；另外写入 token 统计失败: {}", err.message, record_err)
+                            }
+                        });
                     }
                 }
                 cx.notify();
@@ -781,6 +831,80 @@ impl AiPanel {
         )
     }
 
+    fn render_usage_panel(&self) -> AnyElement {
+        let latest_usage = self
+            .last_request_usage
+            .as_ref()
+            .and_then(|snapshot| snapshot.usage);
+
+        let content = if self.today_usage.is_none() && self.last_request_usage.is_none() {
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .line_height(relative(1.6))
+                .child("暂未产生 token 消耗。完成一次测试连接或生成总结后，会在这里显示今日累计和最近一次动作的上下行 token。")
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(10.0))
+                        .child(render_metric_tile(
+                            "今日上行",
+                            &format_usage_value(self.today_usage.as_ref().map(|entry| entry.usage().input_tokens)),
+                        ))
+                        .child(render_metric_tile(
+                            "今日下行",
+                            &format_usage_value(self.today_usage.as_ref().map(|entry| entry.usage().output_tokens)),
+                        ))
+                        .child(render_metric_tile(
+                            "本次上行",
+                            &format_usage_value(latest_usage.map(|usage| usage.input_tokens)),
+                        ))
+                        .child(render_metric_tile(
+                            "本次下行",
+                            &format_usage_value(latest_usage.map(|usage| usage.output_tokens)),
+                        ))
+                        .into_any_element(),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x8c8c8c))
+                        .line_height(relative(1.6))
+                        .child(match self.last_request_usage.as_ref() {
+                            Some(snapshot) if snapshot.usage.is_some() => format!(
+                                "最近一次动作是“{}”，本次消耗已计入今日累计。",
+                                snapshot.event_kind.label()
+                            ),
+                            Some(snapshot) => format!(
+                                "最近一次动作是“{}”，但该次响应没有返回 usage，所以只更新了本次状态，没有计入今日累计。",
+                                snapshot.event_kind.label()
+                            ),
+                            None => match self.today_usage.as_ref() {
+                                Some(entry) => format!(
+                                    "今日累计已记录 {} 次请求，最近一次动作还没有可展示的 usage 详情。",
+                                    entry.request_count
+                                ),
+                                None => "暂未产生 token 消耗。".to_string(),
+                            },
+                        }),
+                )
+                .into_any_element()
+        };
+
+        render_card(
+            "Token 消耗",
+            "仅统计 Robinne 本应用今天发起的 AI 请求；上行表示 prompt/input tokens，下行表示 completion/output tokens。",
+            vec![content],
+        )
+    }
+
     fn render_evidence_panel(&self) -> AnyElement {
         let metrics = if let Some(preview) = self.preview.as_ref() {
             div()
@@ -1002,6 +1126,7 @@ impl Render for AiPanel {
                             .flex_col()
                             .gap(px(16.0))
                             .child(self.render_analysis_bar(cx))
+                            .when(config_ready, |this| this.child(self.render_usage_panel()))
                             .child(self.render_result_canvas(cx))
                             .when(self.preview.is_some(), |this| this.child(self.render_evidence_panel())),
                     ),
@@ -1073,6 +1198,13 @@ fn render_metric_tile(label: &'static str, value: &str) -> AnyElement {
                 .child(value.to_string()),
         )
         .into_any_element()
+}
+
+fn format_usage_value(value: Option<u64>) -> String {
+    match value {
+        Some(value) => format!("{} tokens", value),
+        None => "暂无".to_string(),
+    }
 }
 
 fn render_record_sample(record: &crate::models::Record) -> AnyElement {

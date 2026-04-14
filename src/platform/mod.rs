@@ -1,3 +1,4 @@
+mod ai_usage;
 mod file_dialog;
 mod menu;
 mod notifications;
@@ -5,6 +6,10 @@ mod preview;
 mod secrets;
 mod shortcuts;
 
+pub use ai_usage::{
+    ai_usage_file_path, load_latest_ai_usage, load_today_ai_usage, record_ai_usage,
+    AiDailyUsageEntry, AiLatestUsageSnapshot, AiUsageEventKind,
+};
 pub use file_dialog::{
     pick_archive_file, pick_image_files, prewarm_file_dialog, save_archive_file, ParentWindowHint,
 };

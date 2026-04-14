@@ -83,6 +83,52 @@ fn default_request_timeout_secs() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_SECS
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl AiUsage {
+    pub fn is_zero(self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
+}
+
+impl std::ops::AddAssign for AiUsage {
+    fn add_assign(&mut self, rhs: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(rhs.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(rhs.output_tokens);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiResponse {
+    pub text: String,
+    pub usage: Option<AiUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiGenerationResult {
+    pub text: String,
+    pub usage: Option<AiUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiOperationError {
+    pub message: String,
+    pub usage: Option<AiUsage>,
+}
+
+impl AiOperationError {
+    fn new(message: impl Into<String>, usage: Option<AiUsage>) -> Self {
+        Self {
+            message: message.into(),
+            usage,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiSummaryMode {
     PastSummary,
@@ -238,51 +284,100 @@ pub fn generate_summary(
     api_key: &str,
     query: &AiContextQuery,
     bundle: &AiContextBundle,
-) -> Result<String, String> {
+) -> Result<AiGenerationResult, AiOperationError> {
     if !settings.has_connection_config() {
-        return Err("AI 连接未配置完整，请先填写 Base URL 和 Model".to_string());
+        return Err(AiOperationError::new(
+            "AI 连接未配置完整，请先填写 Base URL 和 Model",
+            None,
+        ));
     }
     if api_key.trim().is_empty() {
-        return Err("当前协议未配置 API Key".to_string());
+        return Err(AiOperationError::new("当前协议未配置 API Key", None));
     }
     if bundle.records.is_empty() {
-        return Err("当前筛选范围内没有可用于总结的数据".to_string());
+        return Err(AiOperationError::new(
+            "当前筛选范围内没有可用于总结的数据",
+            None,
+        ));
     }
 
-    let client = AiClient::new(settings, api_key)?;
+    let client =
+        AiClient::new(settings, api_key).map_err(|err| AiOperationError::new(err, None))?;
     let chunks = split_day_blocks(&bundle.day_blocks);
     if chunks.len() <= 1 {
         let user_prompt = build_final_prompt(query, bundle, &render_chunks(&chunks));
-        return client.request(summary_system_prompt(query.mode), &user_prompt, 1_600);
+        return client
+            .request(summary_system_prompt(query.mode), &user_prompt, 1_600)
+            .map(|response| AiGenerationResult {
+                text: response.text,
+                usage: response.usage,
+            });
     }
 
     let mut partials = Vec::with_capacity(chunks.len());
+    let mut total_usage = None;
     for (idx, chunk) in chunks.iter().enumerate() {
         let prompt = build_chunk_prompt(query, bundle, idx + 1, chunks.len(), chunk);
-        let partial = client.request(chunk_system_prompt(query.mode), &prompt, 1_100)?;
-        partials.push(partial);
+        match client.request(chunk_system_prompt(query.mode), &prompt, 1_100) {
+            Ok(response) => {
+                merge_usage(&mut total_usage, response.usage);
+                partials.push(response.text);
+            }
+            Err(err) => {
+                merge_usage(&mut total_usage, err.usage);
+                return Err(AiOperationError::new(err.message, total_usage));
+            }
+        }
     }
 
     let merge_prompt = build_merge_prompt(query, bundle, &partials);
-    client.request(summary_system_prompt(query.mode), &merge_prompt, 1_600)
+    match client.request(summary_system_prompt(query.mode), &merge_prompt, 1_600) {
+        Ok(response) => {
+            merge_usage(&mut total_usage, response.usage);
+            Ok(AiGenerationResult {
+                text: response.text,
+                usage: total_usage,
+            })
+        }
+        Err(err) => {
+            merge_usage(&mut total_usage, err.usage);
+            Err(AiOperationError::new(err.message, total_usage))
+        }
+    }
 }
 
-pub fn test_connection(settings: &AiSettings, api_key: &str) -> Result<String, String> {
+pub fn test_connection(
+    settings: &AiSettings,
+    api_key: &str,
+) -> Result<AiResponse, AiOperationError> {
     if !settings.has_connection_config() {
-        return Err("AI 连接未配置完整，请先填写 Base URL 和 Model".to_string());
+        return Err(AiOperationError::new(
+            "AI 连接未配置完整，请先填写 Base URL 和 Model",
+            None,
+        ));
     }
     if api_key.trim().is_empty() {
-        return Err("当前协议未配置 API Key".to_string());
+        return Err(AiOperationError::new("当前协议未配置 API Key", None));
     }
 
-    let client = AiClient::new(settings, api_key)?;
-    let _ = client.request("你是连接测试助手。收到请求后只回复 OK。", "只回复 OK。", 16)?;
+    let client =
+        AiClient::new(settings, api_key).map_err(|err| AiOperationError::new(err, None))?;
+    client.request("你是连接测试助手。收到请求后只回复 OK。", "只回复 OK。", 16)
+}
 
-    Ok(format!(
-        "测试连接成功：{} / {}",
-        settings.protocol.label(),
-        settings.model.trim()
-    ))
+fn merge_usage(total: &mut Option<AiUsage>, usage: Option<AiUsage>) {
+    let Some(usage) = usage else {
+        return;
+    };
+    if usage.is_zero() {
+        return;
+    }
+
+    if let Some(total_usage) = total.as_mut() {
+        *total_usage += usage;
+    } else {
+        *total = Some(usage);
+    }
 }
 
 fn record_matches_query(record: &Record, query: &AiContextQuery) -> bool {
@@ -562,7 +657,7 @@ impl AiClient {
         system_prompt: &str,
         user_prompt: &str,
         max_tokens: u32,
-    ) -> Result<String, String> {
+    ) -> Result<AiResponse, AiOperationError> {
         match self.settings.protocol {
             AiProviderProtocol::OpenAiCompatible => {
                 self.request_openai_compatible(system_prompt, user_prompt)
@@ -577,7 +672,7 @@ impl AiClient {
         &self,
         system_prompt: &str,
         user_prompt: &str,
-    ) -> Result<String, String> {
+    ) -> Result<AiResponse, AiOperationError> {
         let endpoint = endpoint_url(&self.settings.normalized_base_url(), "chat/completions");
         let response = self
             .client
@@ -592,18 +687,27 @@ impl AiClient {
                 ]
             }))
             .send()
-            .map_err(|err| format!("请求 OpenAI 兼容接口失败: {err}"))?;
+            .map_err(|err| {
+                AiOperationError::new(format!("请求 OpenAI 兼容接口失败: {err}"), None)
+            })?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|err| format!("读取 OpenAI 兼容响应失败: {err}"))?;
+        let body = response.text().map_err(|err| {
+            AiOperationError::new(format!("读取 OpenAI 兼容响应失败: {err}"), None)
+        })?;
+        let value = serde_json::from_str::<Value>(&body).ok();
+        let usage = value.as_ref().and_then(extract_openai_usage);
         if !status.is_success() {
-            return Err(format!("OpenAI 兼容接口返回错误 {}: {}", status, body));
+            return Err(AiOperationError::new(
+                format!("OpenAI 兼容接口返回错误 {}: {}", status, body),
+                usage,
+            ));
         }
-        let value: Value =
-            serde_json::from_str(&body).map_err(|err| format!("解析 OpenAI 响应失败: {err}"))?;
-        extract_openai_text(&value)
+        let value = value.ok_or_else(|| {
+            AiOperationError::new(format!("解析 OpenAI 响应失败: 响应不是合法 JSON"), None)
+        })?;
+        let text = extract_openai_text(&value).map_err(|err| AiOperationError::new(err, usage))?;
+        Ok(AiResponse { text, usage })
     }
 
     fn request_anthropic(
@@ -611,7 +715,7 @@ impl AiClient {
         system_prompt: &str,
         user_prompt: &str,
         max_tokens: u32,
-    ) -> Result<String, String> {
+    ) -> Result<AiResponse, AiOperationError> {
         let endpoint = endpoint_url(&self.settings.normalized_base_url(), "messages");
         let response = self
             .client
@@ -629,18 +733,28 @@ impl AiClient {
                 ]
             }))
             .send()
-            .map_err(|err| format!("请求 Anthropic 接口失败: {err}"))?;
+            .map_err(|err| {
+                AiOperationError::new(format!("请求 Anthropic 接口失败: {err}"), None)
+            })?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|err| format!("读取 Anthropic 响应失败: {err}"))?;
+        let body = response.text().map_err(|err| {
+            AiOperationError::new(format!("读取 Anthropic 响应失败: {err}"), None)
+        })?;
+        let value = serde_json::from_str::<Value>(&body).ok();
+        let usage = value.as_ref().and_then(extract_anthropic_usage);
         if !status.is_success() {
-            return Err(format!("Anthropic 接口返回错误 {}: {}", status, body));
+            return Err(AiOperationError::new(
+                format!("Anthropic 接口返回错误 {}: {}", status, body),
+                usage,
+            ));
         }
-        let value: Value =
-            serde_json::from_str(&body).map_err(|err| format!("解析 Anthropic 响应失败: {err}"))?;
-        extract_anthropic_text(&value)
+        let value = value.ok_or_else(|| {
+            AiOperationError::new(format!("解析 Anthropic 响应失败: 响应不是合法 JSON"), None)
+        })?;
+        let text =
+            extract_anthropic_text(&value).map_err(|err| AiOperationError::new(err, usage))?;
+        Ok(AiResponse { text, usage })
     }
 }
 
@@ -688,6 +802,16 @@ fn extract_openai_text(value: &Value) -> Result<String, String> {
     Err("OpenAI 兼容响应中未找到可用文本".to_string())
 }
 
+fn extract_openai_usage(value: &Value) -> Option<AiUsage> {
+    let usage = value.get("usage")?;
+    let input_tokens = extract_usage_number(usage, &["prompt_tokens", "input_tokens"])?;
+    let output_tokens = extract_usage_number(usage, &["completion_tokens", "output_tokens"])?;
+    Some(AiUsage {
+        input_tokens,
+        output_tokens,
+    })
+}
+
 fn extract_anthropic_text(value: &Value) -> Result<String, String> {
     let text = value
         .get("content")
@@ -705,6 +829,26 @@ fn extract_anthropic_text(value: &Value) -> Result<String, String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+fn extract_anthropic_usage(value: &Value) -> Option<AiUsage> {
+    let usage = value.get("usage")?;
+    let input_tokens = extract_usage_number(usage, &["input_tokens"])?;
+    let output_tokens = extract_usage_number(usage, &["output_tokens"])?;
+    Some(AiUsage {
+        input_tokens,
+        output_tokens,
+    })
+}
+
+fn extract_usage_number(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|number| {
+            number
+                .as_u64()
+                .or_else(|| number.as_i64().and_then(|value| u64::try_from(value).ok()))
+        })
 }
 
 #[cfg(test)]
@@ -755,5 +899,41 @@ mod tests {
 
         let chunks = split_day_blocks(&blocks);
         assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn openai_usage_is_extracted_from_standard_fields() {
+        let value = json!({
+            "usage": {
+                "prompt_tokens": 123,
+                "completion_tokens": 45
+            }
+        });
+
+        assert_eq!(
+            extract_openai_usage(&value),
+            Some(AiUsage {
+                input_tokens: 123,
+                output_tokens: 45,
+            })
+        );
+    }
+
+    #[test]
+    fn anthropic_usage_is_extracted_from_usage_object() {
+        let value = json!({
+            "usage": {
+                "input_tokens": 77,
+                "output_tokens": 9
+            }
+        });
+
+        assert_eq!(
+            extract_anthropic_usage(&value),
+            Some(AiUsage {
+                input_tokens: 77,
+                output_tokens: 9,
+            })
+        );
     }
 }
