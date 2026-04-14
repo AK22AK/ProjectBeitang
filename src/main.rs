@@ -4,10 +4,11 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::Disableable;
 use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
-use robinne::ai::AiProviderProtocol;
+use robinne::ai::{test_connection, AiProviderProtocol, AiSettings};
 use robinne::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, quick_add_overlay_keystroke, search_keystroke,
     settings_keystroke,
@@ -1242,6 +1243,7 @@ pub struct MainView {
     app_settings: AppSettings,
     ai_api_key_present: bool,
     ai_api_key_source: Option<SecretSource>,
+    ai_connection_testing: bool,
     dashboard_panel: Entity<Dashboard>,
     ai_panel: Entity<AiPanel>,
     data_management_panel: Entity<DataManagementPanel>,
@@ -1327,6 +1329,7 @@ impl MainView {
             app_settings,
             ai_api_key_present,
             ai_api_key_source,
+            ai_connection_testing: false,
             dashboard_panel,
             ai_panel,
             data_management_panel,
@@ -1711,6 +1714,80 @@ impl MainView {
         self.app_settings.ai.model = model;
         self.persist_settings("已保存 AI 连接配置", cx);
         self.reload_ai_panel_configuration(cx);
+    }
+
+    fn draft_ai_settings(&self, cx: &App) -> AiSettings {
+        let mut settings = self.app_settings.ai.clone();
+        let base_url = self.ai_base_url_input.read(cx).text().to_string();
+        let model = self.ai_model_input.read(cx).text().to_string();
+        let base_url = base_url.trim().to_string();
+        let model = model.trim().to_string();
+        settings.base_url = if base_url.is_empty() {
+            settings.protocol.default_base_url().to_string()
+        } else {
+            base_url
+        };
+        settings.model = model;
+        settings
+    }
+
+    fn test_ai_connection(&mut self, cx: &mut Context<Self>) {
+        if self.ai_connection_testing {
+            return;
+        }
+
+        let settings = self.draft_ai_settings(cx);
+        let input_api_key = self.ai_api_key_input.read(cx).text().to_string();
+        let input_api_key = input_api_key.trim().to_string();
+        let api_key = if input_api_key.is_empty() {
+            match load_secret(settings.protocol) {
+                Ok(Some(secret)) => secret.value,
+                Ok(None) => {
+                    self.settings_notice = None;
+                    self.settings_error = Some(format!(
+                        "当前协议还没有可用 API Key，请先保存本地 Key，或提供环境变量 {}",
+                        settings.protocol.api_key_env_var()
+                    ));
+                    cx.notify();
+                    return;
+                }
+                Err(err) => {
+                    self.settings_notice = None;
+                    self.settings_error = Some(err);
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            input_api_key
+        };
+
+        self.ai_connection_testing = true;
+        self.settings_notice = Some("正在测试 AI 连接…".to_string());
+        self.settings_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { test_connection(&settings, &api_key) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.ai_connection_testing = false;
+                match result {
+                    Ok(message) => {
+                        this.settings_notice = Some(message);
+                        this.settings_error = None;
+                    }
+                    Err(err) => {
+                        this.settings_notice = None;
+                        this.settings_error = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn save_ai_api_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2761,10 +2838,24 @@ impl MainView {
                                         })),
                                 )
                                 .child(
+                                    Button::new("test-ai-connection")
+                                        .child(if self.ai_connection_testing {
+                                            "测试中…"
+                                        } else {
+                                            "测试连接"
+                                        })
+                                        .when(self.ai_connection_testing, |button| {
+                                            button.disabled(true)
+                                        })
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.test_ai_connection(cx);
+                                        })),
+                                )
+                                .child(
                                     div()
                                         .text_sm()
                                         .text_color(rgb(0x8c8c8c))
-                                        .child("Base URL 留空时会回落到当前协议默认值。"),
+                                        .child("Base URL 留空时会回落到当前协议默认值。测试连接会使用当前输入框里的值。"),
                                 )
                                 .into_any_element(),
                         )
