@@ -2,7 +2,7 @@ use crate::ai::{
     build_context_bundle, generate_summary, local_day_range_to_utc, AiContextBundle,
     AiContextQuery, AiSettings, AiSummaryMode,
 };
-use crate::platform::load_secret;
+use crate::platform::{load_secret, SecretSource};
 use crate::settings::load_app_settings;
 use crate::store::Store;
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -20,6 +20,7 @@ const AI_EVIDENCE_SAMPLE_LIMIT: usize = 6;
 struct AiRuntimeConfig {
     settings: AiSettings,
     has_api_key: bool,
+    source: Option<SecretSource>,
 }
 
 pub struct AiPanel {
@@ -98,13 +99,14 @@ impl AiPanel {
         let settings = load_app_settings()
             .map(|app_settings| app_settings.ai)
             .unwrap_or_default();
-        let has_api_key = load_secret(settings.protocol.api_key_env_var())
-            .ok()
-            .flatten()
-            .is_some();
+        let (has_api_key, source) = match load_secret(settings.protocol) {
+            Ok(Some(secret)) => (true, Some(secret.source)),
+            Ok(None) | Err(_) => (false, None),
+        };
         AiRuntimeConfig {
             settings,
             has_api_key,
+            source,
         }
     }
 
@@ -283,12 +285,12 @@ impl AiPanel {
         self.refresh_configuration();
 
         let settings = self.config.settings.clone();
-        let api_key = match load_secret(settings.protocol.api_key_env_var()) {
-            Ok(Some(api_key)) => api_key,
+        let api_key = match load_secret(settings.protocol) {
+            Ok(Some(secret)) => secret.value,
             Ok(None) => {
                 self.generating = false;
                 self.error = Some(format!(
-                    "当前协议还没有检测到环境变量 {}，请先去设置里配置",
+                    "当前协议还没有配置 API Key，请先去设置里保存本地 Key，或提供环境变量 {}",
                     settings.protocol.api_key_env_var()
                 ));
                 cx.notify();
@@ -303,7 +305,10 @@ impl AiPanel {
         };
 
         cx.spawn(async move |view, cx| {
-            let result = generate_summary(&settings, &api_key, &query, &bundle).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { generate_summary(&settings, &api_key, &query, &bundle) })
+                .await;
             let _ = view.update(cx, |panel, cx| {
                 panel.generating = false;
                 match result {
@@ -927,10 +932,11 @@ impl Render for AiPanel {
         let status_detail = if !self.config.settings.has_connection_config() {
             "请先在设置里保存 Base URL 和 Model".to_string()
         } else if !self.config.has_api_key {
-            format!(
-                "当前协议还没有检测到 {}",
-                self.config.settings.protocol.api_key_env_var()
-            )
+            "当前协议还没有可用的 API Key".to_string()
+        } else if self.config.source == Some(SecretSource::LocalFile) {
+            "当前使用本地配置中的 API Key".to_string()
+        } else if let Some(SecretSource::Environment(env_var)) = self.config.source {
+            format!("当前从环境变量 {env_var} 读取 API Key")
         } else {
             format!(
                 "{} · {}",
