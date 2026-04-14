@@ -267,6 +267,24 @@ pub fn generate_summary(
     client.request(summary_system_prompt(query.mode), &merge_prompt, 1_600)
 }
 
+pub fn test_connection(settings: &AiSettings, api_key: &str) -> Result<String, String> {
+    if !settings.has_connection_config() {
+        return Err("AI 连接未配置完整，请先填写 Base URL 和 Model".to_string());
+    }
+    if api_key.trim().is_empty() {
+        return Err("当前协议未配置 API Key".to_string());
+    }
+
+    let client = AiClient::new(settings, api_key)?;
+    let _ = client.request("你是连接测试助手。收到请求后只回复 OK。", "只回复 OK。", 16)?;
+
+    Ok(format!(
+        "测试连接成功：{} / {}",
+        settings.protocol.label(),
+        settings.model.trim()
+    ))
+}
+
 fn record_matches_query(record: &Record, query: &AiContextQuery) -> bool {
     if !query.tags.is_empty()
         && !query

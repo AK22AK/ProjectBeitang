@@ -13,8 +13,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, Sizable};
 use std::collections::BTreeSet;
 
-const AI_TWO_COLUMN_BREAKPOINT: Pixels = px(1280.0);
-const AI_EVIDENCE_SAMPLE_LIMIT: usize = 6;
+const AI_EVIDENCE_SAMPLE_LIMIT: usize = 3;
 
 #[derive(Clone)]
 struct AiRuntimeConfig {
@@ -413,9 +412,18 @@ impl AiPanel {
     }
 
     fn render_analysis_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let preview_summary = self.preview.as_ref().map(|preview| {
+            format!(
+                "当前命中 {} 条记录，{} 条任务，{} 条记录/想法/事件。",
+                preview.records.len(),
+                preview.task_count,
+                preview.note_like_count
+            )
+        });
+
         render_card(
-            "分析控制",
-            "先定模式和时间，再生成结果。",
+            "生成总结",
+            "先定模式和范围，再直接生成结果。",
             vec![
                 div()
                     .flex()
@@ -442,6 +450,14 @@ impl AiPanel {
                                 this.generate(cx);
                             })),
                     )
+                    .into_any_element(),
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .line_height(relative(1.5))
+                    .child(preview_summary.unwrap_or_else(|| {
+                        "先选择时间范围，系统会先本地预览命中的记录。".to_string()
+                    }))
                     .into_any_element(),
                 div()
                     .flex()
@@ -516,6 +532,24 @@ impl AiPanel {
                             .into_any_element(),
                     )
                     .into_any_element(),
+                self.render_filter_section(
+                    "标签",
+                    &self.available_tags,
+                    &self.selected_tags,
+                    "当前未建立标签，先按时间范围分析。",
+                    "清除标签",
+                    cx,
+                    true,
+                ),
+                self.render_filter_section(
+                    "人物",
+                    &self.available_persons,
+                    &self.selected_persons,
+                    "当前未建立人物关联，先按时间范围分析。",
+                    "清除人物",
+                    cx,
+                    false,
+                ),
             ],
         )
     }
@@ -614,79 +648,53 @@ impl AiPanel {
             .into_any_element()
     }
 
-    fn render_scope_filters_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        render_card(
-            "收窄范围",
-            "标签和人物是次级过滤器，只在你想进一步收窄分析对象时使用。",
-            vec![
-                self.render_filter_section(
-                    "标签",
-                    &self.available_tags,
-                    &self.selected_tags,
-                    "当前未建立标签，先按时间范围分析。",
-                    "清除标签",
-                    cx,
-                    true,
-                ),
-                self.render_filter_section(
-                    "人物",
-                    &self.available_persons,
-                    &self.selected_persons,
-                    "当前未建立人物关联，先按时间范围分析。",
-                    "清除人物",
-                    cx,
-                    false,
-                ),
-            ],
-        )
-    }
-
     fn render_result_canvas(&self, cx: &mut Context<Self>) -> AnyElement {
-        let header =
-            div()
-                .flex()
-                .gap(px(12.0))
-                .when(self.result.is_some(), |this| {
-                    this.items_center().justify_between()
-                })
-                .when(self.result.is_none(), |this| this.flex_col())
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0x262626))
-                                .child("结果画布"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x8c8c8c))
-                                .line_height(relative(1.5))
-                                .child(if self.generating {
-                                    "正在整理上下文、分层压缩并请求模型。"
-                                } else if self.result.is_some() {
-                                    "结果已经生成，可以继续阅读、复制或调整范围后重跑。"
-                                } else {
-                                    "这里展示本次分析的最终结果。先设定范围，再点击生成。"
-                                }),
-                        ),
-                )
-                .when(self.result.is_some(), |this| {
-                    this.child(Button::new("ai-copy-result").child("复制结果").on_click(
-                        cx.listener(|this, _event, _window, cx| {
+        let header = div()
+            .flex()
+            .gap(px(12.0))
+            .when(self.result.is_some(), |this| {
+                this.items_center().justify_between()
+            })
+            .when(self.result.is_none(), |this| this.flex_col())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x262626))
+                            .child("结果画布"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x8c8c8c))
+                            .line_height(relative(1.5))
+                            .child(if self.generating {
+                                "正在整理上下文并请求模型，结果会直接出现在下面。"
+                            } else if self.result.is_some() {
+                                "结果已经生成，可以继续阅读、复制或调整范围后重跑。"
+                            } else {
+                                "这里会显示最终结果。点上面的“生成总结”后，不需要再滚到别处找结果。"
+                            }),
+                    ),
+            )
+            .when(self.result.is_some(), |this| {
+                this.child(
+                    Button::new("ai-copy-result")
+                        .child("复制结果")
+                        .on_click(cx.listener(|this, _event, _window, cx| {
                             this.copy_result(cx);
-                        }),
-                    ))
-                });
+                        })),
+                )
+            });
 
         let body = if self.generating {
             div()
-                .min_h(px(360.0))
+                .min_h(px(220.0))
                 .flex()
                 .flex_col()
                 .justify_center()
@@ -708,7 +716,7 @@ impl AiPanel {
                 .into_any_element()
         } else if let Some(result) = self.result.as_ref() {
             div()
-                .min_h(px(360.0))
+                .min_h(px(220.0))
                 .max_h(px(760.0))
                 .overflow_y_scrollbar()
                 .p(px(18.0))
@@ -727,7 +735,7 @@ impl AiPanel {
         } else {
             let preview = self.preview.as_ref();
             div()
-                .min_h(px(360.0))
+                .min_h(px(220.0))
                 .p(px(22.0))
                 .rounded(px(14.0))
                 .bg(rgb(0xfcfcfc))
@@ -762,43 +770,6 @@ impl AiPanel {
                                 },
                             ),
                         ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(10.0))
-                        .child(
-                            self.render_filter_chip(
-                                "ai-empty-7d",
-                                "最近 7 天",
-                                false,
-                                cx.listener(|this, _event, window, cx| {
-                                    this.set_quick_range(7, window, cx);
-                                }),
-                            ),
-                        )
-                        .child(
-                            self.render_filter_chip(
-                                "ai-empty-week",
-                                "本周",
-                                false,
-                                cx.listener(|this, _event, window, cx| {
-                                    this.set_current_week_range(window, cx);
-                                }),
-                            ),
-                        )
-                        .child(
-                            self.render_filter_chip(
-                                "ai-empty-30d",
-                                "最近 30 天",
-                                false,
-                                cx.listener(|this, _event, window, cx| {
-                                    this.set_quick_range(30, window, cx);
-                                }),
-                            ),
-                        )
-                        .into_any_element(),
                 )
                 .into_any_element()
         };
@@ -879,8 +850,8 @@ impl AiPanel {
         };
 
         render_card(
-            "证据栏",
-            "这里解释 AI 这次会看什么，以及为什么会得到当前结果。",
+            "分析依据",
+            "需要时再看这里，确认这次总结是基于哪些记录生成的。",
             vec![
                 metrics,
                 div()
@@ -921,9 +892,8 @@ impl AiPanel {
 }
 
 impl Render for AiPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let config_ready = self.config.settings.has_connection_config() && self.config.has_api_key;
-        let two_column = window.viewport_size().width >= AI_TWO_COLUMN_BREAKPOINT;
         let status_badge = if config_ready {
             "AI 连接已就绪"
         } else {
@@ -965,10 +935,8 @@ impl Render for AiPanel {
                         div()
                             .flex()
                             .min_w(px(0.0))
-                            .when(two_column, |this| {
-                                this.items_start().justify_between()
-                            })
-                            .when(!two_column, |this| this.flex_col().items_start())
+                            .flex_col()
+                            .items_start()
                             .gap(px(16.0))
                             .child(
                                 div()
@@ -998,8 +966,7 @@ impl Render for AiPanel {
                                     .flex_col()
                                     .gap(px(6.0))
                                     .min_w(px(0.0))
-                                    .when(two_column, |this| this.items_end())
-                                    .when(!two_column, |this| this.items_start())
+                                    .items_start()
                                     .child(
                                         div()
                                             .text_xs()
@@ -1032,31 +999,11 @@ impl Render for AiPanel {
                     .child(
                         div()
                             .flex()
+                            .flex_col()
                             .gap(px(16.0))
-                            .when(two_column, |this| this.items_start())
-                            .when(!two_column, |this| this.flex_col())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .w_full()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(16.0))
-                                    .child(self.render_result_canvas(cx))
-                                    .child(self.render_evidence_panel()),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .min_w(px(0.0))
-                                    .when(two_column, |this| this.max_w(px(360.0)))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(16.0))
-                                    .child(self.render_analysis_bar(cx))
-                                    .child(self.render_scope_filters_card(cx)),
-                            ),
+                            .child(self.render_analysis_bar(cx))
+                            .child(self.render_result_canvas(cx))
+                            .when(self.preview.is_some(), |this| this.child(self.render_evidence_panel())),
                     ),
             )
     }
