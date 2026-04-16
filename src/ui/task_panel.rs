@@ -8,6 +8,7 @@ use crate::ui::tokenized_text::{
 };
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::prelude::FluentBuilder as _;
+use gpui::InteractiveElement as _;
 use gpui::StatefulInteractiveElement as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
@@ -2017,7 +2018,7 @@ impl Render for TaskPanel {
 
         let (pending_count, completed_count): (usize, usize) =
             self.tasks.iter().fold((0, 0), |(p, c), task| {
-                if task.completed_at.is_some() {
+                if matches!(task.status, Some(TaskStatus::Done)) {
                     (p, c + 1)
                 } else {
                     (p + 1, c)
@@ -2139,8 +2140,14 @@ impl Render for TaskPanel {
                     }))
                     .child(
                         div()
+                            .id("task-panel-title")
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.show_completed = !this.show_completed;
+                                cx.notify();
+                            }))
                             .child(format!(
                                 "任务 ({} 待办 / {} 已完成)",
                                 pending_count, completed_count
