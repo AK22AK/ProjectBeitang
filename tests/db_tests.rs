@@ -28,7 +28,7 @@ fn test_create_and_get_task() {
     );
     db.create_record(&task).unwrap();
 
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].title, Some("Test Title".to_string()));
     assert_eq!(tasks[0].content, "Test content");
@@ -40,7 +40,7 @@ fn test_create_and_get_task() {
 fn test_get_tasks_returns_empty_when_no_tasks() {
     let (db, _temp) = setup_test_db();
 
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
     assert!(tasks.is_empty());
 }
 
@@ -56,7 +56,7 @@ fn test_create_multiple_tasks() {
     db.create_record(&task2).unwrap();
     db.create_record(&task3).unwrap();
 
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
     assert_eq!(tasks.len(), 3);
 }
 
@@ -73,7 +73,7 @@ fn test_task_priorities_preserved_correctly() {
     db.create_record(&medium).unwrap();
     db.create_record(&low).unwrap();
 
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
 
     let high_task = tasks
         .iter()
@@ -105,7 +105,7 @@ fn test_update_existing_task() {
     task.priority = Some(Priority::High);
     db.create_record(&task).unwrap();
 
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
     assert_eq!(tasks.len(), 1); // Still one task
     assert_eq!(tasks[0].content, "Updated content");
     assert_eq!(tasks[0].priority, Some(Priority::High));
@@ -127,7 +127,7 @@ fn test_complete_task() {
     db.create_record(&task).unwrap();
 
     // Reload and verify
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
     assert_eq!(tasks.len(), 1);
     assert!(tasks[0].is_completed());
     assert!(tasks[0].completed_at.is_some());
@@ -483,7 +483,7 @@ fn test_update_notified_at_does_not_overwrite_other_fields() {
     db.update_record_notified_at(task.id, now).unwrap();
 
     // 重新读取，验证标题仍然是用户修改后的值，没有被旧数据覆盖
-    let tasks = db.get_tasks(false).unwrap();
+    let tasks = db.get_tasks().unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].title, Some("用户修改后的标题".to_string()));
     assert!(tasks[0].notified_at.is_some());

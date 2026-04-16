@@ -834,7 +834,7 @@ impl TaskPanel {
                     "[TaskPanel] Fetching tasks from store... (attempt {})",
                     retries + 1
                 );
-                match store.get_tasks(false).await {
+                match store.get_tasks().await {
                     Ok(tasks) => break tasks,
                     Err(e) => {
                         eprintln!("[TaskPanel] Failed to load tasks: {}, retrying...", e);

@@ -296,6 +296,7 @@ impl Record {
     pub fn complete(&mut self) {
         self.completed_at = Some(Utc::now());
         self.updated_at = Utc::now();
+        self.status = Some(TaskStatus::Done);
     }
 
     pub fn is_completed(&self) -> bool {
