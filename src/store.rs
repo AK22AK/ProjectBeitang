@@ -385,7 +385,7 @@ impl StoreRuntime {
                         let notifications_enabled = load_app_settings()
                             .map(|settings| settings.reminders.notifications_enabled)
                             .unwrap_or(true);
-                        for mut record in records {
+                        for record in records {
                             eprintln!("[Store] Processing reminder for task: {}", record.id);
                             if !notifications_enabled {
                                 continue;
@@ -393,8 +393,8 @@ impl StoreRuntime {
                             match crate::platform::send_reminder(&record) {
                                 Ok(_) => {
                                     eprintln!("[Store] Notification sent successfully");
-                                    record.notified_at = Some(chrono::Utc::now());
-                                    if let Err(e) = db_clone.create_record(&record) {
+                                    let now = chrono::Utc::now();
+                                    if let Err(e) = db_clone.update_record_notified_at(record.id, now) {
                                         eprintln!("[Store] Failed to update notified_at: {}", e);
                                     }
                                 }

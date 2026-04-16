@@ -457,3 +457,34 @@ fn test_get_all_records_returns_all_types_in_updated_order() {
     assert_eq!(results[1].record_type, RecordType::Idea);
     assert_eq!(results[2].record_type, RecordType::Task);
 }
+
+// ============================================================================
+// 任务生命周期验证
+// ============================================================================
+
+/// 验证：update_record_notified_at 不会覆盖用户的并发修改（如标题变更）
+#[test]
+fn test_update_notified_at_does_not_overwrite_other_fields() {
+    let (db, _temp) = setup_test_db();
+
+    let mut task = Record::new_task(
+        "原始标题".to_string(),
+        "内容".to_string(),
+        Priority::Medium,
+    );
+    db.create_record(&task).unwrap();
+
+    // 模拟用户并发修改标题（实际场景中这是另一个线程/进程的操作）
+    task.title = Some("用户修改后的标题".to_string());
+    db.create_record(&task).unwrap();
+
+    // 模拟提醒线程只更新 notified_at
+    let now = Utc::now();
+    db.update_record_notified_at(task.id, now).unwrap();
+
+    // 重新读取，验证标题仍然是用户修改后的值，没有被旧数据覆盖
+    let tasks = db.get_tasks(false).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].title, Some("用户修改后的标题".to_string()));
+    assert!(tasks[0].notified_at.is_some());
+}

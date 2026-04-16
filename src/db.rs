@@ -532,6 +532,17 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_record_notified_at(&self, id: uuid::Uuid, notified_at: chrono::DateTime<Utc>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE records SET notified_at = ?1 WHERE id = ?2",
+            [
+                &notified_at.to_rfc3339() as &dyn rusqlite::ToSql,
+                &id.to_string() as &dyn rusqlite::ToSql,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn get_or_create_tag_internal(&self, tx: &rusqlite::Transaction, name: &str) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
 
