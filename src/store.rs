@@ -132,6 +132,10 @@ pub enum StoreCommand {
         reason: Option<String>,
         respond_to: Sender<Result<(), String>>,
     },
+    ReopenTask {
+        id: uuid::Uuid,
+        respond_to: Sender<Result<(), String>>,
+    },
     // 标签操作
     GetAllTags {
         respond_to: Sender<Result<Vec<Tag>, String>>,
@@ -486,6 +490,10 @@ impl StoreRuntime {
                     respond_to,
                 } => {
                     let result = self.handle_cancel_task(id, reason).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::ReopenTask { id, respond_to } => {
+                    let result = self.handle_reopen_task(id).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetAllTags { respond_to } => {
@@ -958,6 +966,28 @@ impl StoreRuntime {
 
                 record.status = Some(TaskStatus::Cancelled);
                 record.cancelled_reason = reason;
+                record.updated_at = chrono::Utc::now();
+                record = self.normalize_record_for_persistence(record)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_reopen_task(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] handle_reopen_task called for id: {}", id);
+        match &self.db {
+            Some(db) => {
+                let mut record = match db.get_record_by_id(id) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => return Err("Task not found".to_string()),
+                    Err(e) => return Err(format!("Database error: {}", e)),
+                };
+
+                record.status = Some(TaskStatus::Todo);
+                record.completed_at = None;
+                record.cancelled_reason = None;
                 record.updated_at = chrono::Utc::now();
                 record = self.normalize_record_for_persistence(record)?;
                 db.create_record(&record)
@@ -1867,6 +1897,16 @@ impl Store {
                 reason,
                 respond_to: tx,
             })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn reopen_task(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] reopen_task called for id: {}", id);
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::ReopenTask { id, respond_to: tx })
             .await;
         rx.recv().await.unwrap_or(Ok(()))
     }

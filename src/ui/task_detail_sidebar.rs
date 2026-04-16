@@ -64,6 +64,7 @@ pub struct TaskDetailSidebar {
     attachment_error: Option<String>,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_delete: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
+    on_reopen: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
 }
 
@@ -124,6 +125,7 @@ impl TaskDetailSidebar {
             attachment_error: None,
             on_save: None,
             on_delete: None,
+            on_reopen: None,
             on_close: None,
         }
     }
@@ -140,6 +142,13 @@ impl TaskDetailSidebar {
         F: Fn(String, &mut Context<Self>) + Send + Sync + 'static,
     {
         self.on_delete = Some(Box::new(callback));
+    }
+
+    pub fn on_reopen<F>(&mut self, callback: F)
+    where
+        F: Fn(String, &mut Context<Self>) + Send + Sync + 'static,
+    {
+        self.on_reopen = Some(Box::new(callback));
     }
 
     pub fn on_close<F>(&mut self, callback: F)
@@ -2022,6 +2031,31 @@ impl Render for TaskDetailSidebar {
                                                     },
                                                 )),
                                         ),
+                                    )
+                                    .when(
+                                        matches!(self.status, Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)),
+                                        |el| {
+                                            el.child(
+                                                div().flex_1().child(
+                                                    Button::new("task-sidebar-reopen-detail")
+                                                        .w_full()
+                                                        .child("重新打开")
+                                                        .on_click(cx.listener(
+                                                            |this, _event, _window, cx| {
+                                                                if let Some(ref task_id) =
+                                                                    this.current_task_id
+                                                                {
+                                                                    if let Some(ref callback) =
+                                                                        this.on_reopen
+                                                                    {
+                                                                        callback(task_id.clone(), cx);
+                                                                    }
+                                                                }
+                                                            },
+                                                        )),
+                                                ),
+                                            )
+                                        },
                                     )
                                     .child(
                                         div().flex_1().child(

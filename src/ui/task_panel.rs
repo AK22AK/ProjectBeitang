@@ -261,6 +261,16 @@ impl TaskPanel {
         });
         let handle = cx.entity().clone();
         panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_reopen(move |task_id, cx| {
+                if let Ok(task_id) = Uuid::parse_str(&task_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.handle_reopen_task(task_id, cx);
+                    });
+                }
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
             sidebar.on_close(move |cx| {
                 handle.update(cx, |panel, cx| {
                     panel.handle_sidebar_close(cx);
@@ -921,6 +931,21 @@ impl TaskPanel {
             )
             .detach();
         }
+    }
+
+    fn handle_reopen_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| match store.reopen_task(task_id).await {
+            Ok(_) => {
+                view.update(cx, |panel, cx| {
+                    panel.load_tasks(cx);
+                    panel.handle_sidebar_close(cx);
+                })
+                .ok();
+            }
+            Err(e) => eprintln!("[TaskPanel] Failed to reopen task: {}", e),
+        })
+        .detach();
     }
 
     fn request_delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
