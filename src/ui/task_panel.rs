@@ -24,6 +24,8 @@ actions!(
     [
         EditTaskAction,
         DeleteTaskAction,
+        ToggleCompleteTaskAction,
+        CancelTaskAction,
         SetReminderAction,
         SetReminderTodayAction,
         SetReminderTomorrowAction,
@@ -1082,10 +1084,14 @@ impl TaskPanel {
     }
 
     fn render_custom_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (_task_id, position) = match (self.context_menu_task_id, self.context_menu_position) {
+        let (task_id, position) = match (self.context_menu_task_id, self.context_menu_position) {
             (Some(id), Some(pos)) => (id, pos),
             _ => return None,
         };
+
+        let task_status = self.tasks.iter().find(|t| t.id == task_id).and_then(|t| t.status.clone());
+        let is_done_or_cancelled = matches!(task_status, Some(TaskStatus::Done) | Some(TaskStatus::Cancelled));
+        let is_cancelled = matches!(task_status, Some(TaskStatus::Cancelled));
 
         Some(
             deferred(
@@ -1151,6 +1157,17 @@ impl TaskPanel {
                             EditTaskAction,
                             cx,
                         ))
+                        .child(div().h_px().bg(rgb(0xeeeeee)))
+                        .child(
+                            if is_done_or_cancelled {
+                                self.render_menu_item("重新打开", IconName::Undo, ToggleCompleteTaskAction, cx)
+                            } else {
+                                self.render_menu_item("标记完成", IconName::Check, ToggleCompleteTaskAction, cx)
+                            }
+                        )
+                        .when(!is_cancelled && !is_done_or_cancelled, |el| {
+                            el.child(self.render_menu_item("取消任务", IconName::CircleX, CancelTaskAction, cx))
+                        })
                         .child(div().h_px().bg(rgb(0xeeeeee)))
                         .child(self.render_menu_item(
                             "删除",
@@ -2113,6 +2130,40 @@ impl Render for TaskPanel {
                 cx.listener(|this, _action: &DeleteTaskAction, _window, cx| {
                     if let Some(task_id) = this.context_menu_task_id {
                         this.request_delete_task(task_id, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &ToggleCompleteTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        if let Some(task) = this.tasks.iter().find(|t| t.id == task_id) {
+                            if matches!(task.status, Some(TaskStatus::Cancelled)) {
+                                this.handle_reopen_task(task_id, cx);
+                            } else {
+                                this.toggle_task_complete(task_id, cx);
+                            }
+                        }
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &CancelTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let store = this.store.clone();
+                        cx.spawn(async move |view, cx| {
+                            match store.cancel_task(task_id, None).await {
+                                Ok(_) => {
+                                    view.update(cx, |panel, cx| {
+                                        panel.load_tasks(cx);
+                                    })
+                                    .ok();
+                                }
+                                Err(e) => {
+                                    eprintln!("[TaskPanel] Failed to cancel task: {}", e);
+                                }
+                            }
+                        })
+                        .detach();
                     }
                 }),
             )
