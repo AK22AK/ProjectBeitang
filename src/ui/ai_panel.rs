@@ -1,6 +1,6 @@
 use crate::ai::{
     build_context_bundle, generate_summary, local_day_range_to_utc, AiContextBundle,
-    AiContextQuery, AiSettings, AiSummaryMode,
+    AiContextQuery, AiRecordScope, AiSettings, AiSummaryMode,
 };
 use crate::platform::{
     load_latest_ai_usage, load_secret, load_today_ai_usage, record_ai_usage, AiDailyUsageEntry,
@@ -12,11 +12,10 @@ use chrono::{Datelike, Duration, Local, NaiveDate};
 use gpui::{prelude::*, ClipboardItem, *};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::date_picker::{DatePicker, DatePickerState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{Disableable, Sizable};
+use gpui_component::{v_flex, Disableable, IconName, Sizable};
 use std::collections::BTreeSet;
-
-const AI_EVIDENCE_SAMPLE_LIMIT: usize = 3;
 
 #[derive(Clone)]
 struct AiRuntimeConfig {
@@ -28,22 +27,25 @@ struct AiRuntimeConfig {
 pub struct AiPanel {
     store: Store,
     mode: AiSummaryMode,
+    record_scope: AiRecordScope,
     start_date_picker: Entity<DatePickerState>,
     end_date_picker: Entity<DatePickerState>,
+    keyword_input: Entity<InputState>,
+    custom_request_input: Entity<InputState>,
     available_tags: Vec<String>,
-    available_persons: Vec<String>,
     selected_tags: BTreeSet<String>,
-    selected_persons: BTreeSet<String>,
     preview: Option<AiContextBundle>,
     config: AiRuntimeConfig,
     preview_loading: bool,
     generating: bool,
+    samples_expanded: bool,
     today_usage: Option<AiDailyUsageEntry>,
     last_request_usage: Option<AiLatestUsageSnapshot>,
     result: Option<String>,
     notice: Option<String>,
     error: Option<String>,
     request_serial: usize,
+    _subscriptions: Vec<Subscription>,
     _window_activation_subscription: Subscription,
 }
 
@@ -51,6 +53,14 @@ impl AiPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let today = Local::now().date_naive();
         let start = today - Duration::days(6);
+        let keyword_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("关键字过滤标题和正文"));
+        let custom_request_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(2, 4)
+                .placeholder("补充你的要求，例如：按项目拆分，指出阻塞和下周优先级")
+        });
         let start_date_picker = cx.new(|cx| {
             let mut picker = DatePickerState::new(window, cx).date_format("%Y-%m-%d");
             picker.set_date(start, window, cx);
@@ -61,26 +71,74 @@ impl AiPanel {
             picker.set_date(today, window, cx);
             picker
         });
+        let custom_request_template = AiSummaryMode::PastSummary.default_request_template();
+
+        custom_request_input.update(cx, |input, cx| {
+            input.set_value(custom_request_template, window, cx);
+        });
+
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &keyword_input,
+                window,
+                |this, input, event: &InputEvent, _window, cx| {
+                    if let InputEvent::Change = event {
+                        let _ = input.read(cx).text();
+                        this.result = None;
+                        this.reload_preview(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &custom_request_input,
+                window,
+                |this, _input, event: &InputEvent, _window, cx| {
+                    if let InputEvent::Change = event {
+                        this.result = None;
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &start_date_picker,
+                window,
+                |this, _, _: &gpui_component::date_picker::DatePickerEvent, _window, cx| {
+                    this.result = None;
+                    this.reload_preview(cx);
+                },
+            ),
+            cx.subscribe_in(
+                &end_date_picker,
+                window,
+                |this, _, _: &gpui_component::date_picker::DatePickerEvent, _window, cx| {
+                    this.result = None;
+                    this.reload_preview(cx);
+                },
+            ),
+        ];
 
         let mut panel = Self {
             store,
             mode: AiSummaryMode::PastSummary,
+            record_scope: AiRecordScope::All,
             start_date_picker,
             end_date_picker,
+            keyword_input,
+            custom_request_input,
             available_tags: Vec::new(),
-            available_persons: Vec::new(),
             selected_tags: BTreeSet::new(),
-            selected_persons: BTreeSet::new(),
             preview: None,
             config: Self::load_runtime_config(),
             preview_loading: false,
             generating: false,
+            samples_expanded: false,
             today_usage: None,
             last_request_usage: None,
             result: None,
             notice: None,
             error: None,
             request_serial: 0,
+            _subscriptions: subscriptions,
             _window_activation_subscription: cx.observe_window_activation(
                 window,
                 |this, window, cx| {
@@ -140,18 +198,6 @@ impl AiPanel {
             }
         })
         .detach();
-
-        let person_store = self.store.clone();
-        cx.spawn(async move |view, cx| {
-            if let Ok(persons) = person_store.get_all_persons().await {
-                let _ = view.update(cx, |panel, cx| {
-                    panel.available_persons =
-                        persons.into_iter().map(|person| person.name).collect();
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 
     fn current_date_range(&self, cx: &App) -> Result<(NaiveDate, NaiveDate), String> {
@@ -177,9 +223,22 @@ impl AiPanel {
             start_at,
             end_at,
             tags: self.selected_tags.iter().cloned().collect(),
-            persons: self.selected_persons.iter().cloned().collect(),
+            persons: Vec::new(),
+            keyword: self.keyword_input.read(cx).text().to_string(),
+            record_scope: self.record_scope,
+            user_request: self.current_user_request(cx),
             mode: self.mode,
         })
+    }
+
+    fn current_user_request(&self, cx: &App) -> String {
+        let text = self.custom_request_input.read(cx).text().to_string();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.mode.default_request_template().to_string()
+        } else {
+            trimmed.to_string()
+        }
     }
 
     fn reload_preview(&mut self, cx: &mut Context<Self>) {
@@ -225,11 +284,24 @@ impl AiPanel {
         .detach();
     }
 
-    fn set_mode(&mut self, mode: AiSummaryMode, cx: &mut Context<Self>) {
+    fn set_mode(&mut self, mode: AiSummaryMode, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == mode {
             return;
         }
         self.mode = mode;
+        let request = mode.default_request_template();
+        self.custom_request_input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, request, window, cx);
+        });
+        self.result = None;
+        self.reload_preview(cx);
+    }
+
+    fn set_record_scope(&mut self, scope: AiRecordScope, cx: &mut Context<Self>) {
+        if self.record_scope == scope {
+            return;
+        }
+        self.record_scope = scope;
         self.result = None;
         self.reload_preview(cx);
     }
@@ -242,28 +314,11 @@ impl AiPanel {
         self.reload_preview(cx);
     }
 
-    fn toggle_person(&mut self, person: &str, cx: &mut Context<Self>) {
-        if !self.selected_persons.remove(person) {
-            self.selected_persons.insert(person.to_string());
-        }
-        self.result = None;
-        self.reload_preview(cx);
-    }
-
     fn clear_tags(&mut self, cx: &mut Context<Self>) {
         if self.selected_tags.is_empty() {
             return;
         }
         self.selected_tags.clear();
-        self.result = None;
-        self.reload_preview(cx);
-    }
-
-    fn clear_persons(&mut self, cx: &mut Context<Self>) {
-        if self.selected_persons.is_empty() {
-            return;
-        }
-        self.selected_persons.clear();
         self.result = None;
         self.reload_preview(cx);
     }
@@ -414,6 +469,11 @@ impl AiPanel {
         cx.notify();
     }
 
+    fn toggle_samples(&mut self, cx: &mut Context<Self>) {
+        self.samples_expanded = !self.samples_expanded;
+        cx.notify();
+    }
+
     fn render_mode_button(
         &self,
         mode: AiSummaryMode,
@@ -425,10 +485,36 @@ impl AiPanel {
             .when(self.mode == mode, |button| {
                 button.with_variant(gpui_component::button::ButtonVariant::Primary)
             })
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.set_mode(mode, cx);
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.set_mode(mode, window, cx);
             }))
             .into_any_element()
+    }
+
+    fn scope_includes_tasks(&self) -> bool {
+        self.record_scope != AiRecordScope::Records
+    }
+
+    fn scope_includes_records(&self) -> bool {
+        self.record_scope != AiRecordScope::Tasks
+    }
+
+    fn toggle_task_scope(&mut self, cx: &mut Context<Self>) {
+        let next = if self.record_scope == AiRecordScope::Records {
+            AiRecordScope::All
+        } else {
+            AiRecordScope::Tasks
+        };
+        self.set_record_scope(next, cx);
+    }
+
+    fn toggle_record_scope(&mut self, cx: &mut Context<Self>) {
+        let next = if self.record_scope == AiRecordScope::Tasks {
+            AiRecordScope::All
+        } else {
+            AiRecordScope::Records
+        };
+        self.set_record_scope(next, cx);
     }
 
     fn render_filter_chip<F>(
@@ -461,20 +547,15 @@ impl AiPanel {
             .map(|message| render_message_box(message, true))
     }
 
-    fn render_analysis_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let preview_summary = self.preview.as_ref().map(|preview| {
-            format!(
-                "当前命中 {} 条记录，{} 条任务，{} 条记录/想法/事件。",
-                preview.records.len(),
-                preview.task_count,
-                preview.note_like_count
-            )
-        });
-
+    fn render_input_card(&self, cx: &mut Context<Self>) -> AnyElement {
         render_card(
-            "生成总结",
-            "先定模式和范围，再直接生成结果。",
+            "输入",
+            "",
             vec![
+                self.render_section_title(
+                    "需求",
+                    Some("预设按钮会填入默认需求模板，你可以继续改写；最终仍会保留“仅基于上下文”的约束。"),
+                ),
                 div()
                     .flex()
                     .flex_wrap()
@@ -485,30 +566,12 @@ impl AiPanel {
                         "ai-mode-future",
                         cx,
                     ))
-                    .child(
-                        Button::new("ai-generate")
-                            .child(if self.generating {
-                                "生成中..."
-                            } else {
-                                "生成总结"
-                            })
-                            .when(!self.generating, |button| {
-                                button.with_variant(gpui_component::button::ButtonVariant::Primary)
-                            })
-                            .disabled(self.generating)
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.generate(cx);
-                            })),
-                    )
                     .into_any_element(),
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x8c8c8c))
-                    .line_height(relative(1.5))
-                    .child(preview_summary.unwrap_or_else(|| {
-                        "先选择时间范围，系统会先本地预览命中的记录。".to_string()
-                    }))
-                    .into_any_element(),
+                Input::new(&self.custom_request_input).into_any_element(),
+                self.render_section_title(
+                    "过滤",
+                    Some("时间、标签、关键词和类型都会即时刷新命中结果。"),
+                ),
                 div()
                     .flex()
                     .flex_wrap()
@@ -564,42 +627,63 @@ impl AiPanel {
                     .child(
                         div()
                             .flex()
-                            .flex_wrap()
-                            .gap(px(8.0))
-                            .child(
-                                Button::new("ai-refresh-preview")
-                                    .child(if self.preview_loading {
-                                        "刷新中..."
-                                    } else {
-                                        "刷新预览"
-                                    })
-                                    .when(self.preview_loading, |button| button.disabled(true))
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.result = None;
-                                        this.reload_preview(cx);
-                                    })),
-                            )
-                            .into_any_element(),
+                            .flex_col()
+                            .gap(px(6.0))
+                            .min_w(px(220.0))
+                            .child(div().text_xs().text_color(rgb(0x595959)).child("关键词"))
+                            .child(Input::new(&self.keyword_input).cleanable(true)),
                     )
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(self.render_filter_chip(
+                        "ai-scope-tasks",
+                        "任务",
+                        self.scope_includes_tasks(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.toggle_task_scope(cx);
+                        }),
+                    ))
+                    .child(self.render_filter_chip(
+                        "ai-scope-records",
+                        "记录",
+                        self.scope_includes_records(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.toggle_record_scope(cx);
+                        }),
+                    ))
                     .into_any_element(),
                 self.render_filter_section(
                     "标签",
                     &self.available_tags,
                     &self.selected_tags,
-                    "当前未建立标签，先按时间范围分析。",
+                    "当前未建立标签。",
                     "清除标签",
                     cx,
                     true,
                 ),
-                self.render_filter_section(
-                    "人物",
-                    &self.available_persons,
-                    &self.selected_persons,
-                    "当前未建立人物关联，先按时间范围分析。",
-                    "清除人物",
-                    cx,
-                    false,
-                ),
+                self.render_hits_section(cx),
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        Button::new("ai-generate")
+                            .child(if self.generating {
+                                "生成中..."
+                            } else {
+                                "生成总结"
+                            })
+                            .when(!self.generating, |button| {
+                                button.with_variant(gpui_component::button::ButtonVariant::Primary)
+                            })
+                            .disabled(self.generating)
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.generate(cx);
+                            })),
+                    )
+                    .into_any_element(),
             ],
         )
     }
@@ -626,31 +710,17 @@ impl AiPanel {
                 .flex_wrap()
                 .gap(px(8.0))
                 .children(values.iter().enumerate().map(|(idx, value)| {
-                    if is_tag {
-                        self.render_filter_chip(
-                            format!("ai-tag-{idx}"),
-                            value,
-                            selected.contains(value),
-                            cx.listener({
-                                let value = value.clone();
-                                move |this, _event, _window, cx| {
-                                    this.toggle_tag(&value, cx);
-                                }
-                            }),
-                        )
-                    } else {
-                        self.render_filter_chip(
-                            format!("ai-person-{idx}"),
-                            value,
-                            selected.contains(value),
-                            cx.listener({
-                                let value = value.clone();
-                                move |this, _event, _window, cx| {
-                                    this.toggle_person(&value, cx);
-                                }
-                            }),
-                        )
-                    }
+                    self.render_filter_chip(
+                        format!("ai-tag-{idx}"),
+                        value,
+                        selected.contains(value),
+                        cx.listener({
+                            let value = value.clone();
+                            move |this, _event, _window, cx| {
+                                this.toggle_tag(&value, cx);
+                            }
+                        }),
+                    )
                 }))
                 .into_any_element()
         };
@@ -687,8 +757,6 @@ impl AiPanel {
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     if is_tag {
                                         this.clear_tags(cx);
-                                    } else {
-                                        this.clear_persons(cx);
                                     }
                                 })),
                         )
@@ -698,49 +766,216 @@ impl AiPanel {
             .into_any_element()
     }
 
-    fn render_result_canvas(&self, cx: &mut Context<Self>) -> AnyElement {
-        let header = div()
+    fn render_status_bar(&self) -> AnyElement {
+        let config_ready = self.config.settings.has_connection_config() && self.config.has_api_key;
+        let (status_text, status_color, status_bg, status_border) = if config_ready {
+            ("已连接", rgb(0x389e0d), rgb(0xf6ffed), rgb(0xb7eb8f))
+        } else {
+            ("未完成", rgb(0xcf1322), rgb(0xfff2f0), rgb(0xffccc7))
+        };
+        let model_label = if self.config.settings.model.trim().is_empty() {
+            "未设置模型".to_string()
+        } else {
+            format!(
+                "{} · {}",
+                self.config.settings.protocol.label(),
+                self.config.settings.model.trim()
+            )
+        };
+        let source_label = match self.config.source.as_ref() {
+            Some(SecretSource::LocalFile) => "本地 Key",
+            Some(SecretSource::Environment(_)) => "环境变量",
+            None => "未配置 Key",
+        };
+        let today_usage = self.today_usage.as_ref().map(|entry| entry.usage());
+        let last_usage = self
+            .last_request_usage
+            .as_ref()
+            .and_then(|snapshot| snapshot.usage);
+
+        div()
             .flex()
-            .gap(px(12.0))
-            .when(self.result.is_some(), |this| {
-                this.items_center().justify_between()
-            })
-            .when(self.result.is_none(), |this| this.flex_col())
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(4.0))
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .bg(status_bg)
+                    .border_1()
+                    .border_color(status_border)
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x262626))
-                            .child("结果画布"),
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(status_color)
+                            .child(status_text),
+                    )
+                    .child(render_info_icon(
+                        "仅表示已检测到当前协议的配置和可用 Key，不代表远端连通性已经验证通过。",
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x595959))
+                            .child(model_label),
                     )
                     .child(
                         div()
-                            .text_sm()
+                            .text_xs()
                             .text_color(rgb(0x8c8c8c))
-                            .line_height(relative(1.5))
-                            .child(if self.generating {
-                                "正在整理上下文并请求模型，结果会直接出现在下面。"
-                            } else if self.result.is_some() {
-                                "结果已经生成，可以继续阅读、复制或调整范围后重跑。"
-                            } else {
-                                "这里会显示最终结果。点上面的“生成总结”后，不需要再滚到别处找结果。"
-                            }),
+                            .child(source_label),
                     ),
             )
-            .when(self.result.is_some(), |this| {
-                this.child(
-                    Button::new("ai-copy-result")
-                        .child("复制结果")
-                        .on_click(cx.listener(|this, _event, _window, cx| {
-                            this.copy_result(cx);
-                        })),
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x8c8c8c))
+                    .child(format!(
+                        "今日 ↑{} ↓{}",
+                        format_usage_value(today_usage.map(|usage| usage.input_tokens)),
+                        format_usage_value(today_usage.map(|usage| usage.output_tokens))
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x8c8c8c))
+                    .child(format!(
+                        "本次 ↑{} ↓{}",
+                        format_usage_value(last_usage.map(|usage| usage.input_tokens)),
+                        format_usage_value(last_usage.map(|usage| usage.output_tokens))
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(render_info_icon(
+                        "仅统计 Robinne 发起的请求。服务端未返回 usage 时不会估算，也不会计入今日累计。",
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_section_title(
+        &self,
+        title: &'static str,
+        tooltip: Option<&'static str>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0x595959))
+                    .child(title),
+            )
+            .when_some(tooltip, |this, tooltip| {
+                this.child(render_info_icon(tooltip))
+            })
+            .into_any_element()
+    }
+
+    fn render_hits_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let content = if self.preview_loading {
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .child("正在更新命中…")
+                .into_any_element()
+        } else if let Some(preview) = self.preview.as_ref() {
+            let sample_records = if self.samples_expanded {
+                div().into_any_element()
+            } else {
+                div().into_any_element()
+            };
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x595959))
+                        .line_height(relative(1.6))
+                        .child(format!(
+                            "命中 {} 条，任务 {} 条，记录 {} 条，时间范围 {}。",
+                            preview.records.len(),
+                            preview.task_count,
+                            preview.note_like_count,
+                            preview.date_span_label
+                        )),
                 )
-            });
+                .when(!preview.records.is_empty(), |this| {
+                    this.child(
+                        Button::new("ai-toggle-samples")
+                            .child(if self.samples_expanded {
+                                "关闭样本"
+                            } else {
+                                "查看样本"
+                            })
+                            .small()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.toggle_samples(cx);
+                            })),
+                    )
+                })
+                .child(sample_records)
+                .into_any_element()
+        } else {
+            div()
+                .text_sm()
+                .text_color(rgb(0x8c8c8c))
+                .child("当前没有命中内容。")
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(self.render_section_title(
+                "命中内容",
+                Some("这里只展示本地筛选结果摘要。展开后可快速检查命中样本。"),
+            ))
+            .child(content)
+            .into_any_element()
+    }
+
+    fn render_output_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let header =
+            div()
+                .flex()
+                .gap(px(12.0))
+                .when(self.result.is_some(), |this| {
+                    this.items_center().justify_between()
+                })
+                .when(self.result.is_none(), |this| this.flex_col())
+                .child(div().into_any_element())
+                .when(self.result.is_some(), |this| {
+                    this.child(Button::new("ai-copy-result").child("复制结果").on_click(
+                        cx.listener(|this, _event, _window, cx| {
+                            this.copy_result(cx);
+                        }),
+                    ))
+                });
 
         let body = if self.generating {
             div()
@@ -761,7 +996,7 @@ impl AiPanel {
                         .text_sm()
                         .text_color(rgb(0x8c8c8c))
                         .line_height(relative(1.6))
-                        .child("这一步会先根据当前筛选范围构建上下文，再按需要分批压缩后生成最终结果。"),
+                        .child("结果会直接显示在这里。"),
                 )
                 .into_any_element()
         } else if let Some(result) = self.result.as_ref() {
@@ -769,11 +1004,6 @@ impl AiPanel {
                 .min_h(px(220.0))
                 .max_h(px(760.0))
                 .overflow_y_scrollbar()
-                .p(px(18.0))
-                .rounded(px(14.0))
-                .bg(rgb(0xfcfcfc))
-                .border_1()
-                .border_color(rgb(0xf0f0f0))
                 .child(
                     div()
                         .text_sm()
@@ -783,270 +1013,117 @@ impl AiPanel {
                 )
                 .into_any_element()
         } else {
-            let preview = self.preview.as_ref();
             div()
                 .min_h(px(220.0))
-                .p(px(22.0))
-                .rounded(px(14.0))
-                .bg(rgb(0xfcfcfc))
-                .border_1()
-                .border_color(rgb(0xf0f0f0))
                 .flex()
                 .flex_col()
                 .justify_center()
                 .gap(px(14.0))
                 .child(
                     div()
-                        .text_lg()
+                        .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(0x262626))
-                        .child("选择一个范围开始分析"),
+                        .text_color(rgb(0x8c8c8c))
+                        .child("生成结果会显示在这里"),
+                )
+                .into_any_element()
+        };
+
+        render_card("输出", "", vec![header.into_any_element(), body])
+    }
+
+    fn render_samples_sidebar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let preview = self.preview.as_ref()?;
+        if !self.samples_expanded || preview.records.is_empty() {
+            return None;
+        }
+
+        Some(
+            div()
+                .id("ai-samples-sidebar")
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .flex()
+                .flex_row()
+                .justify_end()
+                .child(
+                    div()
+                        .id("ai-samples-sidebar-dismiss-area")
+                        .flex_1()
+                        .h_full(),
                 )
                 .child(
                     div()
-                        .text_sm()
-                        .text_color(rgb(0x8c8c8c))
-                        .line_height(relative(1.6))
+                        .id("ai-samples-sidebar-pane")
+                        .w(px(360.0))
+                        .h_full()
+                        .min_h(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .occlude()
+                        .overflow_hidden()
+                        .border_l_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .bg(rgb(0xffffff))
+                        .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                        }))
                         .child(
-                            preview.map_or_else(
-                                || "你可以直接用“最近 7 天”或“本周”，再按标签、人物收窄范围。".to_string(),
-                                |preview| {
-                                    format!(
-                                        "当前范围已命中 {} 条记录，其中 {} 条任务、{} 条记录/想法/事件。准备好后点击“生成总结”。",
-                                        preview.records.len(),
-                                        preview.task_count,
-                                        preview.note_like_count
-                                    )
-                                },
+                            div()
+                                .p(px(12.0))
+                                .border_b_1()
+                                .border_color(rgb(0xe8e8e8))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0x262626))
+                                                .child("命中样本"),
+                                        )
+                                        .child(
+                                            Button::new("ai-close-samples").child("✕").on_click(
+                                                cx.listener(|this, _event, _window, cx| {
+                                                    this.toggle_samples(cx);
+                                                }),
+                                            ),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p(px(12.0))
+                                .text_xs()
+                                .text_color(rgb(0x8c8c8c))
+                                .child(format!("共 {} 条命中内容", preview.records.len())),
+                        )
+                        .child(
+                            div().flex_1().min_h_0().overflow_hidden().child(
+                                v_flex()
+                                    .p(px(12.0))
+                                    .gap(px(10.0))
+                                    .overflow_y_scrollbar()
+                                    .children(preview.records.iter().map(render_record_sample)),
                             ),
                         ),
                 )
-                .into_any_element()
-        };
-
-        render_card(
-            "分析结果",
-            "结果区是主画布，整个面板围绕这次分析展开。",
-            vec![header.into_any_element(), body],
-        )
-    }
-
-    fn render_usage_panel(&self) -> AnyElement {
-        let latest_usage = self
-            .last_request_usage
-            .as_ref()
-            .and_then(|snapshot| snapshot.usage);
-
-        let content = if self.today_usage.is_none() && self.last_request_usage.is_none() {
-            div()
-                .text_sm()
-                .text_color(rgb(0x8c8c8c))
-                .line_height(relative(1.6))
-                .child("暂未产生 token 消耗。完成一次测试连接或生成总结后，会在这里显示今日累计和最近一次动作的上下行 token。")
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(10.0))
-                        .child(render_metric_tile(
-                            "今日上行",
-                            &format_usage_value(self.today_usage.as_ref().map(|entry| entry.usage().input_tokens)),
-                        ))
-                        .child(render_metric_tile(
-                            "今日下行",
-                            &format_usage_value(self.today_usage.as_ref().map(|entry| entry.usage().output_tokens)),
-                        ))
-                        .child(render_metric_tile(
-                            "本次上行",
-                            &format_usage_value(latest_usage.map(|usage| usage.input_tokens)),
-                        ))
-                        .child(render_metric_tile(
-                            "本次下行",
-                            &format_usage_value(latest_usage.map(|usage| usage.output_tokens)),
-                        ))
-                        .into_any_element(),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x8c8c8c))
-                        .line_height(relative(1.6))
-                        .child(match self.last_request_usage.as_ref() {
-                            Some(snapshot) if snapshot.usage.is_some() => format!(
-                                "最近一次动作是“{}”，本次消耗已计入今日累计。",
-                                snapshot.event_kind.label()
-                            ),
-                            Some(snapshot) => format!(
-                                "最近一次动作是“{}”，但该次响应没有返回 usage，所以只更新了本次状态，没有计入今日累计。",
-                                snapshot.event_kind.label()
-                            ),
-                            None => match self.today_usage.as_ref() {
-                                Some(entry) => format!(
-                                    "今日累计已记录 {} 次请求，最近一次动作还没有可展示的 usage 详情。",
-                                    entry.request_count
-                                ),
-                                None => "暂未产生 token 消耗。".to_string(),
-                            },
-                        }),
-                )
-                .into_any_element()
-        };
-
-        render_card(
-            "Token 消耗",
-            "仅统计 Robinne 本应用今天发起的 AI 请求；上行表示 prompt/input tokens，下行表示 completion/output tokens。",
-            vec![content],
-        )
-    }
-
-    fn render_evidence_panel(&self) -> AnyElement {
-        let metrics = if let Some(preview) = self.preview.as_ref() {
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(10.0))
-                .child(render_metric_tile("时间范围", &preview.date_span_label))
-                .child(render_metric_tile(
-                    "命中记录",
-                    &format!("{} 条", preview.records.len()),
-                ))
-                .child(render_metric_tile(
-                    "任务",
-                    &format!(
-                        "{} 条 / 未完成 {} 条",
-                        preview.task_count, preview.open_task_count
-                    ),
-                ))
-                .child(render_metric_tile(
-                    "记录/想法",
-                    &format!("{} 条", preview.note_like_count),
-                ))
-                .child(render_metric_tile(
-                    "摘要批次",
-                    &format!("{} 批", preview.chunk_count),
-                ))
-                .child(render_metric_tile(
-                    "上下文估算",
-                    &format!("约 {} 字符", preview.estimated_chars),
-                ))
-                .into_any_element()
-        } else {
-            div()
-                .text_sm()
-                .text_color(rgb(0x8c8c8c))
-                .child("当前还没有可展示的分析证据。")
-                .into_any_element()
-        };
-
-        let samples = if let Some(preview) = self.preview.as_ref() {
-            if preview.records.is_empty() {
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x8c8c8c))
-                    .child("当前筛选范围没有命中记录。")
-                    .into_any_element()
-            } else {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .children(
-                        preview
-                            .records
-                            .iter()
-                            .take(AI_EVIDENCE_SAMPLE_LIMIT)
-                            .map(render_record_sample),
-                    )
-                    .into_any_element()
-            }
-        } else {
-            div()
-                .text_sm()
-                .text_color(rgb(0x8c8c8c))
-                .child("等待本地预览完成后，会在这里显示 AI 这次会看到的证据样本。")
-                .into_any_element()
-        };
-
-        render_card(
-            "分析依据",
-            "需要时再看这里，确认这次总结是基于哪些记录生成的。",
-            vec![
-                metrics,
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0x595959))
-                            .child("命中记录样本"),
-                    )
-                    .child(samples)
-                    .into_any_element(),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0x595959))
-                            .child("处理说明"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x8c8c8c))
-                            .line_height(relative(1.6))
-                            .child("本次分析先由本地做确定性筛选；如果上下文过大，会先分批压缩，再合并成最终结果，不让模型自由反查数据库。"),
-                    )
-                    .into_any_element(),
-            ],
+                .into_any_element(),
         )
     }
 }
 
 impl Render for AiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let config_ready = self.config.settings.has_connection_config() && self.config.has_api_key;
-        let status_badge = if config_ready {
-            "AI 连接已就绪"
-        } else {
-            "AI 连接未完成"
-        };
-        let status_detail = if !self.config.settings.has_connection_config() {
-            "请先在设置里保存 Base URL 和 Model".to_string()
-        } else if !self.config.has_api_key {
-            "当前协议还没有可用的 API Key".to_string()
-        } else if self.config.source == Some(SecretSource::LocalFile) {
-            "当前使用本地配置中的 API Key".to_string()
-        } else if let Some(SecretSource::Environment(env_var)) = self.config.source {
-            format!("当前从环境变量 {env_var} 读取 API Key")
-        } else {
-            format!(
-                "{} · {}",
-                self.config.settings.protocol.label(),
-                if self.config.settings.model.trim().is_empty() {
-                    "未设置模型"
-                } else {
-                    self.config.settings.model.trim()
-                }
-            )
-        };
-
         div()
             .size_full()
-            .flex()
-            .flex_col()
+            .relative()
             .child(
                 div()
                     .size_full()
@@ -1076,47 +1153,7 @@ impl Render for AiPanel {
                                             .text_color(rgb(0x262626))
                                             .child("AI 总结"),
                                     )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0x8c8c8c))
-                                            .line_height(relative(1.5))
-                                            .child("先选范围，再生成过去总结或未来提炼。首版不做通用聊天，只做可重复的结构化输出。"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(6.0))
-                                    .min_w(px(0.0))
-                                    .items_start()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .px(px(10.0))
-                                            .py(px(6.0))
-                                            .rounded(px(999.0))
-                                            .bg(if config_ready {
-                                                rgb(0xf6ffed)
-                                            } else {
-                                                rgb(0xfff2f0)
-                                            })
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(if config_ready {
-                                                rgb(0x389e0d)
-                                            } else {
-                                                rgb(0xcf1322)
-                                            })
-                                            .child(status_badge),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(0x8c8c8c))
-                                            .line_height(relative(1.5))
-                                            .child(status_detail),
-                                    ),
+                                    .child(self.render_status_bar()),
                             ),
                     )
                     .when_some(self.render_message(), |this, message| this.child(message))
@@ -1125,12 +1162,13 @@ impl Render for AiPanel {
                             .flex()
                             .flex_col()
                             .gap(px(16.0))
-                            .child(self.render_analysis_bar(cx))
-                            .when(config_ready, |this| this.child(self.render_usage_panel()))
-                            .child(self.render_result_canvas(cx))
-                            .when(self.preview.is_some(), |this| this.child(self.render_evidence_panel())),
+                            .child(self.render_input_card(cx))
+                            .child(self.render_output_card(cx)),
                     ),
             )
+            .when_some(self.render_samples_sidebar(cx), |this, sidebar| {
+                this.child(sidebar)
+            })
     }
 }
 
@@ -1160,49 +1198,32 @@ fn render_card(
                         .text_color(rgb(0x262626))
                         .child(title),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x8c8c8c))
-                        .line_height(relative(1.5))
-                        .child(description),
-                ),
+                .when(!description.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x8c8c8c))
+                            .line_height(relative(1.5))
+                            .child(description),
+                    )
+                }),
         )
         .children(children)
         .into_any_element()
 }
 
-fn render_metric_tile(label: &'static str, value: &str) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .min_w(px(140.0))
-        .p(px(12.0))
-        .rounded(px(12.0))
-        .bg(rgb(0xfcfcfc))
-        .border_1()
-        .border_color(rgb(0xf0f0f0))
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(0x8c8c8c))
-                .child(label),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(0x262626))
-                .line_height(relative(1.5))
-                .child(value.to_string()),
-        )
+fn render_info_icon(message: &'static str) -> AnyElement {
+    Button::new(format!("ai-info-{message}"))
+        .ghost()
+        .small()
+        .icon(IconName::Info)
+        .tooltip(message)
         .into_any_element()
 }
 
 fn format_usage_value(value: Option<u64>) -> String {
     match value {
-        Some(value) => format!("{} tokens", value),
+        Some(value) => value.to_string(),
         None => "暂无".to_string(),
     }
 }
