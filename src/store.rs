@@ -309,17 +309,19 @@ fn derive_task_stats(tasks: &[Record], now: DateTime<Local>) -> DerivedTaskStats
             }
         }
 
-        if let Some(completed_at) = task.completed_at {
-            let completed_date = completed_at.with_timezone(&Local).date_naive();
-            if completed_date == today {
-                stats.completed_today_count += 1;
-            }
+        if task.status == Some(TaskStatus::Done) {
+            if let Some(completed_at) = task.completed_at {
+                let completed_date = completed_at.with_timezone(&Local).date_naive();
+                if completed_date == today {
+                    stats.completed_today_count += 1;
+                }
 
-            let days_from_start = completed_date.signed_duration_since(today - Duration::days(6));
-            if (0..=6).contains(&days_from_start.num_days()) {
-                let idx = days_from_start.num_days() as usize;
-                if let Some(bucket) = last_7_days_completed.get_mut(idx) {
-                    bucket.count += 1;
+                let days_from_start = completed_date.signed_duration_since(today - Duration::days(6));
+                if (0..=6).contains(&days_from_start.num_days()) {
+                    let idx = days_from_start.num_days() as usize;
+                    if let Some(bucket) = last_7_days_completed.get_mut(idx) {
+                        bucket.count += 1;
+                    }
                 }
             }
         }
@@ -2141,7 +2143,7 @@ mod tests {
         assert_eq!(stats.high_priority_open_count, 1);
         assert_eq!(stats.completed_today_count, 1);
         assert_eq!(stats.last_7_days_completed.len(), 7);
-        assert_eq!(stats.last_7_days_completed[0].count, 1);
+        assert_eq!(stats.last_7_days_completed[0].count, 0);
         assert_eq!(stats.last_7_days_completed[3].count, 1);
         assert_eq!(stats.last_7_days_completed[6].count, 1);
     }
@@ -2174,6 +2176,6 @@ mod tests {
         assert_eq!(stats.due_tomorrow_count, 0);
         assert_eq!(stats.overdue_count, 0);
         assert_eq!(stats.high_priority_open_count, 0);
-        assert_eq!(stats.completed_today_count, 1);
+        assert_eq!(stats.completed_today_count, 0);
     }
 }

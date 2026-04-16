@@ -278,10 +278,11 @@ impl Record {
                     self.started_at = Some(now);
                 }
                 self.completed_at = None;
+                self.cancelled_reason = None;
             }
             Some(TaskStatus::Todo) => {
-                self.started_at = None;
                 self.completed_at = None;
+                self.cancelled_reason = None;
             }
             Some(TaskStatus::Done) | Some(TaskStatus::Cancelled) => {
                 if self.completed_at.is_none() {

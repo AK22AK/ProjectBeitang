@@ -379,7 +379,7 @@ impl TaskPanel {
         self.tasks
             .iter()
             .filter(|t| self.priority_filter.matches(t.priority.clone()))
-            .filter(|t| t.completed_at.is_none() || self.show_completed)
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)) || self.show_completed)
             .filter(|t| self.matches_focus_preset(t))
             .filter(|t| self.matches_tag_filter(t))
             .cloned()
@@ -389,7 +389,7 @@ impl TaskPanel {
     fn matches_focus_preset(&self, task: &Record) -> bool {
         let today = Local::now().date_naive();
         let tomorrow = today + Duration::days(1);
-        let is_open = task.completed_at.is_none();
+        let is_open = !matches!(task.status, Some(TaskStatus::Done));
         let due_local = task
             .due_date
             .map(|dt| dt.with_timezone(&Local).date_naive());
@@ -435,7 +435,7 @@ impl TaskPanel {
         for task in self
             .get_filtered_tasks()
             .iter()
-            .filter(|t| t.completed_at.is_none())
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)))
         {
             let quadrant = Self::categorize_quadrant(task);
             groups.entry(quadrant).or_default().push(task.clone());
@@ -908,6 +908,7 @@ impl TaskPanel {
             if task.completed_at.is_some() {
                 task.completed_at = None;
                 task.status = Some(TaskStatus::Todo);
+                task.notified_at = None;
             } else {
                 task.completed_at = Some(chrono::Utc::now());
                 task.status = Some(TaskStatus::Done);
@@ -1398,7 +1399,8 @@ impl TaskPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let task_id = task.id;
-        let is_completed = task.completed_at.is_some();
+        let is_done_or_cancelled = matches!(task.status, Some(TaskStatus::Done) | Some(TaskStatus::Cancelled));
+        let is_cancelled = matches!(task.status, Some(TaskStatus::Cancelled));
         let sidebar_task_id = self
             .task_detail_sidebar
             .read(cx)
@@ -1451,7 +1453,7 @@ impl TaskPanel {
             .rounded(px(6.0))
             .bg(if is_selected {
                 rgb(0xe6f7ff)
-            } else if is_completed {
+            } else if is_done_or_cancelled {
                 rgb(0xf5f5f5)
             } else {
                 rgb(0xffffff)
@@ -1481,9 +1483,19 @@ impl TaskPanel {
                         div()
                             .id(("checkbox", idx))
                             .cursor_pointer()
-                            .child(if is_completed { "☑" } else { "☐" })
+                            .child(if is_cancelled {
+                                "重新打开".to_string()
+                            } else if is_done_or_cancelled {
+                                "☑".to_string()
+                            } else {
+                                "☐".to_string()
+                            })
                             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                this.toggle_task_complete(task_id, cx);
+                                if is_cancelled {
+                                    this.handle_reopen_task(task_id, cx);
+                                } else {
+                                    this.toggle_task_complete(task_id, cx);
+                                }
                                 cx.stop_propagation();
                             }))
                     )
@@ -1540,7 +1552,7 @@ impl TaskPanel {
                                                 .appearance(false)
                                                 .focus_bordered(false)
                                                 .text_size(px(14.0))
-                                                .text_color(if is_completed {
+                                                .text_color(if is_done_or_cancelled {
                                                     rgb(0x999999)
                                                 } else {
                                                     rgb(0x333333)
@@ -1554,7 +1566,7 @@ impl TaskPanel {
                                         .overflow_hidden()
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(if is_completed {
+                                        .text_color(if is_done_or_cancelled {
                                             rgb(0x999999)
                                         } else {
                                             rgb(0x333333)
@@ -1562,7 +1574,7 @@ impl TaskPanel {
                                         .child(render_tokenized_text(
                                             &display_title,
                                             TokenTextStyle::new(
-                                                if is_completed {
+                                                if is_done_or_cancelled {
                                                     rgb(0x999999)
                                                 } else {
                                                     rgb(0x333333)
@@ -1921,7 +1933,7 @@ impl TaskPanel {
         let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = filtered_tasks
             .iter()
             .cloned()
-            .partition(|task| task.completed_at.is_none());
+            .partition(|task| !matches!(task.status, Some(TaskStatus::Done)));
 
         let pending_count = pending_tasks.len();
         let completed_count = completed_tasks.len();
