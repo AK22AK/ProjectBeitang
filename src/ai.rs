@@ -149,6 +149,31 @@ impl AiSummaryMode {
             Self::FutureTasks => "基于这段时间的事实和仍未完成的事项，提炼接下来最值得推进的工作",
         }
     }
+
+    pub fn default_request_template(self) -> &'static str {
+        match self {
+            Self::PastSummary => "总结这段时间完成了什么、推进了什么，以及当前有哪些阻塞。",
+            Self::FutureTasks => "基于当前进展和未完成事项，提炼接下来最值得推进的工作。",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiRecordScope {
+    #[default]
+    All,
+    Tasks,
+    Records,
+}
+
+impl AiRecordScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Tasks => "任务",
+            Self::Records => "记录",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +182,9 @@ pub struct AiContextQuery {
     pub end_at: DateTime<Utc>,
     pub tags: Vec<String>,
     pub persons: Vec<String>,
+    pub keyword: String,
+    pub record_scope: AiRecordScope,
+    pub user_request: String,
     pub mode: AiSummaryMode,
 }
 
@@ -381,6 +409,13 @@ fn merge_usage(total: &mut Option<AiUsage>, usage: Option<AiUsage>) {
 }
 
 fn record_matches_query(record: &Record, query: &AiContextQuery) -> bool {
+    match query.record_scope {
+        AiRecordScope::All => {}
+        AiRecordScope::Tasks if record.record_type != RecordType::Task => return false,
+        AiRecordScope::Records if record.record_type == RecordType::Task => return false,
+        _ => {}
+    }
+
     if !query.tags.is_empty()
         && !query
             .tags
@@ -399,6 +434,15 @@ fn record_matches_query(record: &Record, query: &AiContextQuery) -> bool {
         return false;
     }
 
+    if !query.keyword.trim().is_empty() {
+        let keyword = query.keyword.trim();
+        let title_matches = contains_keyword(record.title.as_deref().unwrap_or_default(), keyword);
+        let content_matches = contains_keyword(&record.content, keyword);
+        if !title_matches && !content_matches {
+            return false;
+        }
+    }
+
     let in_range = timestamps_for_query(record, query.mode)
         .into_iter()
         .flatten()
@@ -415,6 +459,16 @@ fn record_matches_query(record: &Record, query: &AiContextQuery) -> bool {
             Some(TaskStatus::Todo) | Some(TaskStatus::InProgress)
         )
         && record.completed_at.is_none()
+}
+
+fn contains_keyword(haystack: &str, keyword: &str) -> bool {
+    let haystack = haystack.trim();
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        return true;
+    }
+
+    haystack.to_lowercase().contains(&keyword.to_lowercase())
 }
 
 fn timestamps_for_query(record: &Record, mode: AiSummaryMode) -> [Option<DateTime<Utc>>; 4] {
@@ -586,14 +640,22 @@ fn build_final_prompt(query: &AiContextQuery, bundle: &AiContextBundle, context:
         }
     };
 
+    let user_request = if query.user_request.trim().is_empty() {
+        String::new()
+    } else {
+        format!("用户额外要求：{}\n", query.user_request.trim())
+    };
+
     format!(
         "目标：{}\n\
+         {}\n\
          时间范围：{}\n\
          命中记录：{} 条，其中任务 {} 条、开放任务 {} 条、已完成任务 {} 条、记录/想法/事件 {} 条。\n\
          请只基于以下上下文总结，不要补充外部知识。\n\n\
          {}\n\n\
          上下文：\n{}",
         query.mode.prompt_goal(),
+        user_request,
         bundle.date_span_label,
         bundle.records.len(),
         bundle.task_count,
@@ -614,10 +676,16 @@ fn build_chunk_prompt(
 ) -> String {
     format!(
         "目标：{}\n\
+         用户额外要求：{}\n\
          时间范围：{}\n\
          当前是第 {}/{} 个上下文分块。\n\
          请把这部分内容压缩成紧凑的事实摘要，方便后续总汇总，不要输出结论性判断。\n\n{}",
         query.mode.prompt_goal(),
+        if query.user_request.trim().is_empty() {
+            "无"
+        } else {
+            query.user_request.trim()
+        },
         bundle.date_span_label,
         chunk_index,
         total_chunks,
@@ -880,6 +948,9 @@ mod tests {
             end_at: now,
             tags: vec!["work".to_string()],
             persons: Vec::new(),
+            keyword: String::new(),
+            record_scope: AiRecordScope::All,
+            user_request: String::new(),
             mode: AiSummaryMode::FutureTasks,
         };
 
@@ -899,6 +970,58 @@ mod tests {
 
         let chunks = split_day_blocks(&blocks);
         assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn record_scope_and_keyword_filter_context() {
+        let now = Utc::now();
+
+        let mut task = Record::new_task(
+            "修复登录".to_string(),
+            "处理 auth token".to_string(),
+            Priority::High,
+        );
+        task.created_at = now - Duration::hours(6);
+        task.updated_at = now - Duration::hours(6);
+
+        let mut note =
+            Record::new_note_with_title(Some("测试记录".to_string()), "登录页出现白屏".to_string());
+        note.created_at = now - Duration::hours(4);
+        note.updated_at = now - Duration::hours(4);
+
+        let task_query = AiContextQuery {
+            start_at: now - Duration::days(1),
+            end_at: now,
+            tags: Vec::new(),
+            persons: Vec::new(),
+            keyword: "auth".to_string(),
+            record_scope: AiRecordScope::Tasks,
+            user_request: String::new(),
+            mode: AiSummaryMode::PastSummary,
+        };
+        let task_bundle = build_context_bundle(&[task.clone(), note.clone()], &task_query);
+        assert_eq!(task_bundle.records.len(), 1);
+        assert_eq!(
+            task_bundle.records[0].record_type,
+            crate::models::RecordType::Task
+        );
+
+        let note_query = AiContextQuery {
+            start_at: now - Duration::days(1),
+            end_at: now,
+            tags: Vec::new(),
+            persons: Vec::new(),
+            keyword: "白屏".to_string(),
+            record_scope: AiRecordScope::Records,
+            user_request: String::new(),
+            mode: AiSummaryMode::PastSummary,
+        };
+        let note_bundle = build_context_bundle(&[task, note], &note_query);
+        assert_eq!(note_bundle.records.len(), 1);
+        assert_ne!(
+            note_bundle.records[0].record_type,
+            crate::models::RecordType::Task
+        );
     }
 
     #[test]
