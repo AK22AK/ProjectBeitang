@@ -933,6 +933,7 @@ impl AiPanel {
                             })
                             .small()
                             .on_click(cx.listener(|this, _event, _window, cx| {
+                                cx.stop_propagation();
                                 this.toggle_samples(cx);
                             })),
                     )
@@ -1053,7 +1054,11 @@ impl AiPanel {
                     div()
                         .id("ai-samples-sidebar-dismiss-area")
                         .flex_1()
-                        .h_full(),
+                        .h_full()
+                        .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_samples(cx);
+                        })),
                 )
                 .child(
                     div()
@@ -1091,6 +1096,7 @@ impl AiPanel {
                                         .child(
                                             Button::new("ai-close-samples").child("✕").on_click(
                                                 cx.listener(|this, _event, _window, cx| {
+                                                    cx.stop_propagation();
                                                     this.toggle_samples(cx);
                                                 }),
                                             ),
@@ -1126,12 +1132,18 @@ impl Render for AiPanel {
             .relative()
             .child(
                 div()
+                    .id("ai-panel-main")
                     .size_full()
-                    .overflow_y_scrollbar()
                     .p(px(16.0))
                     .flex()
                     .flex_col()
                     .gap(px(16.0))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                        if this.samples_expanded {
+                            this.toggle_samples(cx);
+                        }
+                    }))
+                    .overflow_y_scrollbar()
                     .child(
                         div()
                             .flex()
