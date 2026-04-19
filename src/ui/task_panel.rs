@@ -1484,13 +1484,16 @@ impl TaskPanel {
             })
             .hover(|s| s.bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xf6ffed) }))
             .cursor_pointer()
-            .on_click(cx.listener({
-                let task = task.clone();
-                move |this, _event: &ClickEvent, window, cx| {
-                    this.select_task(&task, window, cx);
-                    cx.stop_propagation();
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let task = task.clone();
+                    move |this, _event: &MouseDownEvent, window, cx| {
+                        this.select_task(&task, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -1508,14 +1511,17 @@ impl TaskPanel {
                             } else {
                                 "☐".to_string()
                             })
-                            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                if is_cancelled {
-                                    this.handle_reopen_task(task_id, cx);
-                                } else {
-                                    this.toggle_task_complete(task_id, cx);
-                                }
-                                cx.stop_propagation();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                    if is_cancelled {
+                                        this.handle_reopen_task(task_id, cx);
+                                    } else {
+                                        this.toggle_task_complete(task_id, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            )
                     )
                     .child(
                         v_flex()
