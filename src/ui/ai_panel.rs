@@ -24,6 +24,50 @@ struct AiRuntimeConfig {
     source: Option<SecretSource>,
 }
 
+#[derive(Default)]
+struct MetadataFilters {
+    available_tags: Vec<String>,
+    available_persons: Vec<String>,
+    selected_tags: BTreeSet<String>,
+    selected_persons: BTreeSet<String>,
+}
+
+impl MetadataFilters {
+    fn replace_catalog(&mut self, tags: Vec<String>, persons: Vec<String>) {
+        self.available_tags = tags;
+        self.available_persons = persons;
+        self.selected_tags
+            .retain(|tag| self.available_tags.iter().any(|candidate| candidate == tag));
+        self.selected_persons
+            .retain(|person| self.available_persons.iter().any(|candidate| candidate == person));
+    }
+
+    fn build_query_values(&self) -> (Vec<String>, Vec<String>) {
+        (
+            self.selected_tags.iter().cloned().collect(),
+            self.selected_persons.iter().cloned().collect(),
+        )
+    }
+
+    fn toggle_tag(&mut self, tag: &str) {
+        if !self.selected_tags.remove(tag) {
+            self.selected_tags.insert(tag.to_string());
+        }
+    }
+
+    fn toggle_person(&mut self, person: &str) {
+        if !self.selected_persons.remove(person) {
+            self.selected_persons.insert(person.to_string());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MetadataFilterKind {
+    Tag,
+    Person,
+}
+
 pub struct AiPanel {
     store: Store,
     mode: AiSummaryMode,
@@ -32,8 +76,7 @@ pub struct AiPanel {
     end_date_picker: Entity<DatePickerState>,
     keyword_input: Entity<InputState>,
     custom_request_input: Entity<InputState>,
-    available_tags: Vec<String>,
-    selected_tags: BTreeSet<String>,
+    filters: MetadataFilters,
     preview: Option<AiContextBundle>,
     config: AiRuntimeConfig,
     preview_loading: bool,
@@ -125,8 +168,7 @@ impl AiPanel {
             end_date_picker,
             keyword_input,
             custom_request_input,
-            available_tags: Vec::new(),
-            selected_tags: BTreeSet::new(),
+            filters: MetadataFilters::default(),
             preview: None,
             config: Self::load_runtime_config(),
             preview_loading: false,
@@ -145,13 +187,14 @@ impl AiPanel {
                     if window.is_window_active() {
                         this.refresh_configuration();
                         this.refresh_usage_metrics();
+                        this.reload_filters(cx);
                         this.reload_preview(cx);
                     }
                 },
             ),
         };
         panel.refresh_usage_metrics();
-        panel.load_filters(cx);
+        panel.reload_filters(cx);
         panel.reload_preview(cx);
         panel
     }
@@ -159,6 +202,7 @@ impl AiPanel {
     pub fn reload_configuration(&mut self, cx: &mut Context<Self>) {
         self.refresh_configuration();
         self.refresh_usage_metrics();
+        self.reload_filters(cx);
         cx.notify();
     }
 
@@ -187,15 +231,32 @@ impl AiPanel {
         self.last_request_usage = load_latest_ai_usage(protocol).ok().flatten();
     }
 
-    fn load_filters(&mut self, cx: &mut Context<Self>) {
-        let tag_store = self.store.clone();
+    fn reload_filters(&mut self, cx: &mut Context<Self>) {
+        let metadata_store = self.store.clone();
         cx.spawn(async move |view, cx| {
-            if let Ok(tags) = tag_store.get_all_tags().await {
-                let _ = view.update(cx, |panel, cx| {
-                    panel.available_tags = tags.into_iter().map(|tag| tag.name).collect();
-                    cx.notify();
-                });
-            }
+            let tags = metadata_store.get_all_tags().await;
+            let persons = metadata_store.get_all_persons().await;
+
+            let _ = view.update(cx, |panel, cx| {
+                match (tags, persons) {
+                    (Ok(tags), Ok(persons)) => {
+                        panel.filters.replace_catalog(
+                            tags.into_iter().map(|tag| tag.name).collect(),
+                            persons.into_iter().map(|person| person.name).collect(),
+                        );
+                        panel.reload_preview(cx);
+                    }
+                    (tags_result, persons_result) => {
+                        if let Err(err) = tags_result {
+                            eprintln!("[AI Panel] Failed to load tags: {}", err);
+                        }
+                        if let Err(err) = persons_result {
+                            eprintln!("[AI Panel] Failed to load persons: {}", err);
+                        }
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -219,11 +280,12 @@ impl AiPanel {
     fn build_query(&self, cx: &App) -> Result<AiContextQuery, String> {
         let (start_date, end_date) = self.current_date_range(cx)?;
         let (start_at, end_at) = local_day_range_to_utc(start_date, end_date)?;
+        let (tags, persons) = self.filters.build_query_values();
         Ok(AiContextQuery {
             start_at,
             end_at,
-            tags: self.selected_tags.iter().cloned().collect(),
-            persons: Vec::new(),
+            tags,
+            persons,
             keyword: self.keyword_input.read(cx).text().to_string(),
             record_scope: self.record_scope,
             user_request: self.current_user_request(cx),
@@ -307,18 +369,31 @@ impl AiPanel {
     }
 
     fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
-        if !self.selected_tags.remove(tag) {
-            self.selected_tags.insert(tag.to_string());
-        }
+        self.filters.toggle_tag(tag);
         self.result = None;
         self.reload_preview(cx);
     }
 
     fn clear_tags(&mut self, cx: &mut Context<Self>) {
-        if self.selected_tags.is_empty() {
+        if self.filters.selected_tags.is_empty() {
             return;
         }
-        self.selected_tags.clear();
+        self.filters.selected_tags.clear();
+        self.result = None;
+        self.reload_preview(cx);
+    }
+
+    fn toggle_person(&mut self, person: &str, cx: &mut Context<Self>) {
+        self.filters.toggle_person(person);
+        self.result = None;
+        self.reload_preview(cx);
+    }
+
+    fn clear_persons(&mut self, cx: &mut Context<Self>) {
+        if self.filters.selected_persons.is_empty() {
+            return;
+        }
+        self.filters.selected_persons.clear();
         self.result = None;
         self.reload_preview(cx);
     }
@@ -657,12 +732,21 @@ impl AiPanel {
                     .into_any_element(),
                 self.render_filter_section(
                     "标签",
-                    &self.available_tags,
-                    &self.selected_tags,
+                    &self.filters.available_tags,
+                    &self.filters.selected_tags,
                     "当前未建立标签。",
                     "清除标签",
                     cx,
-                    true,
+                    MetadataFilterKind::Tag,
+                ),
+                self.render_filter_section(
+                    "人物",
+                    &self.filters.available_persons,
+                    &self.filters.selected_persons,
+                    "当前未建立人物。",
+                    "清除人物",
+                    cx,
+                    MetadataFilterKind::Person,
                 ),
                 self.render_hits_section(cx),
                 div()
@@ -696,7 +780,7 @@ impl AiPanel {
         empty_hint: &'static str,
         clear_label: &'static str,
         cx: &mut Context<Self>,
-        is_tag: bool,
+        kind: MetadataFilterKind,
     ) -> AnyElement {
         let chips = if values.is_empty() {
             div()
@@ -710,14 +794,25 @@ impl AiPanel {
                 .flex_wrap()
                 .gap(px(8.0))
                 .children(values.iter().enumerate().map(|(idx, value)| {
+                    let label = match kind {
+                        MetadataFilterKind::Tag => value.to_string(),
+                        MetadataFilterKind::Person => format!("@{}", value),
+                    };
+                    let id = match kind {
+                        MetadataFilterKind::Tag => format!("ai-tag-{idx}"),
+                        MetadataFilterKind::Person => format!("ai-person-{idx}"),
+                    };
                     self.render_filter_chip(
-                        format!("ai-tag-{idx}"),
-                        value,
+                        id,
+                        &label,
                         selected.contains(value),
                         cx.listener({
                             let value = value.clone();
                             move |this, _event, _window, cx| {
-                                this.toggle_tag(&value, cx);
+                                match kind {
+                                    MetadataFilterKind::Tag => this.toggle_tag(&value, cx),
+                                    MetadataFilterKind::Person => this.toggle_person(&value, cx),
+                                }
                             }
                         }),
                     )
@@ -755,8 +850,9 @@ impl AiPanel {
                                 .child(clear_label)
                                 .small()
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    if is_tag {
-                                        this.clear_tags(cx);
+                                    match kind {
+                                        MetadataFilterKind::Tag => this.clear_tags(cx),
+                                        MetadataFilterKind::Person => this.clear_persons(cx),
                                     }
                                 })),
                         )
@@ -1321,4 +1417,52 @@ fn render_message_box(message: &str, is_error: bool) -> AnyElement {
                 .child(message.to_string()),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetadataFilters;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn metadata_filters_build_query_values_include_selected_persons() {
+        let filters = MetadataFilters {
+            selected_tags: BTreeSet::from(["开发".to_string()]),
+            selected_persons: BTreeSet::from(["张三".to_string(), "李四".to_string()]),
+            ..Default::default()
+        };
+
+        let (tags, persons) = filters.build_query_values();
+
+        assert_eq!(tags, vec!["开发".to_string()]);
+        assert_eq!(persons, vec!["张三".to_string(), "李四".to_string()]);
+    }
+
+    #[test]
+    fn metadata_filters_replace_catalog_refreshes_person_options_and_drops_missing_selection() {
+        let mut filters = MetadataFilters {
+            selected_tags: BTreeSet::from(["保留标签".to_string(), "移除标签".to_string()]),
+            selected_persons: BTreeSet::from(["保留人物".to_string(), "移除人物".to_string()]),
+            ..Default::default()
+        };
+
+        filters.replace_catalog(
+            vec!["保留标签".to_string(), "新增标签".to_string()],
+            vec!["保留人物".to_string(), "新增人物".to_string()],
+        );
+
+        assert_eq!(
+            filters.available_tags,
+            vec!["保留标签".to_string(), "新增标签".to_string()]
+        );
+        assert_eq!(
+            filters.available_persons,
+            vec!["保留人物".to_string(), "新增人物".to_string()]
+        );
+        assert_eq!(filters.selected_tags, BTreeSet::from(["保留标签".to_string()]));
+        assert_eq!(
+            filters.selected_persons,
+            BTreeSet::from(["保留人物".to_string()])
+        );
+    }
 }
