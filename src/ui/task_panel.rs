@@ -1948,10 +1948,17 @@ impl TaskPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let filtered_tasks = self.get_filtered_tasks();
-        let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = filtered_tasks
+        let pending_tasks: Vec<_> = filtered_tasks
             .iter()
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)))
             .cloned()
-            .partition(|task| !matches!(task.status, Some(TaskStatus::Done)));
+            .collect();
+        let completed_tasks: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, Some(TaskStatus::Done)))
+            .cloned()
+            .collect();
 
         let pending_count = pending_tasks.len();
         let completed_count = completed_tasks.len();
@@ -1993,6 +2000,7 @@ impl TaskPanel {
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                 this.show_completed = !this.show_completed;
+                                cx.stop_propagation();
                                 cx.notify();
                             }))
                             .child(
@@ -2190,19 +2198,18 @@ impl Render for TaskPanel {
                         }
                     }))
                     .child(
-                        div()
-                            .id("task-panel-title")
+                        Button::new("task-panel-title")
+                            .with_variant(gpui_component::button::ButtonVariant::Ghost)
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                this.show_completed = !this.show_completed;
-                                cx.notify();
-                            }))
                             .child(format!(
                                 "任务 ({} 待办 / {} 已完成)",
                                 pending_count, completed_count
-                            )),
+                            ))
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.show_completed = !this.show_completed;
+                                cx.notify();
+                            })),
                     )
                     .child(self.render_toolbar(cx))
                     .child(self.render_tag_filter(cx))
