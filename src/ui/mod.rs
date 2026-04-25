@@ -10,6 +10,7 @@ pub mod quick_add_context;
 pub mod record_detail_sidebar;
 pub mod search;
 pub mod sidebar;
+pub mod style;
 pub mod task_detail_sidebar;
 pub mod task_panel;
 pub mod timeline;

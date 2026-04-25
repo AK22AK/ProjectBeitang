@@ -29,5 +29,8 @@ hello_world_test
 # Claude IDE
 .claude/
 
+# Local visual brainstorming artifacts
+.superpowers/
+
 # Local agent instructions
 AGENTS.md
