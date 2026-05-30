@@ -1,5 +1,6 @@
-use crate::models::Record;
+use crate::models::{LineRef, Record};
 use crate::store::Store;
+use crate::ui::parsing;
 use crate::ui::record_detail_sidebar::{RecordDetailSidebar, SavePayload};
 use crate::ui::tokenized_text::{
     render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
@@ -17,6 +18,13 @@ struct PendingDeletion {
     id: Uuid,
     record_label: &'static str,
     display_title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NoteDisplayMetadata {
+    tags: Vec<String>,
+    persons: Vec<String>,
+    line: Option<LineRef>,
 }
 
 pub struct NotePanel {
@@ -84,10 +92,11 @@ impl NotePanel {
             note.updated_at = chrono::Utc::now();
 
             let updated_note = note.clone();
+            let line_ref = payload.line.clone();
             let store = self.store.clone();
             let sidebar = self.record_detail_sidebar.clone();
             cx.spawn(async move |_view, cx| {
-                if let Err(e) = store.update_record(updated_note).await {
+                if let Err(e) = store.update_record_with_line(updated_note, line_ref).await {
                     eprintln!("[NotePanel] Failed to update note: {}", e);
                 } else {
                     let _ = sidebar.update(cx, |sidebar, cx| {
@@ -231,6 +240,15 @@ impl NotePanel {
             Self::truncate_text(&title, NOTE_TITLE_LIMIT),
             Self::truncate_text(&preview, NOTE_PREVIEW_LIMIT),
         )
+    }
+
+    fn note_display_metadata(note: &Record) -> NoteDisplayMetadata {
+        let inline_fields = parsing::parse_record_fields(note.title.as_deref(), &note.content);
+        NoteDisplayMetadata {
+            tags: parsing::merge_inline_metadata(&note.tags, &inline_fields.tags),
+            persons: parsing::merge_inline_metadata(&note.persons, &inline_fields.people),
+            line: inline_fields.line,
+        }
     }
 
     fn normalize_text(text: &str) -> String {
@@ -402,7 +420,10 @@ impl Render for NotePanel {
                                 let note_id = note.id;
                                 let is_selected = sidebar_task_id.as_ref() == Some(&note_id.to_string());
                                 let (title, preview) = Self::get_note_display(&note);
-                                let has_metadata = !note.tags.is_empty() || !note.persons.is_empty();
+                                let metadata = Self::note_display_metadata(&note);
+                                let has_metadata = !metadata.tags.is_empty()
+                                    || !metadata.persons.is_empty()
+                                    || metadata.line.is_some();
 
                                 div()
                                     .id(idx)
@@ -484,7 +505,17 @@ impl Render for NotePanel {
                                                                 .flex_wrap()
                                                                 .text_xs()
                                                                 .text_color(rgb(0xbbbbbb))
-                                                                .children(note.tags.iter().enumerate().map(|(tag_idx, tag)| {
+                                                                .when_some(metadata.line.as_ref(), |el, line| {
+                                                                    el.child(
+                                                                        div()
+                                                                            .id("note-line")
+                                                                            .child(render_metadata_chip(
+                                                                                MetadataChipKind::Line,
+                                                                                &format_line_ref(line),
+                                                                            ))
+                                                                    )
+                                                                })
+                                                                .children(metadata.tags.iter().enumerate().map(|(tag_idx, tag)| {
                                                                     div()
                                                                         .id(("note-tag", tag_idx))
                                                                         .child(render_metadata_chip(
@@ -492,7 +523,7 @@ impl Render for NotePanel {
                                                                             tag,
                                                                         ))
                                                                 }))
-                                                                .children(note.persons.iter().enumerate().map(|(person_idx, person)| {
+                                                                .children(metadata.persons.iter().enumerate().map(|(person_idx, person)| {
                                                                     div()
                                                                         .id(("note-person", person_idx))
                                                                         .child(render_metadata_chip(
@@ -537,5 +568,35 @@ impl Render for NotePanel {
 impl Focusable for NotePanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+fn format_line_ref(line: &LineRef) -> String {
+    match line.project.as_deref() {
+        Some(project) => format!("~{project}/{}", line.name),
+        None => format!("~{}", line.name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NotePanel;
+    use crate::models::Record;
+
+    #[test]
+    fn note_display_metadata_merges_inline_people_and_line() {
+        let mut note = Record::new_note(
+            "~微信冻屏问题关键进展 #关键进展 刚用 glm 写了个初稿，发给了@沈慧海 @宋亚南"
+                .to_string(),
+        );
+        note.tags = vec!["关键进展".to_string()];
+        note.persons = vec!["宋亚南".to_string()];
+
+        let metadata = NotePanel::note_display_metadata(&note);
+
+        assert_eq!(metadata.tags, vec!["关键进展"]);
+        assert_eq!(metadata.persons, vec!["沈慧海", "宋亚南"]);
+        let line = metadata.line.expect("expected inline transaction");
+        assert_eq!(line.name, "微信冻屏问题关键进展");
     }
 }

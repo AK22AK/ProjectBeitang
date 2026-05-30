@@ -325,10 +325,11 @@ impl TaskPanel {
             task.sync_task_lifecycle_fields(previous_status, now);
 
             let updated_task = task.clone();
+            let line_ref = payload.line.clone();
             let store = self.store.clone();
             let sidebar = self.task_detail_sidebar.clone();
-            cx.spawn(
-                async move |view, cx| match store.update_record(updated_task).await {
+            cx.spawn(async move |view, cx| {
+                match store.update_record_with_line(updated_task, line_ref).await {
                     Ok(_) => {
                         view.update(cx, |panel, cx| {
                             panel.load_available_tags(cx);
@@ -341,8 +342,8 @@ impl TaskPanel {
                     Err(e) => {
                         eprintln!("[TaskPanel] Failed to update task: {}", e);
                     }
-                },
-            )
+                }
+            })
             .detach();
 
             cx.notify();
@@ -1489,10 +1490,12 @@ impl TaskPanel {
 
     fn render_quiet_metadata_chip(kind: MetadataChipKind, label: &str) -> AnyElement {
         let label = match kind {
+            MetadataChipKind::Line => label.trim_start_matches('~').trim_start_matches('～'),
             MetadataChipKind::Tag => label.trim_start_matches('#'),
             MetadataChipKind::Person => label.trim_start_matches('@'),
         };
         let prefix = match kind {
+            MetadataChipKind::Line => "~",
             MetadataChipKind::Tag => "#",
             MetadataChipKind::Person => "@",
         };

@@ -1,7 +1,8 @@
 use robinne::models::Priority;
 use robinne::ui::parsing::{
-    parse_person_list, parse_priority, parse_record_draft, parse_record_fields, parse_record_input,
-    parse_tag_list, parse_tags_and_people, parse_task_draft, parse_task_input, reconcile_metadata,
+    merge_inline_metadata, parse_line_ref, parse_person_list, parse_priority, parse_record_draft,
+    parse_record_fields, parse_record_input, parse_tag_list, parse_tags_and_people,
+    parse_task_draft, parse_task_input, reconcile_metadata,
 };
 
 #[test]
@@ -230,6 +231,85 @@ fn test_parse_record_fields_merges_and_dedups_metadata() {
 }
 
 #[test]
+fn test_parse_global_line_ref() {
+    let line =
+        parse_line_ref("补齐候选交互 ~快捷输入事务 #交互").expect("expected a valid global line");
+    assert_eq!(line.project, None);
+    assert_eq!(line.name, "快捷输入事务");
+}
+
+#[test]
+fn test_parse_fullwidth_line_ref() {
+    let line = parse_line_ref("～微信冻屏问题关键进展 #关键进展")
+        .expect("expected a valid fullwidth line");
+    assert_eq!(line.project, None);
+    assert_eq!(line.name, "微信冻屏问题关键进展");
+}
+
+#[test]
+fn test_parse_project_line_ref() {
+    let line = parse_line_ref("补齐候选交互 ~Robinne/快捷输入事务 #交互")
+        .expect("expected a valid project line");
+    assert_eq!(line.project.as_deref(), Some("Robinne"));
+    assert_eq!(line.name, "快捷输入事务");
+}
+
+#[test]
+fn test_parse_line_ref_rejects_nested_project_paths() {
+    assert!(parse_line_ref("记录 ~Robinne/输入/候选 #交互").is_none());
+}
+
+#[test]
+fn test_parse_line_ref_rejects_empty_project_or_name() {
+    assert!(parse_line_ref("记录 ~/候选").is_none());
+    assert!(parse_line_ref("记录 ~Robinne/").is_none());
+    assert!(parse_line_ref("记录 ~").is_none());
+}
+
+#[test]
+fn test_parse_task_draft_extracts_line_without_removing_text() {
+    let result = parse_task_draft("!! 补齐候选交互 ~Robinne/快捷输入事务 #交互 @自己");
+    assert_eq!(
+        result.title,
+        "补齐候选交互 ~Robinne/快捷输入事务 #交互 @自己"
+    );
+    assert_eq!(result.tags, vec!["交互"]);
+    assert_eq!(result.people, vec!["自己"]);
+    let line = result.line.expect("expected task draft line");
+    assert_eq!(line.project.as_deref(), Some("Robinne"));
+    assert_eq!(line.name, "快捷输入事务");
+}
+
+#[test]
+fn test_parse_record_fields_extracts_fullwidth_line() {
+    let result = parse_record_fields(None, "～微信冻屏问题关键进展 #关键进展 刚用 glm 写了初稿");
+    let line = result
+        .line
+        .expect("expected fullwidth line in record fields");
+    assert_eq!(line.project, None);
+    assert_eq!(line.name, "微信冻屏问题关键进展");
+}
+
+#[test]
+fn test_parse_record_fields_extracts_people_adjacent_to_chinese_text() {
+    let result = parse_record_fields(
+        None,
+        "~微信冻屏问题关键进展 #关键进展 刚用 glm 写了个初稿，发给了@沈慧海 @宋亚南",
+    );
+    assert_eq!(result.people, vec!["沈慧海", "宋亚南"]);
+}
+
+#[test]
+fn test_parse_record_draft_extracts_line_from_title_and_body() {
+    let result = parse_record_draft("事务设计 ~Robinne/事务\n补充节点展示 ~事务节点 #设计");
+    assert_eq!(result.title, Some("事务设计 ~Robinne/事务".to_string()));
+    assert_eq!(result.content, "补充节点展示 ~事务节点 #设计");
+    let line = result.line.expect("expected first valid line");
+    assert_eq!(line.project.as_deref(), Some("Robinne"));
+    assert_eq!(line.name, "事务");
+}
+
+#[test]
 fn test_reconcile_metadata_preserves_non_inline_entries() {
     let result = reconcile_metadata(
         &["旧标签".to_string(), "正文标签".to_string()],
@@ -238,6 +318,16 @@ fn test_reconcile_metadata_preserves_non_inline_entries() {
     );
 
     assert_eq!(result, vec!["旧标签", "新标签"]);
+}
+
+#[test]
+fn test_merge_inline_metadata_prefers_current_inline_order() {
+    let result = merge_inline_metadata(
+        &["宋亚南".to_string()],
+        &["沈慧海".to_string(), "宋亚南".to_string()],
+    );
+
+    assert_eq!(result, vec!["沈慧海", "宋亚南"]);
 }
 
 #[test]

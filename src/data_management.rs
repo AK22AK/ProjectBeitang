@@ -1,6 +1,6 @@
 use crate::db::Database;
 use crate::git_sync::ExportSummary;
-use crate::models::{Attachment, AttachmentStatus, Person, Record, RecordType, Tag};
+use crate::models::{Attachment, AttachmentStatus, Line, Person, Record, RecordType, Tag};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -51,6 +51,8 @@ pub struct AttachmentListItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportRecord {
     pub id: Uuid,
+    #[serde(default)]
+    pub line_id: Option<Uuid>,
     pub title: Option<String>,
     pub content: String,
     pub priority: Option<crate::models::Priority>,
@@ -72,6 +74,7 @@ impl ExportRecord {
     pub fn from_record(record: &Record) -> Self {
         Self {
             id: record.id,
+            line_id: record.line_id,
             title: record.title.clone(),
             content: record.content.clone(),
             priority: record.priority.clone(),
@@ -93,6 +96,7 @@ impl ExportRecord {
     pub fn to_record(&self) -> Record {
         Record {
             id: self.id,
+            line_id: self.line_id,
             title: self.title.clone(),
             content: self.content.clone(),
             priority: self.priority.clone(),
@@ -175,6 +179,8 @@ pub struct ExportManifestV1 {
     pub exported_at: DateTime<Utc>,
     pub app_version: String,
     pub records: Vec<ExportRecord>,
+    #[serde(default)]
+    pub lines: Vec<Line>,
     pub tags: Vec<Tag>,
     pub persons: Vec<Person>,
     pub attachments: Vec<ExportAttachmentEntry>,
@@ -377,6 +383,10 @@ fn apply_manifest_contents(
         db.upsert_person_metadata(person)
             .map_err(|err| format!("写入人物失败 {}: {}", person.name, err))?;
     }
+    for line in &bundle.manifest.lines {
+        db.upsert_line(line)
+            .map_err(|err| format!("写入线失败 {}: {}", line.display_name(), err))?;
+    }
 
     let attachment_map = attachment_map_by_record(&bundle.manifest.attachments);
     for export_record in &bundle.manifest.records {
@@ -514,6 +524,9 @@ fn write_export_archive_inner<W: Write + Seek>(
     let persons = db
         .get_persons()
         .map_err(|err| format!("读取人物失败: {}", err))?;
+    let lines = db
+        .get_lines(None, true)
+        .map_err(|err| format!("读取线失败: {}", err))?;
     let attachments = db
         .get_all_attachments_metadata()
         .map_err(|err| format!("读取附件失败: {}", err))?;
@@ -551,6 +564,7 @@ fn write_export_archive_inner<W: Write + Seek>(
         exported_at: Utc::now(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         records: records.iter().map(ExportRecord::from_record).collect(),
+        lines,
         tags,
         persons,
         attachments: export_attachments,
@@ -721,6 +735,7 @@ mod tests {
         let record_id = Uuid::new_v4();
         let source_record = Record {
             id: record_id,
+            line_id: None,
             title: Some("Same".to_string()),
             content: "imported".to_string(),
             priority: Some(Priority::High),

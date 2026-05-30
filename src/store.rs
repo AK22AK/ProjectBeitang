@@ -13,7 +13,8 @@ use crate::git_sync::{
     GitRemoteSyncPullResult, GitRemoteSyncPushResult, GitRemoteSyncState, GitRemoteVerification,
 };
 use crate::models::{
-    Attachment, MetadataCatalogEntry, Person, Record, Tag, TaskStatus, TimelineQuery,
+    Attachment, Line, LineGraphData, LineRef, MetadataCatalogEntry, Person, Record, Tag,
+    TaskStatus, TimelineQuery,
 };
 use crate::settings::{load_app_settings, save_app_settings};
 use async_channel::{unbounded, Receiver, Sender};
@@ -78,18 +79,47 @@ pub enum StoreCommand {
         record: Record,
         respond_to: Sender<Result<(), String>>,
     },
+    CreateRecordWithLine {
+        record: Record,
+        line_ref: Option<LineRef>,
+        respond_to: Sender<Result<(), String>>,
+    },
     UpdateRecord {
         record: Record,
+        respond_to: Sender<Result<(), String>>,
+    },
+    UpdateRecordWithLine {
+        record: Record,
+        line_ref: Option<LineRef>,
         respond_to: Sender<Result<(), String>>,
     },
     DeleteRecord {
         id: uuid::Uuid,
         respond_to: Sender<Result<(), String>>,
     },
-    // 时间线查询
+    // 历史记录查询（保留给搜索/兼容入口）
     GetTimeline {
         query: TimelineQuery,
         respond_to: Sender<Result<Vec<Record>, String>>,
+    },
+    GetLineGraph {
+        project: Option<String>,
+        respond_to: Sender<Result<LineGraphData, String>>,
+    },
+    GetLineCatalog {
+        respond_to: Sender<Result<Vec<MetadataCatalogEntry>, String>>,
+    },
+    CompleteLine {
+        line_id: uuid::Uuid,
+        respond_to: Sender<Result<(), String>>,
+    },
+    DeleteLine {
+        line_id: uuid::Uuid,
+        respond_to: Sender<Result<(), String>>,
+    },
+    GetOrCreateLine {
+        line_ref: LineRef,
+        respond_to: Sender<Result<Line, String>>,
     },
     // 全文搜索
     SearchRecords {
@@ -432,8 +462,24 @@ impl StoreRuntime {
                     let result = self.handle_create_record(record).await;
                     let _ = respond_to.send(result).await;
                 }
+                StoreCommand::CreateRecordWithLine {
+                    record,
+                    line_ref,
+                    respond_to,
+                } => {
+                    let result = self.handle_create_record_with_line(record, line_ref).await;
+                    let _ = respond_to.send(result).await;
+                }
                 StoreCommand::UpdateRecord { record, respond_to } => {
                     let result = self.handle_update_record(record).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::UpdateRecordWithLine {
+                    record,
+                    line_ref,
+                    respond_to,
+                } => {
+                    let result = self.handle_update_record_with_line(record, line_ref).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::DeleteRecord { id, respond_to } => {
@@ -442,6 +488,38 @@ impl StoreRuntime {
                 }
                 StoreCommand::GetTimeline { query, respond_to } => {
                     let result = self.handle_get_timeline(query).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetLineGraph {
+                    project,
+                    respond_to,
+                } => {
+                    let result = self.handle_get_line_graph(project).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetLineCatalog { respond_to } => {
+                    let result = self.handle_get_line_catalog().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::CompleteLine {
+                    line_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_complete_line(line_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::DeleteLine {
+                    line_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_delete_line(line_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetOrCreateLine {
+                    line_ref,
+                    respond_to,
+                } => {
+                    let result = self.handle_get_or_create_line(line_ref).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::SearchRecords { query, respond_to } => {
@@ -676,9 +754,53 @@ impl StoreRuntime {
         }
     }
 
+    async fn handle_create_record_with_line(
+        &self,
+        mut record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => {
+                if let Some(line_ref) = line_ref {
+                    let line = db
+                        .get_or_create_line(&line_ref)
+                        .map_err(|e| format!("Database error: {}", e))?;
+                    record.line_id = Some(line.id);
+                }
+                let record = self.normalize_record_for_persistence(record)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
     async fn handle_update_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
             Some(db) => {
+                let record = self.normalize_record_for_persistence(record)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_update_record_with_line(
+        &self,
+        mut record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => {
+                record.line_id = match line_ref {
+                    Some(line_ref) => Some(
+                        db.get_or_create_line(&line_ref)
+                            .map_err(|e| format!("Database error: {}", e))?
+                            .id,
+                    ),
+                    None => record.line_id,
+                };
                 let record = self.normalize_record_for_persistence(record)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
@@ -736,6 +858,54 @@ impl StoreRuntime {
                     Err(format!("Database error: {}", e))
                 }
             },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_line_graph(
+        &self,
+        project: Option<String>,
+    ) -> Result<LineGraphData, String> {
+        match &self.db {
+            Some(db) => db
+                .get_line_graph(project.as_deref())
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_line_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        match &self.db {
+            Some(db) => db
+                .get_line_catalog()
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_complete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .complete_line(line_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_delete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .delete_line(line_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_or_create_line(&self, line_ref: LineRef) -> Result<Line, String> {
+        match &self.db {
+            Some(db) => db
+                .get_or_create_line(&line_ref)
+                .map_err(|e| format!("Database error: {}", e)),
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -1387,12 +1557,46 @@ impl Store {
         rx.recv().await.unwrap_or(Ok(()))
     }
 
+    pub async fn create_record_with_line(
+        &self,
+        record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::CreateRecordWithLine {
+                record,
+                line_ref,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
     pub async fn update_record(&self, record: Record) -> Result<(), String> {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
             .send(StoreCommand::UpdateRecord {
                 record,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn update_record_with_line(
+        &self,
+        record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::UpdateRecordWithLine {
+                record,
+                line_ref,
                 respond_to: tx,
             })
             .await;
@@ -1443,6 +1647,67 @@ impl Store {
             result.as_ref().map(|v| v.len())
         );
         result
+    }
+
+    pub async fn get_line_graph(&self, project: Option<String>) -> Result<LineGraphData, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetLineGraph {
+                project,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Ok(LineGraphData::default()))
+    }
+
+    pub async fn get_line_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetLineCatalog { respond_to: tx })
+            .await;
+        rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn complete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::CompleteLine {
+                line_id,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn delete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::DeleteLine {
+                line_id,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn get_or_create_line(&self, line_ref: LineRef) -> Result<Line, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetOrCreateLine {
+                line_ref,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get or create line".to_string()))
     }
 
     pub async fn search_records(&self, query: &str) -> Result<Vec<Record>, String> {
@@ -2037,6 +2302,7 @@ mod tests {
 
         Record {
             id: Uuid::new_v4(),
+            line_id: None,
             title: Some("task".to_string()),
             content: String::new(),
             priority,

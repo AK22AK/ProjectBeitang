@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::models::{Attachment, AttachmentStatus, Priority, Record, TaskStatus};
+use crate::models::{Attachment, AttachmentStatus, LineRef, Priority, Record, TaskStatus};
 use crate::platform::{open_saved_attachment, pick_image_files, ParentWindowHint};
 use crate::store::Store;
 use crate::ui::metadata_autocomplete::{
@@ -43,6 +43,7 @@ pub struct TaskDetailSidebar {
     due_date: Option<DateTime<Utc>>,
     scheduled_for: Option<DateTime<Utc>>,
     cancel_reason: Option<String>,
+    line: Option<LineRef>,
     tags: Vec<String>,
     persons: Vec<String>,
     inline_tags: Vec<String>,
@@ -83,6 +84,7 @@ pub struct SavePayload {
     pub cancel_reason: Option<String>,
     pub tags: Vec<String>,
     pub persons: Vec<String>,
+    pub line: Option<LineRef>,
 }
 
 /// 侧边栏显示状态
@@ -110,6 +112,7 @@ impl TaskDetailSidebar {
             due_date: None,
             scheduled_for: None,
             cancel_reason: None,
+            line: None,
             tags: Vec::new(),
             persons: Vec::new(),
             inline_tags: Vec::new(),
@@ -168,25 +171,16 @@ impl TaskDetailSidebar {
     pub fn show_task(&mut self, task: &Record, window: &mut Window, cx: &mut Context<Self>) {
         let task_id = task.id.to_string();
 
-        // 关键：如果已经在显示同一个任务，什么都不做
+        // 如果已经在显示同一个任务，只刷新展示数据，不重建输入和附件状态。
         if self.current_task_id.as_ref() == Some(&task_id) {
+            self.refresh_task_view_state(task);
+            cx.notify();
             return;
         }
 
         // 更新任务数据
         self.current_task_id = Some(task_id);
-        self.task_title = task.title.clone();
-        self.task_content = task.content.clone();
-        self.priority = task.priority.clone();
-        self.status = task.status.clone();
-        self.due_date = task.due_date;
-        self.scheduled_for = task.scheduled_for;
-        self.cancel_reason = task.cancelled_reason.clone();
-        self.tags = task.tags.clone();
-        self.persons = task.persons.clone();
-        let inline_fields = parsing::parse_record_fields(task.title.as_deref(), &task.content);
-        self.inline_tags = inline_fields.tags;
-        self.inline_persons = inline_fields.people;
+        self.refresh_task_view_state(task);
         self.editing_title = false;
         self.editing_content = false;
         self.attachments.clear();
@@ -293,6 +287,7 @@ impl TaskDetailSidebar {
                 window,
                 |this, _state, event: &InputEvent, window, cx| match event {
                     InputEvent::Change | InputEvent::Focus => {
+                        this.sync_inline_metadata_from_inputs(cx);
                         this.sync_title_metadata_autocomplete(cx);
                     }
                     InputEvent::Blur => {
@@ -323,6 +318,7 @@ impl TaskDetailSidebar {
                 window,
                 |this, _state, event: &InputEvent, window, cx| match event {
                     InputEvent::Change | InputEvent::Focus => {
+                        this.sync_inline_metadata_from_inputs(cx);
                         this.sync_content_metadata_autocomplete(cx);
                     }
                     InputEvent::Blur => {
@@ -343,6 +339,49 @@ impl TaskDetailSidebar {
         cx.notify();
     }
 
+    fn refresh_task_view_state(&mut self, task: &Record) {
+        self.task_title = task.title.clone();
+        self.task_content = task.content.clone();
+        self.priority = task.priority.clone();
+        self.status = task.status.clone();
+        self.due_date = task.due_date;
+        self.scheduled_for = task.scheduled_for;
+        self.cancel_reason = task.cancelled_reason.clone();
+        let inline_fields = parsing::parse_record_fields(task.title.as_deref(), &task.content);
+        self.tags = parsing::merge_inline_metadata(&task.tags, &inline_fields.tags);
+        self.persons = parsing::merge_inline_metadata(&task.persons, &inline_fields.people);
+        self.line = inline_fields.line.clone();
+        self.inline_tags = inline_fields.tags;
+        self.inline_persons = inline_fields.people;
+    }
+
+    fn sync_inline_metadata_from_inputs(&mut self, cx: &mut Context<Self>) {
+        let raw_title = self
+            .title_input
+            .as_ref()
+            .map(|input| {
+                let value = input.read(cx).value().to_string();
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })
+            .unwrap_or_else(|| self.task_title.clone());
+        let raw_content = self
+            .content_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_else(|| self.task_content.clone());
+        let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
+        self.tags = parsing::reconcile_metadata(&self.tags, &self.inline_tags, &parsed_fields.tags);
+        self.persons =
+            parsing::reconcile_metadata(&self.persons, &self.inline_persons, &parsed_fields.people);
+        self.line = parsed_fields.line.clone();
+        self.inline_tags = parsed_fields.tags;
+        self.inline_persons = parsed_fields.people;
+    }
+
     /// 关闭侧边栏
     pub fn close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(cx);
@@ -350,6 +389,7 @@ impl TaskDetailSidebar {
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.current_task_id = None;
+        self.line = None;
         self.attachments.clear();
         self.active_attachment_preview = None;
         self.attachments_loading = false;
@@ -473,6 +513,7 @@ impl TaskDetailSidebar {
             self.task_content = parsed_fields.content.clone();
             self.tags = next_tags.clone();
             self.persons = next_persons.clone();
+            self.line = parsed_fields.line.clone();
             self.inline_tags = parsed_fields.tags.clone();
             self.inline_persons = parsed_fields.people.clone();
             self.editing_title = false;
@@ -517,6 +558,7 @@ impl TaskDetailSidebar {
                 cancel_reason: self.cancel_reason.clone(),
                 tags: next_tags,
                 persons: next_persons,
+                line: parsed_fields.line,
             };
 
             if let Some(ref callback) = self.on_save {
@@ -604,8 +646,13 @@ impl TaskDetailSidebar {
         cx.spawn(async move |view, cx| {
             let tags = store.get_tag_catalog().await.unwrap_or_default();
             let persons = store.get_person_catalog().await.unwrap_or_default();
+            let lines = store.get_line_catalog().await.unwrap_or_default();
             let _ = view.update(cx, |this, cx| {
-                let catalog = MetadataCatalog { tags, persons };
+                let catalog = MetadataCatalog {
+                    tags,
+                    persons,
+                    lines,
+                };
                 this.title_metadata_autocomplete
                     .set_catalog(catalog.clone());
                 this.content_metadata_autocomplete.set_catalog(catalog);
@@ -990,6 +1037,7 @@ impl TaskDetailSidebar {
         label: &str,
     ) -> impl IntoElement {
         let text_color = match kind {
+            MetadataChipKind::Line => rgb(0x047857).into(),
             MetadataChipKind::Tag => ClaudeLikeColors::text_secondary(),
             MetadataChipKind::Person => rgb(0x6f6254).into(),
         };
@@ -2083,6 +2131,26 @@ impl Render for TaskDetailSidebar {
                                                 ),
                                         )
                                     })
+                                    .when_some(self.line.as_ref(), |el, line| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(ClaudeLikeColors::text_tertiary())
+                                                        .child("相关事务"),
+                                                )
+                                                .child(
+                                                    h_flex().gap(px(6.0)).flex_wrap().child(
+                                                        self.render_sidebar_metadata_chip(
+                                                            MetadataChipKind::Line,
+                                                            &format_line_ref(line),
+                                                        ),
+                                                    ),
+                                                ),
+                                        )
+                                    })
                                     .when(!self.tags.is_empty(), |el| {
                                         el.child(
                                             v_flex()
@@ -2273,5 +2341,12 @@ impl Render for TaskDetailSidebar {
                 el.child(overlay)
             })
             .into_any_element()
+    }
+}
+
+fn format_line_ref(line: &LineRef) -> String {
+    match line.project.as_deref() {
+        Some(project) => format!("~{project}/{}", line.name),
+        None => format!("~{}", line.name),
     }
 }
