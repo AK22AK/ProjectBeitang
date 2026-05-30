@@ -3,15 +3,13 @@ use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
 use crate::ui::style::{ClaudeLikeColors, TaskTypography};
-use crate::ui::task_detail_sidebar::TaskDetailSidebar;
-use crate::ui::tokenized_text::{
-    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
-};
+use crate::ui::task_detail_sidebar::{TaskDetailPresentation, TaskDetailSidebar};
+use crate::ui::tokenized_text::{render_tokenized_text, MetadataChipKind, TokenTextStyle};
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::prelude::FluentBuilder as _;
 use gpui::StatefulInteractiveElement as _;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::Button;
 use gpui_component::date_picker::{DatePicker, DatePickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -31,7 +29,7 @@ actions!(
     ]
 );
 
-const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(360.0);
+const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(340.0);
 const TASK_PANEL_HORIZONTAL_PADDING: Pixels = px(32.0);
 const MATRIX_COLUMN_GAP: Pixels = px(8.0);
 const MIN_VISIBLE_QUADRANT_WIDTH: Pixels = px(280.0);
@@ -238,8 +236,10 @@ impl TaskPanel {
             available_tags: Vec::new(),
             tag_filter_mode: TagFilterMode::And,
             pending_deletion: None,
-            task_detail_sidebar: cx
-                .new(|cx| TaskDetailSidebar::new(sidebar_store.clone(), window, cx)),
+            task_detail_sidebar: cx.new(|cx| {
+                TaskDetailSidebar::new(sidebar_store.clone(), window, cx)
+                    .with_presentation(TaskDetailPresentation::Docked)
+            }),
         };
 
         let handle = cx.entity().clone();
@@ -1194,23 +1194,20 @@ impl TaskPanel {
 
     fn render_view_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .gap(px(6.0))
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(ClaudeLikeColors::separator())
+            .bg(ClaudeLikeColors::hover_surface())
             .child(
                 div()
                     .id("view-list")
-                    .px(px(10.0))
-                    .py(px(5.0))
+                    .px(px(11.0))
+                    .py(px(4.0))
                     .rounded(px(999.0))
-                    .border_1()
-                    .border_color(if self.current_view == TaskView::List {
-                        ClaudeLikeColors::stronger_separator()
-                    } else {
-                        ClaudeLikeColors::separator()
-                    })
-                    .bg(if self.current_view == TaskView::List {
-                        ClaudeLikeColors::selected_surface()
-                    } else {
-                        ClaudeLikeColors::app_background()
+                    .when(self.current_view == TaskView::List, |el| {
+                        el.bg(ClaudeLikeColors::app_background())
                     })
                     .text_size(px(TaskTypography::META_SIZE))
                     .font_weight(TaskTypography::task_title_font_weight(
@@ -1227,19 +1224,11 @@ impl TaskPanel {
             .child(
                 div()
                     .id("view-matrix")
-                    .px(px(10.0))
-                    .py(px(5.0))
+                    .px(px(11.0))
+                    .py(px(4.0))
                     .rounded(px(999.0))
-                    .border_1()
-                    .border_color(if self.current_view == TaskView::Matrix {
-                        ClaudeLikeColors::stronger_separator()
-                    } else {
-                        ClaudeLikeColors::separator()
-                    })
-                    .bg(if self.current_view == TaskView::Matrix {
-                        ClaudeLikeColors::selected_surface()
-                    } else {
-                        ClaudeLikeColors::app_background()
+                    .when(self.current_view == TaskView::Matrix, |el| {
+                        el.bg(ClaudeLikeColors::app_background())
                     })
                     .text_size(px(TaskTypography::META_SIZE))
                     .font_weight(TaskTypography::task_title_font_weight(
@@ -1257,12 +1246,12 @@ impl TaskPanel {
 
     fn render_priority_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .gap(px(6.0))
+            .gap(px(5.0))
             .child(
                 div()
                     .id("filter-high")
-                    .px(px(10.0))
-                    .py(px(5.0))
+                    .px(px(9.0))
+                    .py(px(4.0))
                     .rounded(px(999.0))
                     .border_1()
                     .border_color(if self.priority_filter == PriorityFilter::High {
@@ -1291,8 +1280,8 @@ impl TaskPanel {
             .child(
                 div()
                     .id("filter-medium")
-                    .px(px(10.0))
-                    .py(px(5.0))
+                    .px(px(9.0))
+                    .py(px(4.0))
                     .rounded(px(999.0))
                     .border_1()
                     .border_color(if self.priority_filter == PriorityFilter::Medium {
@@ -1321,8 +1310,8 @@ impl TaskPanel {
             .child(
                 div()
                     .id("filter-low")
-                    .px(px(10.0))
-                    .py(px(5.0))
+                    .px(px(9.0))
+                    .py(px(4.0))
                     .rounded(px(999.0))
                     .border_1()
                     .border_color(if self.priority_filter == PriorityFilter::Low {
@@ -1351,8 +1340,8 @@ impl TaskPanel {
             .child(
                 div()
                     .id("filter-all")
-                    .px(px(10.0))
-                    .py(px(5.0))
+                    .px(px(9.0))
+                    .py(px(4.0))
                     .rounded(px(999.0))
                     .border_1()
                     .border_color(if self.priority_filter == PriorityFilter::All {
@@ -1382,7 +1371,7 @@ impl TaskPanel {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .w_full()
-            .gap(px(8.0))
+            .gap(px(9.0))
             .when(self.focus_preset != TaskFocusPreset::None, |el| {
                 el.child(
                     h_flex()
@@ -1432,15 +1421,15 @@ impl TaskPanel {
             .when(!self.available_tags.is_empty(), |el| {
                 el.child(
                     h_flex()
-                        .gap(px(4.0))
+                        .gap(px(5.0))
                         .flex_wrap()
                         .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
                             let is_selected = self.selected_tags.contains(tag);
                             let tag_clone = tag.clone();
                             div()
                                 .id(("tag-filter", idx))
-                                .px(px(10.0))
-                                .py(px(5.0))
+                                .px(px(9.0))
+                                .py(px(4.0))
                                 .rounded(px(999.0))
                                 .cursor_pointer()
                                 .border_1()
@@ -1498,6 +1487,24 @@ impl TaskPanel {
             })
     }
 
+    fn render_quiet_metadata_chip(kind: MetadataChipKind, label: &str) -> AnyElement {
+        let label = match kind {
+            MetadataChipKind::Tag => label.trim_start_matches('#'),
+            MetadataChipKind::Person => label.trim_start_matches('@'),
+        };
+        let prefix = match kind {
+            MetadataChipKind::Tag => "#",
+            MetadataChipKind::Person => "@",
+        };
+
+        div()
+            .text_size(px(TaskTypography::META_SIZE))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(ClaudeLikeColors::text_secondary())
+            .child(format!("{}{}", prefix, label))
+            .into_any_element()
+    }
+
     fn render_task_card(
         &mut self,
         task: &Record,
@@ -1521,9 +1528,9 @@ impl TaskPanel {
             Some(Priority::Low) | None => "",
         };
         let priority_color = match task.priority {
-            Some(Priority::High) => rgb(0xff4d4f),
-            Some(Priority::Medium) => rgb(0xfaad14),
-            Some(Priority::Low) | None => rgb(0x52c41a),
+            Some(Priority::High) => rgb(0xc65f45),
+            Some(Priority::Medium) => rgb(0xb8874f),
+            Some(Priority::Low) | None => rgb(0x7b8375),
         };
 
         let fmt_short = |dt: chrono::DateTime<chrono::Utc>| -> String {
@@ -1556,26 +1563,28 @@ impl TaskPanel {
             .id(("task-card", idx))
             .w_full()
             .min_w(px(0.0))
-            .px(px(if compact { 8.0 } else { 0.0 }))
-            .py(px(if compact { 8.0 } else { 11.0 }))
-            .when(compact, |this| {
-                this.rounded(px(10.0))
+            .relative()
+            .px(px(if compact { 9.0 } else { 12.0 }))
+            .py(px(if compact { 9.0 } else { 13.0 }))
+            .when(compact, |row| {
+                row.rounded(px(12.0))
                     .border_1()
                     .border_color(ClaudeLikeColors::separator())
-                    .bg(if is_selected {
-                        ClaudeLikeColors::selected_surface()
-                    } else {
-                        ClaudeLikeColors::app_background()
-                    })
+                    .bg(ClaudeLikeColors::app_background())
             })
-            .when(!compact, |this| {
-                this.border_b_1()
+            .when(!compact, |row| {
+                row.rounded(px(if is_selected { 12.0 } else { 0.0 }))
+                    .border_b_1()
                     .border_color(ClaudeLikeColors::separator())
-                    .when(is_selected, |row| row.bg(ClaudeLikeColors::selected_surface()))
+                    .bg(if is_selected {
+                        ClaudeLikeColors::hover_surface()
+                    } else {
+                        ClaudeLikeColors::task_workspace_background()
+                    })
             })
             .hover(|s| {
                 s.bg(if is_selected {
-                    ClaudeLikeColors::selected_surface()
+                    ClaudeLikeColors::hover_surface()
                 } else {
                     ClaudeLikeColors::hover_surface()
                 })
@@ -1597,8 +1606,31 @@ impl TaskPanel {
                     .child(
                         div()
                             .id(("checkbox", idx))
+                            .mt(px(2.0))
+                            .w(px(15.0))
+                            .h(px(15.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(999.0))
+                            .border_1()
+                            .border_color(if is_completed {
+                                ClaudeLikeColors::text_secondary()
+                            } else {
+                                ClaudeLikeColors::stronger_separator()
+                            })
+                            .when(is_completed, |box_el| {
+                                box_el
+                                    .bg(ClaudeLikeColors::text_secondary())
+                                    .child(
+                                        div()
+                                            .w(px(5.0))
+                                            .h(px(5.0))
+                                            .rounded(px(1.0))
+                                            .bg(ClaudeLikeColors::app_background()),
+                                    )
+                            })
                             .cursor_pointer()
-                            .child(if is_completed { "☑" } else { "☐" })
                             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                                 this.toggle_task_complete(task_id, cx);
                                 cx.stop_propagation();
@@ -1738,26 +1770,26 @@ impl TaskPanel {
                                     div()
                                         .flex()
                                         .min_w(px(0.0))
-                                        .gap(px(8.0))
+                                        .gap(px(6.0))
                                         .flex_wrap()
                                         .text_size(px(TaskTypography::META_SIZE))
                                         .text_color(ClaudeLikeColors::text_secondary())
                                         .children(task.due_date.map(|t| {
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0xd86f4b))
-                                                .child(format!("⏰ {}", fmt_short(t)))
+                                                .text_color(ClaudeLikeColors::due_text())
+                                                .child(format!("截止 {}", fmt_short(t)))
                                         }))
                                         .children(task.scheduled_for.map(|t| {
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x5b7da6))
-                                                .child(format!("📅 {}", fmt_short(t)))
+                                                .text_color(ClaudeLikeColors::schedule_text())
+                                                .child(format!("提醒 {}", fmt_short(t)))
                                         }))
                                         .children(task.tags.iter().enumerate().map(|(idx, tag)| {
                                             div()
                                                 .id(("task-tag", idx))
-                                                .child(render_metadata_chip(
+                                                .child(Self::render_quiet_metadata_chip(
                                                     MetadataChipKind::Tag,
                                                     tag,
                                                 ))
@@ -1765,7 +1797,7 @@ impl TaskPanel {
                                         .children(task.persons.iter().enumerate().map(|(idx, person)| {
                                             div()
                                                 .id(("task-person", idx))
-                                                .child(render_metadata_chip(
+                                                .child(Self::render_quiet_metadata_chip(
                                                     MetadataChipKind::Person,
                                                     person,
                                                 ))
@@ -2054,7 +2086,7 @@ impl TaskPanel {
             .flex()
             .flex_col()
             .gap(px(0.0))
-            .pr(px(16.0))
+            .pr(px(0.0))
             .overflow_y_scrollbar()
             .children({
                 let mut elements: Vec<AnyElement> = Vec::new();
@@ -2065,7 +2097,7 @@ impl TaskPanel {
                             .text_size(px(TaskTypography::META_SIZE))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(ClaudeLikeColors::text_tertiary())
-                            .pb(px(6.0))
+                            .pb(px(8.0))
                             .child(format!("待办任务 ({})", pending_count))
                             .into_any_element(),
                     );
@@ -2230,10 +2262,9 @@ impl Render for TaskPanel {
                     .id("task-panel-main")
                     .flex_1()
                     .min_w(px(0.0))
+                    .h_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(14.0))
-                    .p(px(22.0))
+                    .justify_start()
                     .bg(ClaudeLikeColors::app_background())
                     .font_family(TaskTypography::SYSTEM_FONT_FAMILY)
                     .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
@@ -2251,160 +2282,173 @@ impl Render for TaskPanel {
                     }))
                     .child(
                         v_flex()
-                            .gap(px(4.0))
+                            .id("task-workspace-column")
+                            .w_full()
+                            .h_full()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .gap(px(16.0))
+                            .px(px(42.0))
+                            .pt(px(22.0))
+                            .pb(px(34.0))
                             .child(
-                                div()
-                                    .text_size(px(TaskTypography::META_SIZE))
-                                    .text_color(ClaudeLikeColors::text_tertiary())
-                                    .child(format!(
-                                        "任务 · {} 待办 / {} 已完成",
-                                        pending_count, completed_count
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(TaskTypography::PAGE_TITLE_SIZE))
-                                    .font_weight(TaskTypography::heading_font_weight())
-                                    .text_color(ClaudeLikeColors::text_primary())
-                                    .child("任务"),
-                            ),
-                    )
-                    .child(self.render_toolbar(cx))
-                    .child(self.render_tag_filter(cx))
-                    .when(self.reminder_task_id.is_some(), |el| {
-                        if let (Some(ref dp), Some(ref ti)) =
-                            (&self.reminder_date_picker, &self.reminder_time_input)
-                        {
-                            let dp_clone = dp.clone();
-                            let ti_clone = ti.clone();
-                            let task_name = self
-                                .reminder_task_id
-                                .and_then(|id| self.tasks.iter().find(|t| t.id == id))
-                                .map(|t| t.content.clone())
-                                .unwrap_or_default();
-                            el.child(
-                                div()
-                                    .p(px(16.0))
-                                    .mx(px(4.0))
-                                    .my(px(8.0))
-                                    .bg(ClaudeLikeColors::accent_surface())
-                                    .border_1()
-                                    .border_color(ClaudeLikeColors::stronger_separator())
-                                    .rounded(px(12.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(12.0))
+                                h_flex()
+                                    .justify_between()
+                                    .items_start()
+                                    .gap(px(18.0))
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.0))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(ClaudeLikeColors::text_primary())
-                                                    .child("⏰ 设置提醒时间"),
-                                            )
+                                        v_flex()
+                                            .gap(px(5.0))
                                             .child(
                                                 div()
                                                     .text_size(px(TaskTypography::META_SIZE))
-                                                    .text_color(ClaudeLikeColors::text_secondary())
-                                                    .child(task_name),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap(px(12.0))
-                                            .items_end()
+                                                    .font_weight(FontWeight::NORMAL)
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                                    .child(format!(
+                                                        "任务 · {} 待办 / {} 已完成",
+                                                        pending_count, completed_count
+                                                    )),
+                                            )
                                             .child(
                                                 div()
-                                                    .flex_1()
+                                                    .text_size(px(TaskTypography::PAGE_TITLE_SIZE))
+                                                    .font_weight(TaskTypography::heading_font_weight())
+                                                    .text_color(ClaudeLikeColors::text_primary())
+                                                    .child("任务"),
+                                            ),
+                                    )
+                            )
+                            .child(self.render_toolbar(cx))
+                            .child(self.render_tag_filter(cx))
+                            .when(self.reminder_task_id.is_some(), |el| {
+                                if let (Some(ref dp), Some(ref ti)) =
+                                    (&self.reminder_date_picker, &self.reminder_time_input)
+                                {
+                                    let dp_clone = dp.clone();
+                                    let ti_clone = ti.clone();
+                                    let task_name = self
+                                        .reminder_task_id
+                                        .and_then(|id| self.tasks.iter().find(|t| t.id == id))
+                                        .map(|t| t.content.clone())
+                                        .unwrap_or_default();
+                                    el.child(
+                                        div()
+                                            .p(px(14.0))
+                                            .bg(ClaudeLikeColors::accent_surface())
+                                            .border_1()
+                                            .border_color(ClaudeLikeColors::stronger_separator())
+                                            .rounded(px(14.0))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(12.0))
+                                            .child(
+                                                div()
                                                     .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
+                                                    .items_center()
+                                                    .justify_between()
                                                     .child(
                                                         div()
-                                                            .text_xs()
-                                                            .text_color(
-                                                                ClaudeLikeColors::text_tertiary(),
-                                                            )
-                                                            .child("日期"),
+                                                            .text_size(px(13.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(ClaudeLikeColors::text_primary())
+                                                            .child("设置提醒时间"),
                                                     )
                                                     .child(
-                                                        DatePicker::new(&dp_clone)
-                                                            .cleanable(true)
-                                                            .number_of_months(1),
+                                                        div()
+                                                            .text_size(px(TaskTypography::META_SIZE))
+                                                            .text_color(ClaudeLikeColors::text_secondary())
+                                                            .child(task_name),
                                                     ),
                                             )
                                             .child(
                                                 div()
-                                                    .w(px(100.0))
                                                     .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
+                                                    .gap(px(10.0))
+                                                    .items_end()
                                                     .child(
                                                         div()
-                                                            .text_xs()
-                                                            .text_color(
-                                                                ClaudeLikeColors::text_tertiary(),
+                                                            .flex_1()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(4.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                                                    .child("日期"),
                                                             )
-                                                            .child("时间 (HH:MM)"),
+                                                            .child(
+                                                                DatePicker::new(&dp_clone)
+                                                                    .cleanable(true)
+                                                                    .number_of_months(1),
+                                                            ),
                                                     )
-                                                    .child(Input::new(&ti_clone)),
+                                                    .child(
+                                                        div()
+                                                            .w(px(92.0))
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(4.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                                                    .child("时间"),
+                                                            )
+                                                            .child(Input::new(&ti_clone)),
+                                                    ),
+                                            )
+                                            .children(self.reminder_error_message.as_ref().map(|err_msg| {
+                                                div()
+                                                    .text_size(px(13.0))
+                                                    .text_color(ClaudeLikeColors::danger())
+                                                    .child(err_msg.clone())
+                                            }))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .justify_end()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Button::new("cancel-reminder")
+                                                            .child("取消")
+                                                            .on_click(cx.listener(
+                                                                |this, _event, window, cx| {
+                                                                    this.cancel_reminder(window, cx);
+                                                                },
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        Button::new("save-reminder")
+                                                            .child("设定")
+                                                            .on_click(cx.listener(
+                                                                |this, _event, window, cx| {
+                                                                    this.save_reminder(window, cx);
+                                                                },
+                                                            )),
+                                                    ),
                                             ),
                                     )
-                                    .children(self.reminder_error_message.as_ref().map(|err_msg| {
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(ClaudeLikeColors::danger())
-                                            .child(err_msg.clone())
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_end()
-                                            .gap(px(8.0))
-                                            .child(
-                                                Button::new("cancel-reminder")
-                                                    .child("取消")
-                                                    .on_click(cx.listener(
-                                                        |this, _event, window, cx| {
-                                                            this.cancel_reminder(window, cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("save-reminder")
-                                                    .child("设定")
-                                                    .on_click(cx.listener(
-                                                        |this, _event, window, cx| {
-                                                            this.save_reminder(window, cx);
-                                                        },
-                                                    )),
-                                            ),
-                                    ),
-                            )
-                        } else {
-                            el
-                        }
-                    })
-                    .child(
-                        div()
-                            .id("task-view-container")
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .child(match self.current_view {
-                                TaskView::List => {
-                                    self.render_list_view(window, cx).into_any_element()
+                                } else {
+                                    el
                                 }
-                                TaskView::Matrix => self.render_matrix_view(window, cx),
-                            }),
+                            })
+                            .child(
+                                div()
+                                    .id("task-view-container")
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .child(match self.current_view {
+                                        TaskView::List => {
+                                            self.render_list_view(window, cx).into_any_element()
+                                        }
+                                        TaskView::Matrix => self.render_matrix_view(window, cx),
+                                    }),
+                            ),
+                            )
+                            .children(self.render_custom_context_menu(cx)),
                     )
-                    .children(self.render_custom_context_menu(cx)),
-            )
             .child(self.task_detail_sidebar.clone())
             .children(self.render_delete_confirmation(cx))
             .into_any_element()

@@ -1,12 +1,12 @@
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    button::{Button, ButtonVariants},
+    button::Button,
     date_picker::{DatePicker, DatePickerState},
     h_flex,
     input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Paste},
     scroll::ScrollableElement,
-    v_flex,
+    v_flex, Sizable,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,10 +21,11 @@ use crate::ui::metadata_autocomplete::{
 };
 use crate::ui::parsing;
 use crate::ui::style::{ClaudeLikeColors, TaskTypography};
-use crate::ui::tokenized_text::{
-    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
-};
+use crate::ui::tokenized_text::{render_tokenized_text, MetadataChipKind, TokenTextStyle};
 use std::time::Duration;
+
+const TASK_DETAIL_DOCKED_WIDTH: Pixels = px(340.0);
+const TASK_DETAIL_DOCKED_CONTAINER_WIDTH: Pixels = px(340.0);
 
 #[derive(Clone)]
 struct AttachmentPreview {
@@ -66,6 +67,7 @@ pub struct TaskDetailSidebar {
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_delete: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
+    presentation: TaskDetailPresentation,
 }
 
 /// 保存时的数据载荷
@@ -88,6 +90,12 @@ pub struct SavePayload {
 pub enum SidebarState {
     Hidden,
     Visible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TaskDetailPresentation {
+    Overlay,
+    Docked,
 }
 
 impl TaskDetailSidebar {
@@ -126,7 +134,13 @@ impl TaskDetailSidebar {
             on_save: None,
             on_delete: None,
             on_close: None,
+            presentation: TaskDetailPresentation::Overlay,
         }
+    }
+
+    pub fn with_presentation(mut self, presentation: TaskDetailPresentation) -> Self {
+        self.presentation = presentation;
+        self
     }
 
     pub fn on_save<F>(&mut self, callback: F)
@@ -895,8 +909,8 @@ impl TaskDetailSidebar {
 
         div()
             .id(format!("sidebar-status-{:?}", status))
-            .px(px(10.0))
-            .py(px(5.0))
+            .px(px(9.0))
+            .py(px(4.0))
             .rounded(px(999.0))
             .border_1()
             .border_color(if is_selected {
@@ -940,8 +954,8 @@ impl TaskDetailSidebar {
 
         div()
             .id(format!("sidebar-priority-{:?}", priority))
-            .px(px(10.0))
-            .py(px(5.0))
+            .px(px(9.0))
+            .py(px(4.0))
             .rounded(px(999.0))
             .border_1()
             .border_color(if is_selected {
@@ -968,6 +982,29 @@ impl TaskDetailSidebar {
                 this.set_priority(priority.clone(), window, cx);
                 cx.stop_propagation();
             }))
+    }
+
+    fn render_sidebar_metadata_chip(
+        &self,
+        kind: MetadataChipKind,
+        label: &str,
+    ) -> impl IntoElement {
+        let text_color = match kind {
+            MetadataChipKind::Tag => ClaudeLikeColors::text_secondary(),
+            MetadataChipKind::Person => rgb(0x6f6254).into(),
+        };
+
+        div()
+            .px(px(8.0))
+            .py(px(3.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(ClaudeLikeColors::separator())
+            .bg(ClaudeLikeColors::task_paper_background())
+            .text_size(px(TaskTypography::META_SIZE))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(text_color)
+            .child(label.to_string())
     }
 
     fn reload_attachments(&mut self, cx: &mut Context<Self>) {
@@ -1448,14 +1485,23 @@ impl Render for TaskDetailSidebar {
         let content_expanded = self.content_expanded;
         let title_display = self.task_title.clone().unwrap_or_default();
         let content_display = self.task_content.clone();
+        let is_overlay = self.presentation == TaskDetailPresentation::Overlay;
 
         div()
             .id("task-detail-sidebar")
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0))
+            .when(is_overlay, |el| {
+                el.absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+            })
+            .when(!is_overlay, |el| {
+                el.w(TASK_DETAIL_DOCKED_CONTAINER_WIDTH)
+                    .h_full()
+                    .border_l_1()
+                    .border_color(ClaudeLikeColors::separator())
+            })
             .flex()
             .flex_row()
             .justify_end()
@@ -1463,24 +1509,31 @@ impl Render for TaskDetailSidebar {
             .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
                 this.paste_attachments(window, cx);
             }))
-            .child(
+            .when(is_overlay, |el| el.child(
                 div()
                     .id("task-detail-sidebar-dismiss-area")
                     .flex_1()
                     .h_full(),
-            )
+            ))
             .child(
                 div()
                     .id("task-detail-sidebar-pane")
-                    .w(px(360.0))
+                    .w(TASK_DETAIL_DOCKED_WIDTH)
                     .h_full()
                     .flex()
                     .flex_col()
                     .occlude()
                     .overflow_hidden()
-                    .border_l_1()
-                    .border_color(ClaudeLikeColors::separator())
-                    .bg(ClaudeLikeColors::detail_background())
+                    .when(is_overlay, |pane| {
+                        pane.border_l_1()
+                            .border_color(ClaudeLikeColors::separator())
+                            .bg(ClaudeLikeColors::detail_background())
+                    })
+                    .when(!is_overlay, |pane| {
+                        pane.rounded_tr(px(18.0))
+                            .rounded_br(px(18.0))
+                            .bg(ClaudeLikeColors::detail_background())
+                    })
                     .font_family(TaskTypography::SYSTEM_FONT_FAMILY)
                     .cursor_default()
                     .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
@@ -1503,9 +1556,9 @@ impl Render for TaskDetailSidebar {
                     }))
                     .child(
                         div()
-                            .p(px(12.0))
-                            .border_b_1()
-                            .border_color(ClaudeLikeColors::separator())
+                            .px(px(20.0))
+                            .pt(px(20.0))
+                            .pb(px(12.0))
                             .cursor_default()
                             .child(
                                 h_flex()
@@ -1513,20 +1566,31 @@ impl Render for TaskDetailSidebar {
                                     .items_center()
                                     .child(
                                         div()
-                                            .text_sm()
+                                            .text_size(px(15.0))
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(ClaudeLikeColors::text_primary())
                                             .child("任务详情"),
                                     )
                                     .child(
-                                        Button::new("sidebar-close-detail").child("✕").on_click(
-                                            cx.listener(|this, _event, window, cx| {
+                                        div()
+                                            .id("sidebar-close-detail")
+                                            .w(px(28.0))
+                                            .h(px(28.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(8.0))
+                                            .text_size(px(18.0))
+                                            .text_color(ClaudeLikeColors::text_secondary())
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                                            .child("×")
+                                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                                                 this.close(window, cx);
                                                 if let Some(ref callback) = this.on_close {
                                                     callback(cx);
                                                 }
-                                            }),
-                                        ),
+                                            })),
                                     ),
                             ),
                     )
@@ -1538,8 +1602,9 @@ impl Render for TaskDetailSidebar {
                             .cursor_default()
                             .child(
                                 v_flex()
-                                    .p(px(14.0))
-                                    .gap(px(12.0))
+                                    .px(px(20.0))
+                                    .py(px(16.0))
+                                    .gap(px(14.0))
                                     .overflow_y_scrollbar()
                                     // 标题输入
                                     .child(
@@ -1770,6 +1835,9 @@ impl Render for TaskDetailSidebar {
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
+                                            .pt(px(12.0))
+                                            .border_t_1()
+                                            .border_color(ClaudeLikeColors::separator())
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -1835,6 +1903,9 @@ impl Render for TaskDetailSidebar {
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
+                                            .pt(px(12.0))
+                                            .border_t_1()
+                                            .border_color(ClaudeLikeColors::separator())
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -1843,30 +1914,66 @@ impl Render for TaskDetailSidebar {
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(px(6.0))
+                                                    .gap(px(5.0))
                                                     .items_center()
                                                     .when_some(dp_clone.clone(), |el, dp| {
                                                         el.child(
-                                                            div().flex_1().child(
-                                                                DatePicker::new(&dp)
-                                                                    .cleanable(true)
-                                                                    .number_of_months(1),
-                                                            ),
+                                                            div()
+                                                                .flex_1()
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    DatePicker::new(&dp)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .placeholder("日期")
+                                                                        .cleanable(false)
+                                                                        .number_of_months(1),
+                                                                ),
                                                         )
                                                     })
                                                     .when_some(ti_clone.clone(), |el, ti| {
                                                         el.child(
                                                             div()
-                                                                .w(px(70.0))
-                                                                .child(Input::new(&ti)),
+                                                                .w(px(54.0))
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    Input::new(&ti)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .focus_bordered(false)
+                                                                        .text_size(px(12.0)),
+                                                                ),
                                                         )
                                                     })
                                                     .child(
-                                                        Button::new("clear-due-date")
+                                                        div()
+                                                            .id("clear-due-date")
+                                                            .px(px(5.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(7.0))
+                                                            .text_size(px(12.0))
                                                             .child("清除")
-                                                            .text_color(rgb(0x999999))
+                                                            .text_color(ClaudeLikeColors::text_tertiary())
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(ClaudeLikeColors::hover_surface())
+                                                            })
                                                             .on_click(cx.listener(
-                                                                |this, _event, window, cx| {
+                                                                |this, _event: &ClickEvent, window, cx| {
                                                                     this.clear_due_date(window, cx);
                                                                     cx.stop_propagation();
                                                                 },
@@ -1886,30 +1993,66 @@ impl Render for TaskDetailSidebar {
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(px(6.0))
+                                                    .gap(px(5.0))
                                                     .items_center()
                                                     .when_some(rdp_clone.clone(), |el, rdp| {
                                                         el.child(
-                                                            div().flex_1().child(
-                                                                DatePicker::new(&rdp)
-                                                                    .cleanable(true)
-                                                                    .number_of_months(1),
-                                                            ),
+                                                            div()
+                                                                .flex_1()
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    DatePicker::new(&rdp)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .placeholder("日期")
+                                                                        .cleanable(false)
+                                                                        .number_of_months(1),
+                                                                ),
                                                         )
                                                     })
                                                     .when_some(rti_clone.clone(), |el, rti| {
                                                         el.child(
                                                             div()
-                                                                .w(px(70.0))
-                                                                .child(Input::new(&rti)),
+                                                                .w(px(54.0))
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    Input::new(&rti)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .focus_bordered(false)
+                                                                        .text_size(px(12.0)),
+                                                                ),
                                                         )
                                                     })
                                                     .child(
-                                                        Button::new("clear-reminder-time")
+                                                        div()
+                                                            .id("clear-reminder-time")
+                                                            .px(px(5.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(7.0))
+                                                            .text_size(px(12.0))
                                                             .child("清除")
-                                                            .text_color(rgb(0x999999))
+                                                            .text_color(ClaudeLikeColors::text_tertiary())
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(ClaudeLikeColors::hover_surface())
+                                                            })
                                                             .on_click(cx.listener(
-                                                                |this, _event, window, cx| {
+                                                                |this, _event: &ClickEvent, window, cx| {
                                                                     this.clear_reminder_time(
                                                                         window, cx,
                                                                     );
@@ -1923,6 +2066,9 @@ impl Render for TaskDetailSidebar {
                                         el.child(
                                             v_flex()
                                                 .gap(px(6.0))
+                                                .pt(px(12.0))
+                                                .border_t_1()
+                                                .border_color(ClaudeLikeColors::separator())
                                                 .child(
                                                     div()
                                                         .text_xs()
@@ -1952,7 +2098,7 @@ impl Render for TaskDetailSidebar {
                                                         |(idx, tag)| {
                                                             div()
                                                                 .id(("sidebar-tag", idx))
-                                                                .child(render_metadata_chip(
+                                                                .child(self.render_sidebar_metadata_chip(
                                                                     MetadataChipKind::Tag,
                                                                     tag,
                                                                 ))
@@ -1976,7 +2122,7 @@ impl Render for TaskDetailSidebar {
                                                         |(idx, person)| {
                                                             div()
                                                                 .id(("sidebar-person", idx))
-                                                                .child(render_metadata_chip(
+                                                                .child(self.render_sidebar_metadata_chip(
                                                                     MetadataChipKind::Person,
                                                                     person,
                                                                 ))
@@ -1988,6 +2134,9 @@ impl Render for TaskDetailSidebar {
                                     .child(
                                         v_flex()
                                             .gap(px(8.0))
+                                            .pt(px(12.0))
+                                            .border_t_1()
+                                            .border_color(ClaudeLikeColors::separator())
                                             .child(
                                                 h_flex()
                                                     .justify_between()
@@ -2001,10 +2150,24 @@ impl Render for TaskDetailSidebar {
                                                             .child("附件"),
                                                     )
                                                     .child(
-                                                        Button::new("task-sidebar-add-attachment")
+                                                        div()
+                                                            .id("task-sidebar-add-attachment")
+                                                            .px(px(8.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(999.0))
+                                                            .border_1()
+                                                            .border_color(ClaudeLikeColors::separator())
+                                                            .bg(ClaudeLikeColors::task_paper_background())
+                                                            .text_size(px(TaskTypography::META_SIZE))
+                                                            .font_weight(FontWeight::NORMAL)
+                                                            .text_color(ClaudeLikeColors::text_secondary())
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(ClaudeLikeColors::hover_surface())
+                                                            })
                                                             .child("添加图片")
                                                             .on_click(cx.listener(
-                                                                |this, _event, window, cx| {
+                                                                |this, _event: &ClickEvent, window, cx| {
                                                                     this.import_attachments(window, cx);
                                                                     cx.stop_propagation();
                                                                 },
@@ -2050,45 +2213,58 @@ impl Render for TaskDetailSidebar {
                     )
                     .child(
                         div()
-                            .p(px(12.0))
-                            .border_t_1()
-                            .border_color(ClaudeLikeColors::separator())
+                            .px(px(18.0))
+                            .py(px(13.0))
                             .cursor_default()
                             .child(
                                 h_flex()
-                                    .gap(px(8.0))
+                                    .justify_between()
+                                    .items_center()
                                     .child(
-                                        div().flex_1().child(
-                                            Button::new("task-sidebar-delete-detail")
-                                                .w_full()
-                                                .child("删除")
-                                                .text_color(rgb(0xff4d4f))
-                                                .on_click(cx.listener(
-                                                    |this, _event, _window, cx| {
-                                                        if let Some(ref task_id) =
-                                                            this.current_task_id
-                                                        {
-                                                            if let Some(ref callback) =
-                                                                this.on_delete
-                                                            {
-                                                                callback(task_id.clone(), cx);
-                                                            }
+                                        div()
+                                            .id("task-sidebar-delete-detail")
+                                            .px(px(6.0))
+                                            .py(px(5.0))
+                                            .rounded(px(7.0))
+                                            .text_size(px(TaskTypography::META_SIZE))
+                                            .font_weight(FontWeight::NORMAL)
+                                            .text_color(ClaudeLikeColors::danger())
+                                            .cursor_pointer()
+                                            .hover(|style| {
+                                                style.bg(ClaudeLikeColors::hover_surface())
+                                            })
+                                            .child("删除")
+                                            .on_click(cx.listener(
+                                                |this, _event: &ClickEvent, _window, cx| {
+                                                    if let Some(ref task_id) = this.current_task_id {
+                                                        if let Some(ref callback) = this.on_delete {
+                                                            callback(task_id.clone(), cx);
                                                         }
-                                                    },
-                                                )),
-                                        ),
+                                                    }
+                                                },
+                                            )),
                                     )
                                     .child(
-                                        div().flex_1().child(
-                                            Button::new("sidebar-save-detail")
-                                                .w_full()
-                                                .child("保存修改")
-                                                .on_click(cx.listener(
-                                                    |this, _event, window, cx| {
-                                                        this.save_changes(window, cx);
-                                                    },
-                                                )),
-                                        ),
+                                        div()
+                                            .id("sidebar-save-detail")
+                                            .px(px(18.0))
+                                            .py(px(7.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(999.0))
+                                            .bg(ClaudeLikeColors::text_primary())
+                                            .text_size(px(TaskTypography::META_SIZE))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(ClaudeLikeColors::app_background())
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x3a3935)))
+                                            .child("保存")
+                                            .on_click(cx.listener(
+                                                |this, _event: &ClickEvent, window, cx| {
+                                                    this.save_changes(window, cx);
+                                                },
+                                            )),
                                     ),
                             ),
                     ),

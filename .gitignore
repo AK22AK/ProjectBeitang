@@ -34,3 +34,4 @@ hello_world_test
 
 # Local agent instructions
 AGENTS.md
+node_modules
