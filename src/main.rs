@@ -41,6 +41,7 @@ use robinne::ui::note_panel::NotePanel;
 use robinne::ui::quick_add_context::resolve_quick_add_mode;
 use robinne::ui::search::SearchPanel;
 use robinne::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width, Panel, Sidebar};
+use robinne::ui::style::ClaudeLikeColors;
 use robinne::ui::task_panel::TaskPanel;
 use robinne::ui::timeline::Timeline;
 use std::cell::RefCell;
@@ -1206,7 +1207,7 @@ fn open_main_window(
     global_hotkeys: Rc<RefCell<GlobalHotkeyController>>,
     initial_panel: Panel,
 ) -> Result<AnyWindowHandle> {
-    let window_size = size(px(900.0), px(600.0));
+    let window_size = size(px(1100.0), px(720.0));
     let window_bounds = WindowBounds::Windowed(Bounds::centered(None, window_size, cx));
 
     cx.open_window(
@@ -1548,6 +1549,8 @@ impl MainView {
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         TitleBar::new()
+            .bg(transparent_black())
+            .border_color(ClaudeLikeColors::app_background())
             .child(
                 h_flex().h_full().items_center().child(
                     div()
@@ -1558,15 +1561,20 @@ impl MainView {
                 ),
             )
             .child(
-                h_flex().h_full().items_center().pr(px(12.0)).child(
-                    Button::new("main-titlebar-quick-add")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Plus)
-                        .on_click(cx.listener(|this, _event, window, cx| {
-                            this.open_quick_add_from_titlebar(window, cx);
-                        })),
-                ),
+                h_flex()
+                    .relative()
+                    .h_full()
+                    .items_center()
+                    .pr(px(12.0))
+                    .child(
+                        Button::new("main-titlebar-quick-add")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.open_quick_add_from_titlebar(window, cx);
+                            })),
+                    ),
             )
     }
 
@@ -2716,7 +2724,7 @@ impl MainView {
                     ))
                     .child(self.render_settings_choice_button(
                         "startup-panel-timeline",
-                        "时间线",
+                        "事务",
                         self.app_settings.general.startup_panel == StartupPanelPreference::Timeline,
                         cx.listener(|this, _event, _window, cx| {
                             this.set_startup_panel_preference(StartupPanelPreference::Timeline, cx);
@@ -3226,7 +3234,8 @@ impl Render for MainView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xf0f0f0))
+            .relative()
+            .bg(ClaudeLikeColors::app_background())
             .track_focus(&self.focus_handle(cx))
             .on_modifiers_changed(cx.listener(
                 move |this, event: &ModifiersChangedEvent, window, cx| {
@@ -3257,6 +3266,19 @@ impl Render for MainView {
             }))
             .child(
                 div()
+                    .absolute()
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .w(main_sidebar_width(sidebar_layout_mode))
+                    .rounded_tr(px(18.0))
+                    .rounded_br(px(18.0))
+                    .border_r_1()
+                    .border_color(ClaudeLikeColors::separator())
+                    .bg(ClaudeLikeColors::sidebar_background()),
+            )
+            .child(
+                div()
                     .flex_1()
                     .flex()
                     .overflow_hidden()
@@ -3282,7 +3304,7 @@ impl Render for MainView {
                                     .flex_col()
                                     .overflow_hidden()
                                     .relative()
-                                    .bg(rgb(0xffffff))
+                                    .bg(ClaudeLikeColors::app_background())
                                     .child(match self.current_panel {
                                         Panel::Dashboard => {
                                             self.dashboard_panel.clone().into_any_element()

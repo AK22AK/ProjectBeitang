@@ -413,17 +413,21 @@ impl QuickAddWindow {
         cx.spawn(async move |view, cx| {
             let tags = store.get_tag_catalog().await;
             let persons = store.get_person_catalog().await;
+            let lines = store.get_line_catalog().await;
             let _ = view.update(cx, |this, cx| {
                 this.metadata_catalog_loading = false;
 
-                match (tags, persons) {
-                    (Ok(tags), Ok(persons)) => {
+                match (tags, persons, lines) {
+                    (Ok(tags), Ok(persons), Ok(lines)) => {
                         this.metadata_catalog_loaded = true;
-                        this.metadata_autocomplete
-                            .set_catalog(MetadataCatalog { tags, persons });
+                        this.metadata_autocomplete.set_catalog(MetadataCatalog {
+                            tags,
+                            persons,
+                            lines,
+                        });
                         this.sync_metadata_autocomplete_state(cx);
                     }
-                    (tags_result, persons_result) => {
+                    (tags_result, persons_result, lines_result) => {
                         this.metadata_catalog_loaded = false;
 
                         if let Err(err) = tags_result {
@@ -431,6 +435,9 @@ impl QuickAddWindow {
                         }
                         if let Err(err) = persons_result {
                             eprintln!("[QuickAdd] Failed to load person catalog: {}", err);
+                        }
+                        if let Err(err) = lines_result {
+                            eprintln!("[QuickAdd] Failed to load line catalog: {}", err);
                         }
 
                         cx.notify();
@@ -827,7 +834,7 @@ impl QuickAddWindow {
 
         let store = self.store.clone();
         cx.spawn(async move |_view, _cx| {
-            if let Err(e) = store.create_record(task).await {
+            if let Err(e) = store.create_record_with_line(task, parsed.line).await {
                 eprintln!("[QuickAdd] Failed to create task: {}", e);
             } else if !pending_paths.is_empty() {
                 if let Err(e) = store
@@ -860,7 +867,7 @@ impl QuickAddWindow {
 
         let store = self.store.clone();
         cx.spawn(async move |_view, _cx| {
-            if let Err(e) = store.create_record(record).await {
+            if let Err(e) = store.create_record_with_line(record, parsed.line).await {
                 eprintln!("[QuickAdd] Failed to create record: {}", e);
             } else if !pending_paths.is_empty() {
                 if let Err(e) = store

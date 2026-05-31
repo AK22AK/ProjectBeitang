@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use robinne::db::Database;
-use robinne::models::{Priority, Record, RecordType, TimelineQuery};
+use robinne::models::{LineRef, LineStatus, Priority, Record, RecordType, TimelineQuery};
 use tempfile::TempDir;
 
 fn setup_test_db() -> (Database, TempDir) {
@@ -217,6 +217,104 @@ fn test_timeline_query_filters_by_tags_and_persons_together() {
         .unwrap();
 
     assert_eq!(titles(&results), vec!["标签人物都命中".to_string()]);
+}
+
+#[test]
+fn test_get_or_create_line_reuses_project_scoped_line() {
+    let (db, _temp) = setup_test_db();
+    let first = db
+        .get_or_create_line(&LineRef::new(
+            Some("Robinne".to_string()),
+            "事务".to_string(),
+        ))
+        .unwrap();
+    let second = db
+        .get_or_create_line(&LineRef::new(
+            Some("Robinne".to_string()),
+            "事务".to_string(),
+        ))
+        .unwrap();
+    let global = db
+        .get_or_create_line(&LineRef::new(None, "事务".to_string()))
+        .unwrap();
+
+    assert_eq!(first.id, second.id);
+    assert_ne!(first.id, global.id);
+    assert_eq!(first.project.as_deref(), Some("Robinne"));
+    assert_eq!(global.project, None);
+}
+
+#[test]
+fn test_record_round_trip_preserves_line_id() {
+    let (db, _temp) = setup_test_db();
+    let line = db
+        .get_or_create_line(&LineRef::new(
+            Some("Robinne".to_string()),
+            "事务".to_string(),
+        ))
+        .unwrap();
+    let mut record = Record::new_note("补齐事务节点".to_string());
+    record.line_id = Some(line.id);
+
+    db.create_record(&record).unwrap();
+
+    let stored = db.get_record_by_id(record.id).unwrap().unwrap();
+    assert_eq!(stored.line_id, Some(line.id));
+}
+
+#[test]
+fn test_line_graph_derives_stats_and_next_action() {
+    let (db, _temp) = setup_test_db();
+    let line = db
+        .get_or_create_line(&LineRef::new(
+            Some("Robinne".to_string()),
+            "事务".to_string(),
+        ))
+        .unwrap();
+    let mut task = Record::new_task("实现事务".to_string(), "".to_string(), Priority::High);
+    task.line_id = Some(line.id);
+    let mut note = Record::new_note("讨论视觉原则".to_string());
+    note.line_id = Some(line.id);
+    let unassigned = Record::new_note("未归事务记录".to_string());
+
+    db.create_record(&task).unwrap();
+    db.create_record(&note).unwrap();
+    db.create_record(&unassigned).unwrap();
+
+    let graph = db.get_line_graph(None).unwrap();
+    assert_eq!(graph.stats.open_line_count, 1);
+    assert_eq!(graph.stats.unassigned_record_count, 1);
+    assert_eq!(graph.projects, vec!["Robinne".to_string()]);
+    assert_eq!(graph.lines.len(), 1);
+    assert_eq!(graph.lines[0].line.id, line.id);
+    assert_eq!(graph.lines[0].record_count, 2);
+    assert_eq!(
+        graph.lines[0].next_action.as_ref().map(|record| record.id),
+        Some(task.id)
+    );
+}
+
+#[test]
+fn test_complete_and_delete_line_do_not_mutate_records() {
+    let (db, _temp) = setup_test_db();
+    let line = db
+        .get_or_create_line(&LineRef::new(None, "事务".to_string()))
+        .unwrap();
+    let mut task = Record::new_task("保持待办状态".to_string(), "".to_string(), Priority::Medium);
+    task.line_id = Some(line.id);
+    db.create_record(&task).unwrap();
+
+    db.complete_line(line.id).unwrap();
+    let completed_line = db.get_line_by_id(line.id).unwrap().unwrap();
+    let task_after_completion = db.get_record_by_id(task.id).unwrap().unwrap();
+    assert_eq!(completed_line.status, LineStatus::Completed);
+    assert_eq!(task_after_completion.status, task.status);
+    assert_eq!(task_after_completion.line_id, Some(line.id));
+
+    db.delete_line(line.id).unwrap();
+    let task_after_delete = db.get_record_by_id(task.id).unwrap().unwrap();
+    assert_eq!(task_after_delete.status, task.status);
+    assert_eq!(task_after_delete.line_id, None);
 }
 
 #[test]
@@ -467,11 +565,7 @@ fn test_get_all_records_returns_all_types_in_updated_order() {
 fn test_update_notified_at_does_not_overwrite_other_fields() {
     let (db, _temp) = setup_test_db();
 
-    let mut task = Record::new_task(
-        "原始标题".to_string(),
-        "内容".to_string(),
-        Priority::Medium,
-    );
+    let mut task = Record::new_task("原始标题".to_string(), "内容".to_string(), Priority::Medium);
     db.create_record(&task).unwrap();
 
     // 模拟用户并发修改标题（实际场景中这是另一个线程/进程的操作）

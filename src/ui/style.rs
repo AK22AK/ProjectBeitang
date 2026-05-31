@@ -4,10 +4,11 @@ pub struct TaskTypography;
 
 impl TaskTypography {
     pub const SYSTEM_FONT_FAMILY: &'static str = ".SystemUIFont";
-    pub const PAGE_TITLE_SIZE: f32 = 22.0;
+    pub const PAGE_TITLE_SIZE: f32 = 23.0;
     pub const TASK_TITLE_SIZE: f32 = 14.0;
-    pub const META_SIZE: f32 = 12.0;
+    pub const META_SIZE: f32 = 12.5;
     pub const DETAIL_TITLE_SIZE: f32 = 19.0;
+    pub const SIDEBAR_ITEM_SIZE: f32 = 14.0;
 
     pub const BODY_WEIGHT: u16 = 400;
     pub const TASK_TITLE_WEIGHT: u16 = 450;
@@ -43,6 +44,22 @@ impl ClaudeLikeColors {
         rgb(0xfdfdfc).into()
     }
 
+    pub fn task_workspace_background() -> Hsla {
+        rgb(0xffffff).into()
+    }
+
+    pub fn task_paper_background() -> Hsla {
+        rgb(0xffffff).into()
+    }
+
+    pub fn task_row_background() -> Hsla {
+        rgb(0xffffff).into()
+    }
+
+    pub fn task_row_muted_background() -> Hsla {
+        rgb(0xfbfbfa).into()
+    }
+
     pub fn selected_surface() -> Hsla {
         rgb(0xf1f1ef).into()
     }
@@ -65,6 +82,30 @@ impl ClaudeLikeColors {
 
     pub fn accent_surface() -> Hsla {
         rgb(0xf7eee8).into()
+    }
+
+    pub fn tag_surface() -> Hsla {
+        rgb(0xffffff).into()
+    }
+
+    pub fn tag_border() -> Hsla {
+        rgb(0xdfdfdc).into()
+    }
+
+    pub fn person_surface() -> Hsla {
+        rgb(0xffffff).into()
+    }
+
+    pub fn person_border() -> Hsla {
+        rgb(0xdfdfdc).into()
+    }
+
+    pub fn due_text() -> Hsla {
+        rgb(0xbf6b50).into()
+    }
+
+    pub fn schedule_text() -> Hsla {
+        rgb(0x667f94).into()
     }
 
     pub fn danger() -> Hsla {

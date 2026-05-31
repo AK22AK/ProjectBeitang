@@ -38,8 +38,11 @@ impl MetadataFilters {
         self.available_persons = persons;
         self.selected_tags
             .retain(|tag| self.available_tags.iter().any(|candidate| candidate == tag));
-        self.selected_persons
-            .retain(|person| self.available_persons.iter().any(|candidate| candidate == person));
+        self.selected_persons.retain(|person| {
+            self.available_persons
+                .iter()
+                .any(|candidate| candidate == person)
+        });
     }
 
     fn build_query_values(&self) -> (Vec<String>, Vec<String>) {
@@ -808,11 +811,9 @@ impl AiPanel {
                         selected.contains(value),
                         cx.listener({
                             let value = value.clone();
-                            move |this, _event, _window, cx| {
-                                match kind {
-                                    MetadataFilterKind::Tag => this.toggle_tag(&value, cx),
-                                    MetadataFilterKind::Person => this.toggle_person(&value, cx),
-                                }
+                            move |this, _event, _window, cx| match kind {
+                                MetadataFilterKind::Tag => this.toggle_tag(&value, cx),
+                                MetadataFilterKind::Person => this.toggle_person(&value, cx),
                             }
                         }),
                     )
@@ -849,12 +850,12 @@ impl AiPanel {
                             Button::new(format!("ai-clear-{title}"))
                                 .child(clear_label)
                                 .small()
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    match kind {
+                                .on_click(cx.listener(
+                                    move |this, _event, _window, cx| match kind {
                                         MetadataFilterKind::Tag => this.clear_tags(cx),
                                         MetadataFilterKind::Person => this.clear_persons(cx),
-                                    }
-                                })),
+                                    },
+                                )),
                         )
                     }),
             )
@@ -1459,7 +1460,10 @@ mod tests {
             filters.available_persons,
             vec!["保留人物".to_string(), "新增人物".to_string()]
         );
-        assert_eq!(filters.selected_tags, BTreeSet::from(["保留标签".to_string()]));
+        assert_eq!(
+            filters.selected_tags,
+            BTreeSet::from(["保留标签".to_string()])
+        );
         assert_eq!(
             filters.selected_persons,
             BTreeSet::from(["保留人物".to_string()])
