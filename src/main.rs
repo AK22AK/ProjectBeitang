@@ -2,10 +2,13 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::Disableable;
 use gpui_component::{h_flex, ActiveTheme, IconName, Sizable, TitleBar};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
+use robinne::ai::{test_connection, AiProviderProtocol, AiSettings};
 use robinne::app_shortcuts::{
     app_shortcut_entries, main_panel_shortcuts, quick_add_overlay_keystroke, search_keystroke,
     settings_keystroke,
@@ -17,13 +20,16 @@ use robinne::config::{
 };
 use robinne::data_management::app_data_dir;
 use robinne::platform::{
-    app_shortcut_scope_description, app_shortcuts_intro, build_app_menus, prewarm_file_dialog,
+    app_shortcut_scope_description, app_shortcuts_intro, build_app_menus, delete_secret,
+    load_secret, prewarm_file_dialog, record_ai_usage, save_secret, secrets_file_path,
+    AiUsageEventKind, SecretSource,
 };
 use robinne::settings::{
     load_app_settings, save_app_settings, settings_file_path, AppSettings, QuickAddDefaultMode,
     ShortcutSettings, StartupPanelPreference,
 };
 use robinne::store::{create_store, Store};
+use robinne::ui::ai_panel::AiPanel;
 use robinne::ui::dashboard::{Dashboard, DashboardAction};
 use robinne::ui::data_management::DataManagementPanel;
 use robinne::ui::floating_window::{
@@ -88,6 +94,7 @@ impl MainWindowController {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
     General,
+    AI,
     Shortcuts,
     DataSync,
     About,
@@ -97,14 +104,21 @@ impl SettingsSection {
     fn label(self) -> &'static str {
         match self {
             Self::General => "通用",
+            Self::AI => "AI",
             Self::Shortcuts => "快捷键",
             Self::DataSync => "数据与同步",
             Self::About => "关于",
         }
     }
 
-    fn all() -> [Self; 4] {
-        [Self::General, Self::Shortcuts, Self::DataSync, Self::About]
+    fn all() -> [Self; 5] {
+        [
+            Self::General,
+            Self::AI,
+            Self::Shortcuts,
+            Self::DataSync,
+            Self::About,
+        ]
     }
 }
 
@@ -1228,12 +1242,19 @@ pub struct MainView {
     current_panel: Panel,
     current_settings_section: SettingsSection,
     app_settings: AppSettings,
+    ai_api_key_present: bool,
+    ai_api_key_source: Option<SecretSource>,
+    ai_connection_testing: bool,
     dashboard_panel: Entity<Dashboard>,
+    ai_panel: Entity<AiPanel>,
     data_management_panel: Entity<DataManagementPanel>,
     search_panel: Entity<SearchPanel>,
     task_panel: Entity<TaskPanel>,
     timeline_panel: Entity<Timeline>,
     notes_panel: Entity<NotePanel>,
+    ai_base_url_input: Entity<InputState>,
+    ai_model_input: Entity<InputState>,
+    ai_api_key_input: Entity<InputState>,
     quick_add_overlay: Option<Entity<QuickAddWindow>>,
     shortcut_config: ShortcutConfig,
     active_shortcut_capture: Option<ShortcutCaptureState>,
@@ -1260,13 +1281,28 @@ impl MainView {
         let store_for_panels = store.clone();
         let app_settings = load_settings_or_default();
         let shortcut_config = ShortcutConfig::from(&app_settings.shortcuts);
+        let (ai_api_key_present, ai_api_key_source) = match load_secret(app_settings.ai.protocol) {
+            Ok(Some(secret)) => (true, Some(secret.source)),
+            Ok(None) | Err(_) => (false, None),
+        };
         let dashboard_panel = cx.new(|cx| Dashboard::new(store_for_panels.clone(), window, cx));
+        let ai_panel = cx.new(|cx| AiPanel::new(store_for_panels.clone(), window, cx));
         let data_management_panel =
             cx.new(|cx| DataManagementPanel::new(store_for_panels.clone(), window, cx));
         let search_panel = cx.new(|cx| SearchPanel::new(store_for_panels.clone(), window, cx));
         let task_panel = cx.new(|cx| TaskPanel::new(store_for_panels.clone(), window, cx));
         let timeline_panel = cx.new(|cx| Timeline::new(store_for_panels.clone(), window, cx));
         let notes_panel = cx.new(|cx| NotePanel::new(store_for_panels, window, cx));
+        let ai_base_url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://api.openai.com/v1"));
+        let ai_model_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("例如 gpt-4.1-mini / claude-sonnet-4-5")
+        });
+        let ai_api_key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("输入 API Key，保存到本地配置")
+        });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -1287,17 +1323,24 @@ impl MainView {
             });
         });
 
-        Self {
+        let mut view = Self {
             store,
             current_panel: initial_panel,
             current_settings_section: SettingsSection::General,
             app_settings,
+            ai_api_key_present,
+            ai_api_key_source,
+            ai_connection_testing: false,
             dashboard_panel,
+            ai_panel,
             data_management_panel,
             search_panel,
             task_panel,
             timeline_panel,
             notes_panel,
+            ai_base_url_input,
+            ai_model_input,
+            ai_api_key_input,
             quick_add_overlay: None,
             shortcut_config,
             active_shortcut_capture: None,
@@ -1309,7 +1352,9 @@ impl MainView {
             quick_add_session,
             focus_handle,
             _window_activation_subscription: window_activation_subscription,
-        }
+        };
+        view.sync_ai_settings_inputs(window, cx);
+        view
     }
 
     fn handle_dashboard_action(
@@ -1529,6 +1574,8 @@ impl MainView {
         if panel == Panel::Settings && self.current_panel != Panel::Settings {
             self.current_settings_section = SettingsSection::General;
             self.refresh_settings_state(window, cx);
+        } else if panel == Panel::AI {
+            self.reload_ai_panel_configuration(cx);
         } else if panel != Panel::Settings {
             self.active_shortcut_capture = None;
         }
@@ -1563,11 +1610,15 @@ impl MainView {
     fn refresh_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.app_settings = load_settings_or_default();
         self.shortcut_config = ShortcutConfig::from(&self.app_settings.shortcuts);
+        self.refresh_ai_api_key_presence(self.app_settings.ai.protocol);
+        self.sync_ai_settings_inputs(window, cx);
         self.active_shortcut_capture = None;
         self.settings_notice = None;
         self.settings_error = None;
         self.data_management_panel
             .update(cx, |panel, cx| panel.reload_settings(window, cx));
+        self.ai_panel
+            .update(cx, |panel, cx| panel.reload_configuration(cx));
     }
 
     fn persist_settings(&mut self, message: &'static str, cx: &mut Context<Self>) {
@@ -1575,6 +1626,249 @@ impl MainView {
             Ok(_) => {
                 self.settings_error = None;
                 self.settings_notice = Some(message.to_string());
+            }
+            Err(err) => {
+                self.settings_notice = None;
+                self.settings_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    fn sync_ai_settings_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let base_url = self.app_settings.ai.normalized_base_url();
+        let model = self.app_settings.ai.model.clone();
+        self.ai_base_url_input.update(cx, |input, cx| {
+            input.set_value(&base_url, window, cx);
+        });
+        self.ai_model_input.update(cx, |input, cx| {
+            input.set_value(&model, window, cx);
+        });
+        self.sync_ai_api_key_input(window, cx);
+    }
+
+    fn sync_ai_api_key_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = if self.ai_api_key_present {
+            "********（已有可用 Key，输入新值会保存到本地配置）"
+        } else {
+            "输入 API Key，保存到本地配置"
+        };
+        self.ai_api_key_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_placeholder(placeholder, window, cx);
+            input.set_masked(true, window, cx);
+        });
+    }
+
+    fn refresh_ai_api_key_presence(&mut self, protocol: AiProviderProtocol) -> bool {
+        match load_secret(protocol) {
+            Ok(Some(secret)) => {
+                self.ai_api_key_present = true;
+                self.ai_api_key_source = Some(secret.source);
+            }
+            Ok(None) | Err(_) => {
+                self.ai_api_key_present = false;
+                self.ai_api_key_source = None;
+            }
+        }
+        self.ai_api_key_present
+    }
+
+    fn reload_ai_panel_configuration(&mut self, cx: &mut Context<Self>) {
+        self.ai_panel
+            .update(cx, |panel, cx| panel.reload_configuration(cx));
+    }
+
+    fn set_ai_protocol(
+        &mut self,
+        protocol: AiProviderProtocol,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.app_settings.ai.protocol == protocol {
+            return;
+        }
+
+        let previous_default = self.app_settings.ai.protocol.default_base_url();
+        self.app_settings.ai.protocol = protocol;
+        if self.app_settings.ai.base_url.trim().is_empty()
+            || self.app_settings.ai.base_url == previous_default
+        {
+            self.app_settings.ai.base_url = protocol.default_base_url().to_string();
+        }
+        self.refresh_ai_api_key_presence(protocol);
+        self.sync_ai_settings_inputs(window, cx);
+        self.persist_settings("已保存 AI 协议设置", cx);
+        self.reload_ai_panel_configuration(cx);
+    }
+
+    fn save_ai_connection_settings(&mut self, cx: &mut Context<Self>) {
+        let base_url = self.ai_base_url_input.read(cx).text().to_string();
+        let model = self.ai_model_input.read(cx).text().to_string();
+        let base_url = base_url.trim().to_string();
+        let model = model.trim().to_string();
+        self.app_settings.ai.base_url = if base_url.is_empty() {
+            self.app_settings.ai.protocol.default_base_url().to_string()
+        } else {
+            base_url
+        };
+        self.app_settings.ai.model = model;
+        self.persist_settings("已保存 AI 连接配置", cx);
+        self.reload_ai_panel_configuration(cx);
+    }
+
+    fn draft_ai_settings(&self, cx: &App) -> AiSettings {
+        let mut settings = self.app_settings.ai.clone();
+        let base_url = self.ai_base_url_input.read(cx).text().to_string();
+        let model = self.ai_model_input.read(cx).text().to_string();
+        let base_url = base_url.trim().to_string();
+        let model = model.trim().to_string();
+        settings.base_url = if base_url.is_empty() {
+            settings.protocol.default_base_url().to_string()
+        } else {
+            base_url
+        };
+        settings.model = model;
+        settings
+    }
+
+    fn test_ai_connection(&mut self, cx: &mut Context<Self>) {
+        if self.ai_connection_testing {
+            return;
+        }
+
+        let settings = self.draft_ai_settings(cx);
+        let protocol = settings.protocol;
+        let model_label = settings.model.trim().to_string();
+        let input_api_key = self.ai_api_key_input.read(cx).text().to_string();
+        let input_api_key = input_api_key.trim().to_string();
+        let api_key = if input_api_key.is_empty() {
+            match load_secret(settings.protocol) {
+                Ok(Some(secret)) => secret.value,
+                Ok(None) => {
+                    self.settings_notice = None;
+                    self.settings_error = Some(format!(
+                        "当前协议还没有可用 API Key，请先保存本地 Key，或提供环境变量 {}",
+                        settings.protocol.api_key_env_var()
+                    ));
+                    cx.notify();
+                    return;
+                }
+                Err(err) => {
+                    self.settings_notice = None;
+                    self.settings_error = Some(err);
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            input_api_key
+        };
+
+        self.ai_connection_testing = true;
+        self.settings_notice = Some("正在测试 AI 连接…".to_string());
+        self.settings_error = None;
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { test_connection(&settings, &api_key) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.ai_connection_testing = false;
+                match result {
+                    Ok(response) => {
+                        let usage_message = response.usage.map(|usage| {
+                            format!(
+                                "（上行 {}，下行 {}）",
+                                usage.input_tokens, usage.output_tokens
+                            )
+                        });
+                        let base_message = format!(
+                            "测试连接成功：{} / {}{}",
+                            protocol.label(),
+                            model_label,
+                            usage_message.unwrap_or_default()
+                        );
+                        match record_ai_usage(
+                            protocol,
+                            AiUsageEventKind::TestConnection,
+                            response.usage,
+                        ) {
+                            Ok(_) => {
+                                this.settings_notice = Some(base_message);
+                                this.settings_error = None;
+                                this.reload_ai_panel_configuration(cx);
+                            }
+                            Err(err) => {
+                                this.settings_notice = None;
+                                this.settings_error =
+                                    Some(format!("{base_message}，但写入 token 统计失败: {err}"));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if let Err(record_err) =
+                            record_ai_usage(protocol, AiUsageEventKind::TestConnection, err.usage)
+                        {
+                            this.settings_error = Some(format!(
+                                "{}；另外写入 token 统计失败: {}",
+                                err.message, record_err
+                            ));
+                            cx.notify();
+                            return;
+                        }
+                        this.reload_ai_panel_configuration(cx);
+                        this.settings_notice = None;
+                        this.settings_error = Some(err.message);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_ai_api_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let api_key = self.ai_api_key_input.read(cx).text().to_string();
+        let api_key = api_key.trim().to_string();
+        if api_key.is_empty() {
+            self.settings_notice = None;
+            self.settings_error = Some("请输入 API Key 后再保存".to_string());
+            cx.notify();
+            return;
+        }
+
+        match save_secret(self.app_settings.ai.protocol, &api_key) {
+            Ok(_) => {
+                self.refresh_ai_api_key_presence(self.app_settings.ai.protocol);
+                self.sync_ai_api_key_input(window, cx);
+                self.settings_error = None;
+                self.settings_notice = Some("已保存 AI API Key 到本地配置".to_string());
+                self.reload_ai_panel_configuration(cx);
+            }
+            Err(err) => {
+                self.settings_notice = None;
+                self.settings_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_ai_api_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match delete_secret(self.app_settings.ai.protocol) {
+            Ok(_) => {
+                self.refresh_ai_api_key_presence(self.app_settings.ai.protocol);
+                self.sync_ai_api_key_input(window, cx);
+                self.settings_error = None;
+                self.settings_notice = Some(match self.ai_api_key_source {
+                    Some(SecretSource::Environment(env_var)) => {
+                        format!("已清除本地 AI API Key，当前仍会回退读取环境变量 {env_var}")
+                    }
+                    _ => "已清除本地 AI API Key".to_string(),
+                });
+                self.reload_ai_panel_configuration(cx);
             }
             Err(err) => {
                 self.settings_notice = None;
@@ -2488,6 +2782,184 @@ impl MainView {
             ))
     }
 
+    fn render_ai_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let protocol = self.app_settings.ai.protocol;
+        let key_status = if let Some(source) = self.ai_api_key_source {
+            match source {
+                SecretSource::LocalFile => "已保存到本地配置".to_string(),
+                SecretSource::Environment(env_var) => format!("来自环境变量 {env_var}"),
+            }
+        } else {
+            "未配置".to_string()
+        };
+        let secrets_path = secrets_file_path();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x262626))
+                    .child("AI"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8c8c8c))
+                    .line_height(relative(1.5))
+                    .child("AI 设置只保存协议、Base URL 和 Model。API Key 优先保存到应用自己的本地配置文件；如果本地没有，再回退读取标准环境变量。"),
+            )
+            .when_some(self.render_settings_message(), |this, message| {
+                this.child(message)
+            })
+            .child(render_settings_card(
+                "协议与连接",
+                "当前支持 OpenAI 格式和 Anthropic 格式。OpenAI 格式默认走 `/chat/completions`，Anthropic 格式走 `/messages`。",
+                vec![
+                    div()
+                        .flex()
+                        .gap(px(10.0))
+                        .child(self.render_settings_choice_button(
+                            "ai-protocol-openai",
+                            "OpenAI 格式",
+                            protocol == AiProviderProtocol::OpenAiCompatible,
+                            cx.listener(|this, _event, window, cx| {
+                                this.set_ai_protocol(
+                                    AiProviderProtocol::OpenAiCompatible,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(self.render_settings_choice_button(
+                            "ai-protocol-anthropic",
+                            "Anthropic 格式",
+                            protocol == AiProviderProtocol::Anthropic,
+                            cx.listener(|this, _event, window, cx| {
+                                this.set_ai_protocol(AiProviderProtocol::Anthropic, window, cx);
+                            }),
+                        ))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0x595959))
+                                .child("Base URL"),
+                        )
+                        .child(Input::new(&self.ai_base_url_input))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0x595959))
+                                .child("Model"),
+                        )
+                        .child(Input::new(&self.ai_model_input))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.0))
+                                .child(
+                                    Button::new("save-ai-connection")
+                                        .child("保存连接配置")
+                                        .with_variant(
+                                            gpui_component::button::ButtonVariant::Primary,
+                                        )
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.save_ai_connection_settings(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("test-ai-connection")
+                                        .child(if self.ai_connection_testing {
+                                            "测试中…"
+                                        } else {
+                                            "测试连接"
+                                        })
+                                        .when(self.ai_connection_testing, |button| {
+                                            button.disabled(true)
+                                        })
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.test_ai_connection(cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x8c8c8c))
+                                        .child("Base URL 留空时会回落到当前协议默认值。测试连接会使用当前输入框里的值。"),
+                                )
+                                .into_any_element(),
+                        )
+                        .into_any_element(),
+                ],
+            ))
+            .child(render_settings_card(
+                "API Key",
+                "当前协议优先读取本地配置文件；如果本地未保存，再回退到标准环境变量。",
+                vec![
+                    render_info_row("当前状态", &key_status).into_any_element(),
+                    render_path_row("本地文件", &secrets_path.display().to_string()).into_any_element(),
+                    render_info_row(
+                        "环境变量回退",
+                        self.app_settings.ai.protocol.api_key_env_var(),
+                    )
+                    .into_any_element(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0x595959))
+                                .child("新的 API Key"),
+                        )
+                        .child(Input::new(&self.ai_api_key_input))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x8c8c8c))
+                                .line_height(relative(1.5))
+                                .child("如果当前已经有可用值，这里会显示 `********` 占位。输入新值会写入本地配置并覆盖同协议旧值；清除只删本地配置，不会删除环境变量。"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.0))
+                                .child(
+                                    Button::new("save-ai-api-key")
+                                        .child("保存到本地")
+                                        .with_variant(
+                                            gpui_component::button::ButtonVariant::Primary,
+                                        )
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.save_ai_api_key(window, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("clear-ai-api-key")
+                                        .child("清除本地 Key")
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.clear_ai_api_key(window, cx);
+                                        })),
+                                )
+                                .into_any_element(),
+                        )
+                        .into_any_element(),
+                ],
+            ))
+    }
+
     fn render_about_settings(&self) -> impl IntoElement {
         let data_dir = app_data_dir();
         let db_path = data_dir.join("data.db");
@@ -2535,6 +3007,7 @@ impl MainView {
     fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.current_settings_section {
             SettingsSection::General => self.render_general_settings(cx).into_any_element(),
+            SettingsSection::AI => self.render_ai_settings(cx).into_any_element(),
             SettingsSection::Shortcuts => self.render_shortcuts_settings(cx).into_any_element(),
             SettingsSection::DataSync => self.data_management_panel.clone().into_any_element(),
             SettingsSection::About => self.render_about_settings().into_any_element(),
@@ -2821,38 +3294,13 @@ impl Render for MainView {
                                         Panel::Timeline => {
                                             self.timeline_panel.clone().into_any_element()
                                         }
+                                        Panel::AI => self.ai_panel.clone().into_any_element(),
                                         Panel::Search => {
                                             self.search_panel.clone().into_any_element()
                                         }
-                                        Panel::AI => div()
-                                            .size_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(8.0))
-                                                    .items_center()
-                                                    .child(
-                                                        div()
-                                                            .text_xl()
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                            .text_color(rgb(0x262626))
-                                                            .child("AI 面板开发中..."),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(0x8c8c8c))
-                                                            .child("当前版本先保留占位态，后续再补充完整交互。"),
-                                                    ),
-                                            )
+                                        Panel::Settings => self
+                                            .render_settings_panel(window, cx)
                                             .into_any_element(),
-                                        Panel::Settings => {
-                                            self.render_settings_panel(window, cx).into_any_element()
-                                        }
                                     }),
                             )
                             .when_some(self.quick_add_overlay.clone(), |el, overlay| {
