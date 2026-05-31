@@ -532,6 +532,17 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_record_notified_at(&self, id: uuid::Uuid, notified_at: chrono::DateTime<Utc>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE records SET notified_at = ?1 WHERE id = ?2",
+            [
+                &notified_at.to_rfc3339() as &dyn rusqlite::ToSql,
+                &id.to_string() as &dyn rusqlite::ToSql,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn get_or_create_tag_internal(&self, tx: &rusqlite::Transaction, name: &str) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
 
@@ -562,7 +573,7 @@ impl Database {
         Ok(id)
     }
 
-    pub fn get_tasks(&self, _completed: bool) -> Result<Vec<Record>> {
+    pub fn get_tasks(&self) -> Result<Vec<Record>> {
         eprintln!("[DB] get_tasks called");
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
@@ -931,24 +942,6 @@ impl Database {
         tx.execute("DELETE FROM records WHERE id = ?1", [&id.to_string()])?;
         tx.commit()?;
         eprintln!("[DB] delete_record succeeded");
-        Ok(())
-    }
-
-    pub fn mark_task_completed(&self, id: Uuid, completed_at: DateTime<Utc>) -> Result<()> {
-        eprintln!("[DB] mark_task_completed called for id: {}", id);
-        self.conn.execute(
-            "UPDATE records
-             SET completed_at = ?1,
-                 status = 'done',
-                 started_at = COALESCE(started_at, updated_at),
-                 updated_at = ?2
-             WHERE id = ?3",
-            [
-                &completed_at.to_rfc3339() as &dyn rusqlite::ToSql,
-                &Utc::now().to_rfc3339() as &dyn rusqlite::ToSql,
-                &id.to_string() as &dyn rusqlite::ToSql,
-            ],
-        )?;
         Ok(())
     }
 
@@ -1749,7 +1742,7 @@ mod tests {
         );
         db.create_record(&record).unwrap();
 
-        let tasks = db.get_tasks(false).unwrap();
+        let tasks = db.get_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, Some("Test Title".to_string()));
         assert_eq!(tasks[0].content, "Test task");

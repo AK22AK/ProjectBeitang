@@ -9,6 +9,7 @@ use crate::ui::tokenized_text::{
 };
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::prelude::FluentBuilder as _;
+use gpui::InteractiveElement as _;
 use gpui::StatefulInteractiveElement as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
@@ -24,6 +25,8 @@ actions!(
     [
         EditTaskAction,
         DeleteTaskAction,
+        ToggleCompleteTaskAction,
+        CancelTaskAction,
         SetReminderAction,
         SetReminderTodayAction,
         SetReminderTomorrowAction,
@@ -262,6 +265,16 @@ impl TaskPanel {
         });
         let handle = cx.entity().clone();
         panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_reopen(move |task_id, cx| {
+                if let Ok(task_id) = Uuid::parse_str(&task_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.handle_reopen_task(task_id, cx);
+                    });
+                }
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
             sidebar.on_close(move |cx| {
                 handle.update(cx, |panel, cx| {
                     panel.handle_sidebar_close(cx);
@@ -316,6 +329,9 @@ impl TaskPanel {
             task.priority = Some(payload.priority.clone());
             task.status = Some(payload.status.clone());
             task.due_date = payload.due_date;
+            if task.scheduled_for != payload.scheduled_for {
+                task.notified_at = None;
+            }
             task.scheduled_for = payload.scheduled_for;
             task.cancelled_reason = payload.cancel_reason.clone();
             task.tags = payload.tags.clone();
@@ -367,7 +383,7 @@ impl TaskPanel {
         self.tasks
             .iter()
             .filter(|t| self.priority_filter.matches(t.priority.clone()))
-            .filter(|t| t.completed_at.is_none() || self.show_completed)
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)) || self.show_completed)
             .filter(|t| self.matches_focus_preset(t))
             .filter(|t| self.matches_tag_filter(t))
             .cloned()
@@ -377,7 +393,7 @@ impl TaskPanel {
     fn matches_focus_preset(&self, task: &Record) -> bool {
         let today = Local::now().date_naive();
         let tomorrow = today + Duration::days(1);
-        let is_open = task.completed_at.is_none();
+        let is_open = !matches!(task.status, Some(TaskStatus::Done));
         let due_local = task
             .due_date
             .map(|dt| dt.with_timezone(&Local).date_naive());
@@ -423,7 +439,7 @@ impl TaskPanel {
         for task in self
             .get_filtered_tasks()
             .iter()
-            .filter(|t| t.completed_at.is_none())
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)))
         {
             let quadrant = Self::categorize_quadrant(task);
             groups.entry(quadrant).or_default().push(task.clone());
@@ -822,7 +838,7 @@ impl TaskPanel {
                     "[TaskPanel] Fetching tasks from store... (attempt {})",
                     retries + 1
                 );
-                match store.get_tasks(false).await {
+                match store.get_tasks().await {
                     Ok(tasks) => break tasks,
                     Err(e) => {
                         eprintln!("[TaskPanel] Failed to load tasks: {}, retrying...", e);
@@ -896,6 +912,7 @@ impl TaskPanel {
             if task.completed_at.is_some() {
                 task.completed_at = None;
                 task.status = Some(TaskStatus::Todo);
+                task.notified_at = None;
             } else {
                 task.completed_at = Some(chrono::Utc::now());
                 task.status = Some(TaskStatus::Done);
@@ -919,6 +936,21 @@ impl TaskPanel {
             )
             .detach();
         }
+    }
+
+    fn handle_reopen_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |view, cx| match store.reopen_task(task_id).await {
+            Ok(_) => {
+                view.update(cx, |panel, cx| {
+                    panel.load_tasks(cx);
+                    panel.handle_sidebar_close(cx);
+                })
+                .ok();
+            }
+            Err(e) => eprintln!("[TaskPanel] Failed to reopen task: {}", e),
+        })
+        .detach();
     }
 
     fn request_delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
@@ -1054,10 +1086,14 @@ impl TaskPanel {
     }
 
     fn render_custom_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (_task_id, position) = match (self.context_menu_task_id, self.context_menu_position) {
+        let (task_id, position) = match (self.context_menu_task_id, self.context_menu_position) {
             (Some(id), Some(pos)) => (id, pos),
             _ => return None,
         };
+
+        let task_status = self.tasks.iter().find(|t| t.id == task_id).and_then(|t| t.status.clone());
+        let is_done_or_cancelled = matches!(task_status, Some(TaskStatus::Done) | Some(TaskStatus::Cancelled));
+        let is_cancelled = matches!(task_status, Some(TaskStatus::Cancelled));
 
         Some(
             deferred(
@@ -1123,6 +1159,20 @@ impl TaskPanel {
                             EditTaskAction,
                             cx,
                         ))
+                        .child(div().h_px().bg(ClaudeLikeColors::separator()))
+                        .child(if is_done_or_cancelled {
+                            self.render_menu_item("重新打开", IconName::Undo, ToggleCompleteTaskAction, cx)
+                        } else {
+                            self.render_menu_item("标记完成", IconName::Check, ToggleCompleteTaskAction, cx)
+                        })
+                        .when(!is_cancelled && !is_done_or_cancelled, |el| {
+                            el.child(self.render_menu_item(
+                                "取消任务",
+                                IconName::CircleX,
+                                CancelTaskAction,
+                                cx,
+                            ))
+                        })
                         .child(div().h_px().bg(ClaudeLikeColors::separator()))
                         .child(self.render_menu_item(
                             "删除",
@@ -1507,7 +1557,8 @@ impl TaskPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let task_id = task.id;
-        let is_completed = task.completed_at.is_some();
+        let is_done_or_cancelled = matches!(task.status, Some(TaskStatus::Done) | Some(TaskStatus::Cancelled));
+        let is_cancelled = matches!(task.status, Some(TaskStatus::Cancelled));
         let sidebar_task_id = self
             .task_detail_sidebar
             .read(cx)
@@ -1564,6 +1615,8 @@ impl TaskPanel {
                     .border_color(ClaudeLikeColors::separator())
                     .bg(if is_selected {
                         ClaudeLikeColors::selected_surface()
+                    } else if is_done_or_cancelled {
+                        rgb(0xf5f5f5)
                     } else {
                         ClaudeLikeColors::app_background()
                     })
@@ -1581,13 +1634,16 @@ impl TaskPanel {
                 })
             })
             .cursor_pointer()
-            .on_click(cx.listener({
-                let task = task.clone();
-                move |this, _event: &ClickEvent, window, cx| {
-                    this.select_task(&task, window, cx);
-                    cx.stop_propagation();
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let task = task.clone();
+                    move |this, _event: &MouseDownEvent, window, cx| {
+                        this.select_task(&task, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -1598,11 +1654,24 @@ impl TaskPanel {
                         div()
                             .id(("checkbox", idx))
                             .cursor_pointer()
-                            .child(if is_completed { "☑" } else { "☐" })
-                            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                this.toggle_task_complete(task_id, cx);
-                                cx.stop_propagation();
-                            }))
+                            .child(if is_cancelled {
+                                "重新打开".to_string()
+                            } else if is_done_or_cancelled {
+                                "☑".to_string()
+                            } else {
+                                "☐".to_string()
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                    if is_cancelled {
+                                        this.handle_reopen_task(task_id, cx);
+                                    } else {
+                                        this.toggle_task_complete(task_id, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            )
                     )
                     .child(
                         v_flex()
@@ -1657,7 +1726,7 @@ impl TaskPanel {
                                                 .appearance(false)
                                                 .focus_bordered(false)
                                                 .text_size(px(TaskTypography::TASK_TITLE_SIZE))
-                                                .text_color(if is_completed {
+                                                .text_color(if is_done_or_cancelled {
                                                     ClaudeLikeColors::text_tertiary()
                                                 } else {
                                                     ClaudeLikeColors::text_primary()
@@ -1673,7 +1742,7 @@ impl TaskPanel {
                                         .font_weight(TaskTypography::task_title_font_weight(
                                             is_selected,
                                         ))
-                                        .text_color(if is_completed {
+                                        .text_color(if is_done_or_cancelled {
                                             ClaudeLikeColors::text_tertiary()
                                         } else {
                                             ClaudeLikeColors::text_primary()
@@ -1681,7 +1750,7 @@ impl TaskPanel {
                                         .child(render_tokenized_text(
                                             &display_title,
                                             TokenTextStyle::new(
-                                                if is_completed {
+                                                if is_done_or_cancelled {
                                                     rgb(0x8c8c86)
                                                 } else {
                                                     rgb(0x242421)
@@ -2039,10 +2108,17 @@ impl TaskPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let filtered_tasks = self.get_filtered_tasks();
-        let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = filtered_tasks
+        let pending_tasks: Vec<_> = filtered_tasks
             .iter()
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)))
             .cloned()
-            .partition(|task| task.completed_at.is_none());
+            .collect();
+        let completed_tasks: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, Some(TaskStatus::Done)))
+            .cloned()
+            .collect();
 
         let pending_count = pending_tasks.len();
         let completed_count = completed_tasks.len();
@@ -2085,6 +2161,7 @@ impl TaskPanel {
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                 this.show_completed = !this.show_completed;
+                                cx.stop_propagation();
                                 cx.notify();
                             }))
                             .child(
@@ -2127,7 +2204,7 @@ impl Render for TaskPanel {
 
         let (pending_count, completed_count): (usize, usize) =
             self.tasks.iter().fold((0, 0), |(p, c), task| {
-                if task.completed_at.is_some() {
+                if matches!(task.status, Some(TaskStatus::Done)) {
                     (p, c + 1)
                 } else {
                     (p + 1, c)
@@ -2225,6 +2302,40 @@ impl Render for TaskPanel {
                     }
                 }),
             )
+            .on_action(
+                cx.listener(|this, _action: &ToggleCompleteTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        if let Some(task) = this.tasks.iter().find(|t| t.id == task_id) {
+                            if matches!(task.status, Some(TaskStatus::Cancelled)) {
+                                this.handle_reopen_task(task_id, cx);
+                            } else {
+                                this.toggle_task_complete(task_id, cx);
+                            }
+                        }
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &CancelTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let store = this.store.clone();
+                        cx.spawn(async move |view, cx| {
+                            match store.cancel_task(task_id, None).await {
+                                Ok(_) => {
+                                    view.update(cx, |panel, cx| {
+                                        panel.load_tasks(cx);
+                                    })
+                                    .ok();
+                                }
+                                Err(e) => {
+                                    eprintln!("[TaskPanel] Failed to cancel task: {}", e);
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }),
+            )
             .child(
                 div()
                     .id("task-panel-main")
@@ -2251,7 +2362,14 @@ impl Render for TaskPanel {
                     }))
                     .child(
                         v_flex()
+                            .id("task-panel-title")
                             .gap(px(4.0))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.show_completed = !this.show_completed;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
                             .child(
                                 div()
                                     .text_size(px(TaskTypography::META_SIZE))

@@ -278,10 +278,11 @@ impl Record {
                     self.started_at = Some(now);
                 }
                 self.completed_at = None;
+                self.cancelled_reason = None;
             }
             Some(TaskStatus::Todo) => {
-                self.started_at = None;
                 self.completed_at = None;
+                self.cancelled_reason = None;
             }
             Some(TaskStatus::Done) | Some(TaskStatus::Cancelled) => {
                 if self.completed_at.is_none() {
@@ -295,6 +296,7 @@ impl Record {
     pub fn complete(&mut self) {
         self.completed_at = Some(Utc::now());
         self.updated_at = Utc::now();
+        self.status = Some(TaskStatus::Done);
     }
 
     pub fn is_completed(&self) -> bool {

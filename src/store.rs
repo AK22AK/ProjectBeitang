@@ -132,6 +132,10 @@ pub enum StoreCommand {
         reason: Option<String>,
         respond_to: Sender<Result<(), String>>,
     },
+    ReopenTask {
+        id: uuid::Uuid,
+        respond_to: Sender<Result<(), String>>,
+    },
     // 标签操作
     GetAllTags {
         respond_to: Sender<Result<Vec<Tag>, String>>,
@@ -305,17 +309,19 @@ fn derive_task_stats(tasks: &[Record], now: DateTime<Local>) -> DerivedTaskStats
             }
         }
 
-        if let Some(completed_at) = task.completed_at {
-            let completed_date = completed_at.with_timezone(&Local).date_naive();
-            if completed_date == today {
-                stats.completed_today_count += 1;
-            }
+        if task.status == Some(TaskStatus::Done) {
+            if let Some(completed_at) = task.completed_at {
+                let completed_date = completed_at.with_timezone(&Local).date_naive();
+                if completed_date == today {
+                    stats.completed_today_count += 1;
+                }
 
-            let days_from_start = completed_date.signed_duration_since(today - Duration::days(6));
-            if (0..=6).contains(&days_from_start.num_days()) {
-                let idx = days_from_start.num_days() as usize;
-                if let Some(bucket) = last_7_days_completed.get_mut(idx) {
-                    bucket.count += 1;
+                let days_from_start = completed_date.signed_duration_since(today - Duration::days(6));
+                if (0..=6).contains(&days_from_start.num_days()) {
+                    let idx = days_from_start.num_days() as usize;
+                    if let Some(bucket) = last_7_days_completed.get_mut(idx) {
+                        bucket.count += 1;
+                    }
                 }
             }
         }
@@ -334,24 +340,13 @@ impl StoreRuntime {
         }
     }
 
-    fn normalize_record_for_persistence(&self, mut record: Record) -> Result<Record, String> {
+    fn normalize_record_for_persistence(
+        &self,
+        mut record: Record,
+        previous_status: Option<TaskStatus>,
+    ) -> Result<Record, String> {
         if record.record_type != crate::models::RecordType::Task {
             return Ok(record);
-        }
-
-        let existing = match &self.db {
-            Some(db) => db
-                .get_record_by_id(record.id)
-                .map_err(|e| format!("Database error: {}", e))?,
-            None => return Err("Database not initialized".to_string()),
-        };
-
-        let previous_status = existing.as_ref().and_then(|stored| stored.status.clone());
-        if record.started_at.is_none() {
-            record.started_at = existing.as_ref().and_then(|stored| stored.started_at);
-        }
-        if record.completed_at.is_none() {
-            record.completed_at = existing.as_ref().and_then(|stored| stored.completed_at);
         }
 
         record.sync_task_lifecycle_fields(previous_status, chrono::Utc::now());
@@ -385,7 +380,7 @@ impl StoreRuntime {
                         let notifications_enabled = load_app_settings()
                             .map(|settings| settings.reminders.notifications_enabled)
                             .unwrap_or(true);
-                        for mut record in records {
+                        for record in records {
                             eprintln!("[Store] Processing reminder for task: {}", record.id);
                             if !notifications_enabled {
                                 continue;
@@ -393,8 +388,8 @@ impl StoreRuntime {
                             match crate::platform::send_reminder(&record) {
                                 Ok(_) => {
                                     eprintln!("[Store] Notification sent successfully");
-                                    record.notified_at = Some(chrono::Utc::now());
-                                    if let Err(e) = db_clone.create_record(&record) {
+                                    let now = chrono::Utc::now();
+                                    if let Err(e) = db_clone.update_record_notified_at(record.id, now) {
                                         eprintln!("[Store] Failed to update notified_at: {}", e);
                                     }
                                 }
@@ -486,6 +481,10 @@ impl StoreRuntime {
                     respond_to,
                 } => {
                     let result = self.handle_cancel_task(id, reason).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::ReopenTask { id, respond_to } => {
+                    let result = self.handle_reopen_task(id).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetAllTags { respond_to } => {
@@ -647,7 +646,7 @@ impl StoreRuntime {
         match &self.db {
             Some(db) => {
                 eprintln!("[Store] Database exists, querying...");
-                match db.get_tasks(false) {
+                match db.get_tasks() {
                     Ok(tasks) => {
                         eprintln!("[Store] Found {} tasks", tasks.len());
                         Ok(tasks)
@@ -668,7 +667,7 @@ impl StoreRuntime {
     async fn handle_create_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
             Some(db) => {
-                let record = self.normalize_record_for_persistence(record)?;
+                let record = self.normalize_record_for_persistence(record, None)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -679,7 +678,12 @@ impl StoreRuntime {
     async fn handle_update_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
             Some(db) => {
-                let record = self.normalize_record_for_persistence(record)?;
+                let previous_status = db
+                    .get_record_by_id(record.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.status);
+                let record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -830,7 +834,7 @@ impl StoreRuntime {
         eprintln!("[Store] handle_get_dashboard called");
         match &self.db {
             Some(db) => {
-                let tasks = match db.get_tasks(false) {
+                let tasks = match db.get_tasks() {
                     Ok(tasks) => tasks,
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
@@ -884,7 +888,7 @@ impl StoreRuntime {
         match &self.db {
             Some(db) => {
                 let tasks = db
-                    .get_tasks(false)
+                    .get_tasks()
                     .map_err(|e| format!("Database error: {}", e))?;
                 let derived = derive_task_stats(&tasks, Local::now());
                 Ok(StatsData {
@@ -912,9 +916,10 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
+                let previous_status = record.status.clone();
                 record.status = Some(TaskStatus::InProgress);
                 record.updated_at = chrono::Utc::now();
-                record = self.normalize_record_for_persistence(record)?;
+                record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -932,9 +937,10 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
+                let previous_status = record.status.clone();
                 record.status = Some(TaskStatus::Done);
                 record.updated_at = chrono::Utc::now();
-                record = self.normalize_record_for_persistence(record)?;
+                record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -956,10 +962,34 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
+                let previous_status = record.status.clone();
                 record.status = Some(TaskStatus::Cancelled);
                 record.cancelled_reason = reason;
                 record.updated_at = chrono::Utc::now();
-                record = self.normalize_record_for_persistence(record)?;
+                record = self.normalize_record_for_persistence(record, previous_status)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_reopen_task(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] handle_reopen_task called for id: {}", id);
+        match &self.db {
+            Some(db) => {
+                let mut record = match db.get_record_by_id(id) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => return Err("Task not found".to_string()),
+                    Err(e) => return Err(format!("Database error: {}", e)),
+                };
+
+                let previous_status = record.status.clone();
+                record.status = Some(TaskStatus::Todo);
+                record.completed_at = None;
+                record.cancelled_reason = None;
+                record.updated_at = chrono::Utc::now();
+                record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -1357,13 +1387,13 @@ pub fn create_store() -> (Store, StoreRuntime) {
 }
 
 impl Store {
-    pub async fn get_tasks(&self, completed: bool) -> Result<Vec<Record>, String> {
-        eprintln!("[Store] get_tasks called with completed={}", completed);
+    pub async fn get_tasks(&self) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] get_tasks called");
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
             .send(StoreCommand::GetTasks {
-                completed,
+                completed: false,
                 respond_to: tx,
             })
             .await;
@@ -1871,6 +1901,16 @@ impl Store {
         rx.recv().await.unwrap_or(Ok(()))
     }
 
+    pub async fn reopen_task(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] reopen_task called for id: {}", id);
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::ReopenTask { id, respond_to: tx })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
     pub async fn get_all_tags(&self) -> Result<Vec<Tag>, String> {
         eprintln!("[Store] get_all_tags called");
         let (tx, rx) = async_channel::unbounded();
@@ -2101,7 +2141,7 @@ mod tests {
         assert_eq!(stats.high_priority_open_count, 1);
         assert_eq!(stats.completed_today_count, 1);
         assert_eq!(stats.last_7_days_completed.len(), 7);
-        assert_eq!(stats.last_7_days_completed[0].count, 1);
+        assert_eq!(stats.last_7_days_completed[0].count, 0);
         assert_eq!(stats.last_7_days_completed[3].count, 1);
         assert_eq!(stats.last_7_days_completed[6].count, 1);
     }
@@ -2134,6 +2174,6 @@ mod tests {
         assert_eq!(stats.due_tomorrow_count, 0);
         assert_eq!(stats.overdue_count, 0);
         assert_eq!(stats.high_priority_open_count, 0);
-        assert_eq!(stats.completed_today_count, 1);
+        assert_eq!(stats.completed_today_count, 0);
     }
 }
