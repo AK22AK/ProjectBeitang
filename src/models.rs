@@ -20,6 +20,7 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub id: Uuid,
+    pub line_id: Option<Uuid>,
     /// 标题 - 任务必填，记录可选
     pub title: Option<String>,
     /// 内容/详情 - 任务的详细描述或记录的内容
@@ -47,6 +48,102 @@ pub enum RecordType {
     Note,
     Event,
     Idea,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LineStatus {
+    Open,
+    Completed,
+}
+
+impl LineStatus {
+    pub fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Completed => "completed",
+        }
+    }
+
+    pub fn from_db_value(value: &str) -> Self {
+        match value {
+            "completed" => Self::Completed,
+            _ => Self::Open,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Line {
+    pub id: Uuid,
+    pub name: String,
+    pub project: Option<String>,
+    pub status: LineStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl Line {
+    pub fn display_name(&self) -> String {
+        match self.project.as_deref() {
+            Some(project) if !project.is_empty() => format!("{project}/{}", self.name),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineRef {
+    pub project: Option<String>,
+    pub name: String,
+}
+
+impl LineRef {
+    pub fn new(project: Option<String>, name: String) -> Self {
+        Self { project, name }
+    }
+
+    pub fn display_name(&self) -> String {
+        match self.project.as_deref() {
+            Some(project) if !project.is_empty() => format!("{project}/{}", self.name),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineGraphQuery {
+    pub project: Option<String>,
+    pub include_completed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineGraphStats {
+    pub project_count: usize,
+    pub open_line_count: usize,
+    pub completed_line_count: usize,
+    pub record_count: usize,
+    pub open_task_count: usize,
+    pub lines_with_next_action_count: usize,
+    pub unassigned_record_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LineOverview {
+    pub line: Line,
+    pub records: Vec<Record>,
+    pub next_action: Option<Record>,
+    pub latest_record: Option<Record>,
+    pub record_count: usize,
+    pub open_task_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LineGraphData {
+    pub lines: Vec<LineOverview>,
+    pub projects: Vec<String>,
+    pub stats: LineGraphStats,
+    pub unassigned_records: Vec<Record>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +233,7 @@ impl Record {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            line_id: None,
             title: Some(title),
             content,
             priority: Some(priority),
@@ -161,6 +259,7 @@ impl Record {
         let title = Self::extract_title_from_content(&content);
         Self {
             id: Uuid::new_v4(),
+            line_id: None,
             title,
             content: content.clone(),
             priority: None,
@@ -184,6 +283,7 @@ impl Record {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            line_id: None,
             title,
             content,
             priority: None,
@@ -208,6 +308,7 @@ impl Record {
         let title = Self::extract_title_from_content(&content);
         Self {
             id: Uuid::new_v4(),
+            line_id: None,
             title,
             content: content.clone(),
             priority: None,
@@ -278,10 +379,11 @@ impl Record {
                     self.started_at = Some(now);
                 }
                 self.completed_at = None;
+                self.cancelled_reason = None;
             }
             Some(TaskStatus::Todo) => {
-                self.started_at = None;
                 self.completed_at = None;
+                self.cancelled_reason = None;
             }
             Some(TaskStatus::Done) | Some(TaskStatus::Cancelled) => {
                 if self.completed_at.is_none() {
@@ -295,6 +397,7 @@ impl Record {
     pub fn complete(&mut self) {
         self.completed_at = Some(Utc::now());
         self.updated_at = Utc::now();
+        self.status = Some(TaskStatus::Done);
     }
 
     pub fn is_completed(&self) -> bool {

@@ -1,18 +1,18 @@
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    button::{Button, ButtonVariants},
+    button::Button,
     date_picker::{DatePicker, DatePickerState},
     h_flex,
     input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Paste},
     scroll::ScrollableElement,
-    v_flex,
+    v_flex, Sizable,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::models::{Attachment, AttachmentStatus, Priority, Record, TaskStatus};
+use crate::models::{Attachment, AttachmentStatus, LineRef, Priority, Record, TaskStatus};
 use crate::platform::{open_saved_attachment, pick_image_files, ParentWindowHint};
 use crate::store::Store;
 use crate::ui::metadata_autocomplete::{
@@ -20,10 +20,12 @@ use crate::ui::metadata_autocomplete::{
     MetadataAutocompleteAction, MetadataAutocompleteState, MetadataCatalog,
 };
 use crate::ui::parsing;
-use crate::ui::tokenized_text::{
-    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
-};
+use crate::ui::style::{ClaudeLikeColors, TaskTypography};
+use crate::ui::tokenized_text::{render_tokenized_text, MetadataChipKind, TokenTextStyle};
 use std::time::Duration;
+
+const TASK_DETAIL_DOCKED_WIDTH: Pixels = px(340.0);
+const TASK_DETAIL_DOCKED_CONTAINER_WIDTH: Pixels = px(340.0);
 
 #[derive(Clone)]
 struct AttachmentPreview {
@@ -41,6 +43,7 @@ pub struct TaskDetailSidebar {
     due_date: Option<DateTime<Utc>>,
     scheduled_for: Option<DateTime<Utc>>,
     cancel_reason: Option<String>,
+    line: Option<LineRef>,
     tags: Vec<String>,
     persons: Vec<String>,
     inline_tags: Vec<String>,
@@ -64,7 +67,9 @@ pub struct TaskDetailSidebar {
     attachment_error: Option<String>,
     on_save: Option<Box<dyn Fn(SavePayload, &mut Context<Self>) + Send + Sync>>,
     on_delete: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
+    on_reopen: Option<Box<dyn Fn(String, &mut Context<Self>) + Send + Sync>>,
     on_close: Option<Box<dyn Fn(&mut Context<Self>) + Send + Sync>>,
+    presentation: TaskDetailPresentation,
 }
 
 /// 保存时的数据载荷
@@ -80,6 +85,7 @@ pub struct SavePayload {
     pub cancel_reason: Option<String>,
     pub tags: Vec<String>,
     pub persons: Vec<String>,
+    pub line: Option<LineRef>,
 }
 
 /// 侧边栏显示状态
@@ -87,6 +93,12 @@ pub struct SavePayload {
 pub enum SidebarState {
     Hidden,
     Visible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TaskDetailPresentation {
+    Overlay,
+    Docked,
 }
 
 impl TaskDetailSidebar {
@@ -101,6 +113,7 @@ impl TaskDetailSidebar {
             due_date: None,
             scheduled_for: None,
             cancel_reason: None,
+            line: None,
             tags: Vec::new(),
             persons: Vec::new(),
             inline_tags: Vec::new(),
@@ -124,8 +137,15 @@ impl TaskDetailSidebar {
             attachment_error: None,
             on_save: None,
             on_delete: None,
+            on_reopen: None,
             on_close: None,
+            presentation: TaskDetailPresentation::Overlay,
         }
+    }
+
+    pub fn with_presentation(mut self, presentation: TaskDetailPresentation) -> Self {
+        self.presentation = presentation;
+        self
     }
 
     pub fn on_save<F>(&mut self, callback: F)
@@ -142,6 +162,13 @@ impl TaskDetailSidebar {
         self.on_delete = Some(Box::new(callback));
     }
 
+    pub fn on_reopen<F>(&mut self, callback: F)
+    where
+        F: Fn(String, &mut Context<Self>) + Send + Sync + 'static,
+    {
+        self.on_reopen = Some(Box::new(callback));
+    }
+
     pub fn on_close<F>(&mut self, callback: F)
     where
         F: Fn(&mut Context<Self>) + Send + Sync + 'static,
@@ -153,25 +180,16 @@ impl TaskDetailSidebar {
     pub fn show_task(&mut self, task: &Record, window: &mut Window, cx: &mut Context<Self>) {
         let task_id = task.id.to_string();
 
-        // 关键：如果已经在显示同一个任务，什么都不做
+        // 如果已经在显示同一个任务，只刷新展示数据，不重建输入和附件状态。
         if self.current_task_id.as_ref() == Some(&task_id) {
+            self.refresh_task_view_state(task);
+            cx.notify();
             return;
         }
 
         // 更新任务数据
         self.current_task_id = Some(task_id);
-        self.task_title = task.title.clone();
-        self.task_content = task.content.clone();
-        self.priority = task.priority.clone();
-        self.status = task.status.clone();
-        self.due_date = task.due_date;
-        self.scheduled_for = task.scheduled_for;
-        self.cancel_reason = task.cancelled_reason.clone();
-        self.tags = task.tags.clone();
-        self.persons = task.persons.clone();
-        let inline_fields = parsing::parse_record_fields(task.title.as_deref(), &task.content);
-        self.inline_tags = inline_fields.tags;
-        self.inline_persons = inline_fields.people;
+        self.refresh_task_view_state(task);
         self.editing_title = false;
         self.editing_content = false;
         self.attachments.clear();
@@ -278,6 +296,7 @@ impl TaskDetailSidebar {
                 window,
                 |this, _state, event: &InputEvent, window, cx| match event {
                     InputEvent::Change | InputEvent::Focus => {
+                        this.sync_inline_metadata_from_inputs(cx);
                         this.sync_title_metadata_autocomplete(cx);
                     }
                     InputEvent::Blur => {
@@ -308,6 +327,7 @@ impl TaskDetailSidebar {
                 window,
                 |this, _state, event: &InputEvent, window, cx| match event {
                     InputEvent::Change | InputEvent::Focus => {
+                        this.sync_inline_metadata_from_inputs(cx);
                         this.sync_content_metadata_autocomplete(cx);
                     }
                     InputEvent::Blur => {
@@ -328,6 +348,49 @@ impl TaskDetailSidebar {
         cx.notify();
     }
 
+    fn refresh_task_view_state(&mut self, task: &Record) {
+        self.task_title = task.title.clone();
+        self.task_content = task.content.clone();
+        self.priority = task.priority.clone();
+        self.status = task.status.clone();
+        self.due_date = task.due_date;
+        self.scheduled_for = task.scheduled_for;
+        self.cancel_reason = task.cancelled_reason.clone();
+        let inline_fields = parsing::parse_record_fields(task.title.as_deref(), &task.content);
+        self.tags = parsing::merge_inline_metadata(&task.tags, &inline_fields.tags);
+        self.persons = parsing::merge_inline_metadata(&task.persons, &inline_fields.people);
+        self.line = inline_fields.line.clone();
+        self.inline_tags = inline_fields.tags;
+        self.inline_persons = inline_fields.people;
+    }
+
+    fn sync_inline_metadata_from_inputs(&mut self, cx: &mut Context<Self>) {
+        let raw_title = self
+            .title_input
+            .as_ref()
+            .map(|input| {
+                let value = input.read(cx).value().to_string();
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })
+            .unwrap_or_else(|| self.task_title.clone());
+        let raw_content = self
+            .content_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_else(|| self.task_content.clone());
+        let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
+        self.tags = parsing::reconcile_metadata(&self.tags, &self.inline_tags, &parsed_fields.tags);
+        self.persons =
+            parsing::reconcile_metadata(&self.persons, &self.inline_persons, &parsed_fields.people);
+        self.line = parsed_fields.line.clone();
+        self.inline_tags = parsed_fields.tags;
+        self.inline_persons = parsed_fields.people;
+    }
+
     /// 关闭侧边栏
     pub fn close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(cx);
@@ -335,6 +398,7 @@ impl TaskDetailSidebar {
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.current_task_id = None;
+        self.line = None;
         self.attachments.clear();
         self.active_attachment_preview = None;
         self.attachments_loading = false;
@@ -458,6 +522,7 @@ impl TaskDetailSidebar {
             self.task_content = parsed_fields.content.clone();
             self.tags = next_tags.clone();
             self.persons = next_persons.clone();
+            self.line = parsed_fields.line.clone();
             self.inline_tags = parsed_fields.tags.clone();
             self.inline_persons = parsed_fields.people.clone();
             self.editing_title = false;
@@ -502,6 +567,7 @@ impl TaskDetailSidebar {
                 cancel_reason: self.cancel_reason.clone(),
                 tags: next_tags,
                 persons: next_persons,
+                line: parsed_fields.line,
             };
 
             if let Some(ref callback) = self.on_save {
@@ -589,8 +655,13 @@ impl TaskDetailSidebar {
         cx.spawn(async move |view, cx| {
             let tags = store.get_tag_catalog().await.unwrap_or_default();
             let persons = store.get_person_catalog().await.unwrap_or_default();
+            let lines = store.get_line_catalog().await.unwrap_or_default();
             let _ = view.update(cx, |this, cx| {
-                let catalog = MetadataCatalog { tags, persons };
+                let catalog = MetadataCatalog {
+                    tags,
+                    persons,
+                    lines,
+                };
                 this.title_metadata_autocomplete
                     .set_catalog(catalog.clone());
                 this.content_metadata_autocomplete.set_catalog(catalog);
@@ -884,20 +955,40 @@ impl TaskDetailSidebar {
 
     fn render_status_button(&self, status: TaskStatus, cx: &mut Context<Self>) -> impl IntoElement {
         let (label, color) = match status {
-            TaskStatus::Todo => ("待办", rgb(0x999999)),
-            TaskStatus::InProgress => ("进行中", rgb(0x1890ff)),
-            TaskStatus::Done => ("已完成", rgb(0x52c41a)),
-            TaskStatus::Cancelled => ("已取消", rgb(0xff4d4f)),
+            TaskStatus::Todo => ("待办", ClaudeLikeColors::text_tertiary()),
+            TaskStatus::InProgress => ("进行中", ClaudeLikeColors::accent()),
+            TaskStatus::Done => ("已完成", rgb(0x5f8f63).into()),
+            TaskStatus::Cancelled => ("已取消", ClaudeLikeColors::danger()),
         };
 
         let is_selected = self.status == Some(status.clone());
 
-        Button::new(format!("sidebar-status-{:?}", status))
-            .child(label)
-            .when(is_selected, |b| {
-                b.with_variant(gpui_component::button::ButtonVariant::Primary)
+        div()
+            .id(format!("sidebar-status-{:?}", status))
+            .px(px(9.0))
+            .py(px(4.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(if is_selected {
+                ClaudeLikeColors::stronger_separator()
+            } else {
+                ClaudeLikeColors::separator()
             })
-            .when(!is_selected, |b| b.text_color(color))
+            .bg(if is_selected {
+                ClaudeLikeColors::selected_surface()
+            } else {
+                ClaudeLikeColors::app_background()
+            })
+            .text_size(px(TaskTypography::META_SIZE))
+            .font_weight(TaskTypography::task_title_font_weight(is_selected))
+            .text_color(if is_selected {
+                ClaudeLikeColors::text_primary()
+            } else {
+                color
+            })
+            .cursor_pointer()
+            .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+            .child(label)
             .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 this.set_status(status.clone(), window, cx);
                 cx.stop_propagation();
@@ -910,23 +1001,67 @@ impl TaskDetailSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (label, color) = match priority {
-            Priority::High => ("高", rgb(0xff4d4f)),
-            Priority::Medium => ("中", rgb(0xfaad14)),
-            Priority::Low => ("低", rgb(0x52c41a)),
+            Priority::High => ("高", ClaudeLikeColors::danger()),
+            Priority::Medium => ("中", ClaudeLikeColors::accent()),
+            Priority::Low => ("低", rgb(0x5f8f63).into()),
         };
 
         let is_selected = self.priority == Some(priority.clone());
 
-        Button::new(format!("sidebar-priority-{:?}", priority))
-            .child(label)
-            .when(is_selected, |b| {
-                b.with_variant(gpui_component::button::ButtonVariant::Primary)
+        div()
+            .id(format!("sidebar-priority-{:?}", priority))
+            .px(px(9.0))
+            .py(px(4.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(if is_selected {
+                ClaudeLikeColors::stronger_separator()
+            } else {
+                ClaudeLikeColors::separator()
             })
-            .when(!is_selected, |b| b.text_color(color))
+            .bg(if is_selected {
+                ClaudeLikeColors::selected_surface()
+            } else {
+                ClaudeLikeColors::app_background()
+            })
+            .text_size(px(TaskTypography::META_SIZE))
+            .font_weight(TaskTypography::task_title_font_weight(is_selected))
+            .text_color(if is_selected {
+                ClaudeLikeColors::text_primary()
+            } else {
+                color
+            })
+            .cursor_pointer()
+            .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+            .child(label)
             .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 this.set_priority(priority.clone(), window, cx);
                 cx.stop_propagation();
             }))
+    }
+
+    fn render_sidebar_metadata_chip(
+        &self,
+        kind: MetadataChipKind,
+        label: &str,
+    ) -> impl IntoElement {
+        let text_color = match kind {
+            MetadataChipKind::Line => rgb(0x047857).into(),
+            MetadataChipKind::Tag => ClaudeLikeColors::text_secondary(),
+            MetadataChipKind::Person => rgb(0x6f6254).into(),
+        };
+
+        div()
+            .px(px(8.0))
+            .py(px(3.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(ClaudeLikeColors::separator())
+            .bg(ClaudeLikeColors::task_paper_background())
+            .text_size(px(TaskTypography::META_SIZE))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(text_color)
+            .child(label.to_string())
     }
 
     fn reload_attachments(&mut self, cx: &mut Context<Self>) {
@@ -1407,14 +1542,23 @@ impl Render for TaskDetailSidebar {
         let content_expanded = self.content_expanded;
         let title_display = self.task_title.clone().unwrap_or_default();
         let content_display = self.task_content.clone();
+        let is_overlay = self.presentation == TaskDetailPresentation::Overlay;
 
         div()
             .id("task-detail-sidebar")
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0))
+            .when(is_overlay, |el| {
+                el.absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+            })
+            .when(!is_overlay, |el| {
+                el.w(TASK_DETAIL_DOCKED_CONTAINER_WIDTH)
+                    .h_full()
+                    .border_l_1()
+                    .border_color(ClaudeLikeColors::separator())
+            })
             .flex()
             .flex_row()
             .justify_end()
@@ -1422,24 +1566,32 @@ impl Render for TaskDetailSidebar {
             .capture_action(cx.listener(|this, _action: &Paste, window, cx| {
                 this.paste_attachments(window, cx);
             }))
-            .child(
+            .when(is_overlay, |el| el.child(
                 div()
                     .id("task-detail-sidebar-dismiss-area")
                     .flex_1()
                     .h_full(),
-            )
+            ))
             .child(
                 div()
                     .id("task-detail-sidebar-pane")
-                    .w(px(360.0))
+                    .w(TASK_DETAIL_DOCKED_WIDTH)
                     .h_full()
                     .flex()
                     .flex_col()
                     .occlude()
                     .overflow_hidden()
-                    .border_l_1()
-                    .border_color(rgb(0xe8e8e8))
-                    .bg(rgb(0xffffff))
+                    .when(is_overlay, |pane| {
+                        pane.border_l_1()
+                            .border_color(ClaudeLikeColors::separator())
+                            .bg(ClaudeLikeColors::detail_background())
+                    })
+                    .when(!is_overlay, |pane| {
+                        pane.rounded_tr(px(18.0))
+                            .rounded_br(px(18.0))
+                            .bg(ClaudeLikeColors::detail_background())
+                    })
+                    .font_family(TaskTypography::SYSTEM_FONT_FAMILY)
                     .cursor_default()
                     .capture_action(cx.listener(|this, _action: &MoveUp, window, cx| {
                         let _ = this.handle_metadata_action("up", window, cx);
@@ -1461,9 +1613,9 @@ impl Render for TaskDetailSidebar {
                     }))
                     .child(
                         div()
-                            .p(px(12.0))
-                            .border_b_1()
-                            .border_color(rgb(0xe8e8e8))
+                            .px(px(20.0))
+                            .pt(px(20.0))
+                            .pb(px(12.0))
                             .cursor_default()
                             .child(
                                 h_flex()
@@ -1471,19 +1623,31 @@ impl Render for TaskDetailSidebar {
                                     .items_center()
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_size(px(15.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(ClaudeLikeColors::text_primary())
                                             .child("任务详情"),
                                     )
                                     .child(
-                                        Button::new("sidebar-close-detail").child("✕").on_click(
-                                            cx.listener(|this, _event, window, cx| {
+                                        div()
+                                            .id("sidebar-close-detail")
+                                            .w(px(28.0))
+                                            .h(px(28.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(8.0))
+                                            .text_size(px(18.0))
+                                            .text_color(ClaudeLikeColors::text_secondary())
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                                            .child("×")
+                                            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                                                 this.close(window, cx);
                                                 if let Some(ref callback) = this.on_close {
                                                     callback(cx);
                                                 }
-                                            }),
-                                        ),
+                                            })),
                                     ),
                             ),
                     )
@@ -1495,8 +1659,9 @@ impl Render for TaskDetailSidebar {
                             .cursor_default()
                             .child(
                                 v_flex()
-                                    .p(px(12.0))
-                                    .gap(px(12.0))
+                                    .px(px(20.0))
+                                    .py(px(16.0))
+                                    .gap(px(14.0))
                                     .overflow_y_scrollbar()
                                     // 标题输入
                                     .child(
@@ -1505,7 +1670,7 @@ impl Render for TaskDetailSidebar {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x666666))
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
                                                     .child("标题"),
                                             )
                                             .child(if self.editing_title {
@@ -1525,9 +1690,11 @@ impl Render for TaskDetailSidebar {
                                                             .child(
                                                                 Input::new(&input)
                                                                     .appearance(false)
-                                                                    .text_size(px(16.0))
+                                                                    .text_size(px(
+                                                                        TaskTypography::DETAIL_TITLE_SIZE,
+                                                                    ))
                                                                     .font_weight(
-                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                        gpui::FontWeight::MEDIUM,
                                                                     ),
                                                             )
                                                             .when(
@@ -1552,7 +1719,9 @@ impl Render for TaskDetailSidebar {
                                                     .py(px(4.0))
                                                     .rounded(px(8.0))
                                                     .cursor_text()
-                                                    .hover(|style| style.bg(rgb(0xfafafa)))
+                                                    .hover(|style| {
+                                                        style.bg(ClaudeLikeColors::hover_surface())
+                                                    })
                                                     .on_mouse_down(
                                                         gpui::MouseButton::Left,
                                                         cx.listener(
@@ -1569,8 +1738,8 @@ impl Render for TaskDetailSidebar {
                                                             &title_display
                                                         },
                                                         TokenTextStyle::new(
-                                                            rgb(0x262626),
-                                                            gpui::FontWeight::SEMIBOLD,
+                                                            rgb(0x242421),
+                                                            gpui::FontWeight::MEDIUM,
                                                         ),
                                                     ))
                                                     .into_any_element()
@@ -1587,7 +1756,9 @@ impl Render for TaskDetailSidebar {
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0x666666))
+                                                            .text_color(
+                                                                ClaudeLikeColors::text_tertiary(),
+                                                            )
                                                             .child("内容/详情"),
                                                     )
                                                     .when({
@@ -1604,7 +1775,7 @@ impl Render for TaskDetailSidebar {
                                                         el.child(
                                                             Button::new("toggle-content-expand")
                                                                 .child(if content_expanded { "收起" } else { "展开" })
-                                                                .text_color(rgb(0x1890ff))
+                                                                .text_color(ClaudeLikeColors::accent())
                                                                 .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                                                                     this.toggle_content_expanded(window, cx);
                                                                     cx.stop_propagation();
@@ -1644,7 +1815,7 @@ impl Render for TaskDetailSidebar {
                                                             .child(
                                                                 Input::new(&input)
                                                                     .appearance(false)
-                                                                    .text_size(px(14.0))
+                                                                    .text_size(px(13.0))
                                                                     .when(needs_scroll || is_expanded, |i| i.h_full()),
                                                             )
                                                             .when(
@@ -1672,7 +1843,9 @@ impl Render for TaskDetailSidebar {
                                                     .py(px(4.0))
                                                     .rounded(px(8.0))
                                                     .cursor_text()
-                                                    .hover(|style| style.bg(rgb(0xfafafa)))
+                                                    .hover(|style| {
+                                                        style.bg(ClaudeLikeColors::hover_surface())
+                                                    })
                                                     .on_mouse_down(
                                                         gpui::MouseButton::Left,
                                                         cx.listener(
@@ -1697,8 +1870,10 @@ impl Render for TaskDetailSidebar {
                                                     .child(
                                                         div()
                                                             .text_sm()
-                                                            .text_color(rgb(0x595959))
-                                                            .line_height(relative(1.45))
+                                                            .text_color(
+                                                                ClaudeLikeColors::text_secondary(),
+                                                            )
+                                                            .line_height(relative(1.55))
                                                             .child(render_tokenized_text(
                                                                 if content_display.is_empty() {
                                                                     "\u{00a0}"
@@ -1706,7 +1881,7 @@ impl Render for TaskDetailSidebar {
                                                                     &content_display
                                                                 },
                                                                 TokenTextStyle::new(
-                                                                    rgb(0x595959),
+                                                                    rgb(0x555550),
                                                                     FontWeight::NORMAL,
                                                                 ),
                                                             )),
@@ -1717,10 +1892,13 @@ impl Render for TaskDetailSidebar {
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
+                                            .pt(px(12.0))
+                                            .border_t_1()
+                                            .border_color(ClaudeLikeColors::separator())
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x666666))
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
                                                     .child("状态"),
                                             )
                                             .child(
@@ -1754,7 +1932,7 @@ impl Render for TaskDetailSidebar {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x666666))
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
                                                     .child("优先级"),
                                             )
                                             .child(
@@ -1782,38 +1960,77 @@ impl Render for TaskDetailSidebar {
                                     .child(
                                         v_flex()
                                             .gap(px(6.0))
+                                            .pt(px(12.0))
+                                            .border_t_1()
+                                            .border_color(ClaudeLikeColors::separator())
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x666666))
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
                                                     .child("截止日期"),
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(px(6.0))
+                                                    .gap(px(5.0))
                                                     .items_center()
                                                     .when_some(dp_clone.clone(), |el, dp| {
                                                         el.child(
-                                                            div().flex_1().child(
-                                                                DatePicker::new(&dp)
-                                                                    .cleanable(true)
-                                                                    .number_of_months(1),
-                                                            ),
+                                                            div()
+                                                                .flex_1()
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    DatePicker::new(&dp)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .placeholder("日期")
+                                                                        .cleanable(false)
+                                                                        .number_of_months(1),
+                                                                ),
                                                         )
                                                     })
                                                     .when_some(ti_clone.clone(), |el, ti| {
                                                         el.child(
                                                             div()
-                                                                .w(px(70.0))
-                                                                .child(Input::new(&ti)),
+                                                                .w(px(54.0))
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    Input::new(&ti)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .focus_bordered(false)
+                                                                        .text_size(px(12.0)),
+                                                                ),
                                                         )
                                                     })
                                                     .child(
-                                                        Button::new("clear-due-date")
+                                                        div()
+                                                            .id("clear-due-date")
+                                                            .px(px(5.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(7.0))
+                                                            .text_size(px(12.0))
                                                             .child("清除")
-                                                            .text_color(rgb(0x999999))
+                                                            .text_color(ClaudeLikeColors::text_tertiary())
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(ClaudeLikeColors::hover_surface())
+                                                            })
                                                             .on_click(cx.listener(
-                                                                |this, _event, window, cx| {
+                                                                |this, _event: &ClickEvent, window, cx| {
                                                                     this.clear_due_date(window, cx);
                                                                     cx.stop_propagation();
                                                                 },
@@ -1828,35 +2045,71 @@ impl Render for TaskDetailSidebar {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x666666))
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
                                                     .child("提醒时间"),
                                             )
                                             .child(
                                                 h_flex()
-                                                    .gap(px(6.0))
+                                                    .gap(px(5.0))
                                                     .items_center()
                                                     .when_some(rdp_clone.clone(), |el, rdp| {
                                                         el.child(
-                                                            div().flex_1().child(
-                                                                DatePicker::new(&rdp)
-                                                                    .cleanable(true)
-                                                                    .number_of_months(1),
-                                                            ),
+                                                            div()
+                                                                .flex_1()
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    DatePicker::new(&rdp)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .placeholder("日期")
+                                                                        .cleanable(false)
+                                                                        .number_of_months(1),
+                                                                ),
                                                         )
                                                     })
                                                     .when_some(rti_clone.clone(), |el, rti| {
                                                         el.child(
                                                             div()
-                                                                .w(px(70.0))
-                                                                .child(Input::new(&rti)),
+                                                                .w(px(54.0))
+                                                                .h(px(28.0))
+                                                                .px(px(8.0))
+                                                                .rounded(px(999.0))
+                                                                .border_1()
+                                                                .border_color(
+                                                                    ClaudeLikeColors::separator(),
+                                                                )
+                                                                .bg(ClaudeLikeColors::task_paper_background())
+                                                                .child(
+                                                                    Input::new(&rti)
+                                                                        .xsmall()
+                                                                        .appearance(false)
+                                                                        .focus_bordered(false)
+                                                                        .text_size(px(12.0)),
+                                                                ),
                                                         )
                                                     })
                                                     .child(
-                                                        Button::new("clear-reminder-time")
+                                                        div()
+                                                            .id("clear-reminder-time")
+                                                            .px(px(5.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(7.0))
+                                                            .text_size(px(12.0))
                                                             .child("清除")
-                                                            .text_color(rgb(0x999999))
+                                                            .text_color(ClaudeLikeColors::text_tertiary())
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(ClaudeLikeColors::hover_surface())
+                                                            })
                                                             .on_click(cx.listener(
-                                                                |this, _event, window, cx| {
+                                                                |this, _event: &ClickEvent, window, cx| {
                                                                     this.clear_reminder_time(
                                                                         window, cx,
                                                                     );
@@ -1870,10 +2123,13 @@ impl Render for TaskDetailSidebar {
                                         el.child(
                                             v_flex()
                                                 .gap(px(6.0))
+                                                .pt(px(12.0))
+                                                .border_t_1()
+                                                .border_color(ClaudeLikeColors::separator())
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(0x666666))
+                                                        .text_color(ClaudeLikeColors::text_tertiary())
                                                         .child("取消原因"),
                                                 )
                                                 .child(
@@ -1884,6 +2140,26 @@ impl Render for TaskDetailSidebar {
                                                 ),
                                         )
                                     })
+                                    .when_some(self.line.as_ref(), |el, line| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(ClaudeLikeColors::text_tertiary())
+                                                        .child("相关事务"),
+                                                )
+                                                .child(
+                                                    h_flex().gap(px(6.0)).flex_wrap().child(
+                                                        self.render_sidebar_metadata_chip(
+                                                            MetadataChipKind::Line,
+                                                            &format_line_ref(line),
+                                                        ),
+                                                    ),
+                                                ),
+                                        )
+                                    })
                                     .when(!self.tags.is_empty(), |el| {
                                         el.child(
                                             v_flex()
@@ -1891,7 +2167,7 @@ impl Render for TaskDetailSidebar {
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(0x666666))
+                                                        .text_color(ClaudeLikeColors::text_tertiary())
                                                         .child("标签"),
                                                 )
                                                 .child(h_flex().gap(px(6.0)).flex_wrap().children(
@@ -1899,7 +2175,7 @@ impl Render for TaskDetailSidebar {
                                                         |(idx, tag)| {
                                                             div()
                                                                 .id(("sidebar-tag", idx))
-                                                                .child(render_metadata_chip(
+                                                                .child(self.render_sidebar_metadata_chip(
                                                                     MetadataChipKind::Tag,
                                                                     tag,
                                                                 ))
@@ -1915,7 +2191,7 @@ impl Render for TaskDetailSidebar {
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(0x666666))
+                                                        .text_color(ClaudeLikeColors::text_tertiary())
                                                         .child("相关人物"),
                                                 )
                                                 .child(h_flex().gap(px(6.0)).flex_wrap().children(
@@ -1923,7 +2199,7 @@ impl Render for TaskDetailSidebar {
                                                         |(idx, person)| {
                                                             div()
                                                                 .id(("sidebar-person", idx))
-                                                                .child(render_metadata_chip(
+                                                                .child(self.render_sidebar_metadata_chip(
                                                                     MetadataChipKind::Person,
                                                                     person,
                                                                 ))
@@ -1935,6 +2211,9 @@ impl Render for TaskDetailSidebar {
                                     .child(
                                         v_flex()
                                             .gap(px(8.0))
+                                            .pt(px(12.0))
+                                            .border_t_1()
+                                            .border_color(ClaudeLikeColors::separator())
                                             .child(
                                                 h_flex()
                                                     .justify_between()
@@ -1942,14 +2221,30 @@ impl Render for TaskDetailSidebar {
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0x666666))
+                                                            .text_color(
+                                                                ClaudeLikeColors::text_tertiary(),
+                                                            )
                                                             .child("附件"),
                                                     )
                                                     .child(
-                                                        Button::new("task-sidebar-add-attachment")
+                                                        div()
+                                                            .id("task-sidebar-add-attachment")
+                                                            .px(px(8.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(999.0))
+                                                            .border_1()
+                                                            .border_color(ClaudeLikeColors::separator())
+                                                            .bg(ClaudeLikeColors::task_paper_background())
+                                                            .text_size(px(TaskTypography::META_SIZE))
+                                                            .font_weight(FontWeight::NORMAL)
+                                                            .text_color(ClaudeLikeColors::text_secondary())
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(ClaudeLikeColors::hover_surface())
+                                                            })
                                                             .child("添加图片")
                                                             .on_click(cx.listener(
-                                                                |this, _event, window, cx| {
+                                                                |this, _event: &ClickEvent, window, cx| {
                                                                     this.import_attachments(window, cx);
                                                                     cx.stop_propagation();
                                                                 },
@@ -1995,45 +2290,83 @@ impl Render for TaskDetailSidebar {
                     )
                     .child(
                         div()
-                            .p(px(12.0))
-                            .border_t_1()
-                            .border_color(rgb(0xe8e8e8))
+                            .px(px(18.0))
+                            .py(px(13.0))
                             .cursor_default()
                             .child(
                                 h_flex()
-                                    .gap(px(8.0))
+                                    .justify_between()
+                                    .items_center()
                                     .child(
-                                        div().flex_1().child(
-                                            Button::new("task-sidebar-delete-detail")
-                                                .w_full()
-                                                .child("删除")
-                                                .text_color(rgb(0xff4d4f))
-                                                .on_click(cx.listener(
-                                                    |this, _event, _window, cx| {
-                                                        if let Some(ref task_id) =
-                                                            this.current_task_id
-                                                        {
-                                                            if let Some(ref callback) =
-                                                                this.on_delete
-                                                            {
-                                                                callback(task_id.clone(), cx);
-                                                            }
+                                        div()
+                                            .id("task-sidebar-delete-detail")
+                                            .px(px(6.0))
+                                            .py(px(5.0))
+                                            .rounded(px(7.0))
+                                            .text_size(px(TaskTypography::META_SIZE))
+                                            .font_weight(FontWeight::NORMAL)
+                                            .text_color(ClaudeLikeColors::danger())
+                                            .cursor_pointer()
+                                            .hover(|style| {
+                                                style.bg(ClaudeLikeColors::hover_surface())
+                                            })
+                                            .child("删除")
+                                            .on_click(cx.listener(
+                                                |this, _event: &ClickEvent, _window, cx| {
+                                                    if let Some(ref task_id) = this.current_task_id {
+                                                        if let Some(ref callback) = this.on_delete {
+                                                            callback(task_id.clone(), cx);
                                                         }
-                                                    },
-                                                )),
-                                        ),
+                                                    }
+                                                },
+                                            )),
+                                    )
+                                    .when(
+                                        matches!(self.status, Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)),
+                                        |el| {
+                                            el.child(
+                                                div().flex_1().child(
+                                                    Button::new("task-sidebar-reopen-detail")
+                                                        .w_full()
+                                                        .child("重新打开")
+                                                        .on_click(cx.listener(
+                                                            |this, _event, _window, cx| {
+                                                                if let Some(ref task_id) =
+                                                                    this.current_task_id
+                                                                {
+                                                                    if let Some(ref callback) =
+                                                                        this.on_reopen
+                                                                    {
+                                                                        callback(task_id.clone(), cx);
+                                                                    }
+                                                                }
+                                                            },
+                                                        )),
+                                                ),
+                                            )
+                                        },
                                     )
                                     .child(
-                                        div().flex_1().child(
-                                            Button::new("sidebar-save-detail")
-                                                .w_full()
-                                                .child("保存修改")
-                                                .on_click(cx.listener(
-                                                    |this, _event, window, cx| {
-                                                        this.save_changes(window, cx);
-                                                    },
-                                                )),
-                                        ),
+                                        div()
+                                            .id("sidebar-save-detail")
+                                            .px(px(18.0))
+                                            .py(px(7.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(999.0))
+                                            .bg(ClaudeLikeColors::text_primary())
+                                            .text_size(px(TaskTypography::META_SIZE))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(ClaudeLikeColors::app_background())
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x3a3935)))
+                                            .child("保存")
+                                            .on_click(cx.listener(
+                                                |this, _event: &ClickEvent, window, cx| {
+                                                    this.save_changes(window, cx);
+                                                },
+                                            )),
                                     ),
                             ),
                     ),
@@ -2042,5 +2375,12 @@ impl Render for TaskDetailSidebar {
                 el.child(overlay)
             })
             .into_any_element()
+    }
+}
+
+fn format_line_ref(line: &LineRef) -> String {
+    match line.project.as_deref() {
+        Some(project) => format!("~{project}/{}", line.name),
+        None => format!("~{}", line.name),
     }
 }

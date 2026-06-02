@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::models::{Attachment, AttachmentStatus, Record};
+use crate::models::{Attachment, AttachmentStatus, LineRef, Record};
 use crate::platform::{open_saved_attachment, pick_image_files, ParentWindowHint};
 use crate::store::Store;
 use crate::ui::metadata_autocomplete::{
@@ -37,6 +37,7 @@ pub struct RecordDetailSidebar {
     record_content: String,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
+    line: Option<LineRef>,
     tags: Vec<String>,
     persons: Vec<String>,
     inline_tags: Vec<String>,
@@ -67,6 +68,7 @@ pub struct SavePayload {
     pub content: String,
     pub tags: Vec<String>,
     pub persons: Vec<String>,
+    pub line: Option<LineRef>,
 }
 
 /// 侧边栏显示状态
@@ -85,6 +87,7 @@ impl RecordDetailSidebar {
             record_content: String::new(),
             created_at: None,
             updated_at: None,
+            line: None,
             tags: Vec::new(),
             persons: Vec::new(),
             inline_tags: Vec::new(),
@@ -133,8 +136,10 @@ impl RecordDetailSidebar {
     pub fn show_record(&mut self, record: &Record, window: &mut Window, cx: &mut Context<Self>) {
         let record_id = record.id.to_string();
 
-        // 关键：如果已经在显示同一个记录，什么都不做
+        // 如果已经在显示同一个记录，只刷新展示数据，不重建输入和附件状态。
         if self.current_record_id.as_ref() == Some(&record_id) {
+            self.refresh_record_view_state(record);
+            cx.notify();
             return;
         }
 
@@ -144,11 +149,7 @@ impl RecordDetailSidebar {
         self.record_content = record.content.clone();
         self.created_at = Some(record.created_at);
         self.updated_at = Some(record.updated_at);
-        self.tags = record.tags.clone();
-        self.persons = record.persons.clone();
-        let inline_fields = parsing::parse_record_fields(record.title.as_deref(), &record.content);
-        self.inline_tags = inline_fields.tags;
-        self.inline_persons = inline_fields.people;
+        self.refresh_record_view_state(record);
         self.editing_title = false;
         self.editing_content = false;
         self.attachments.clear();
@@ -173,6 +174,7 @@ impl RecordDetailSidebar {
                 window,
                 |this, _state, event: &InputEvent, window, cx| match event {
                     InputEvent::Change | InputEvent::Focus => {
+                        this.sync_inline_metadata_from_inputs(cx);
                         this.sync_title_metadata_autocomplete(cx);
                     }
                     InputEvent::Blur => {
@@ -203,6 +205,7 @@ impl RecordDetailSidebar {
                 window,
                 |this, _state, event: &InputEvent, window, cx| match event {
                     InputEvent::Change | InputEvent::Focus => {
+                        this.sync_inline_metadata_from_inputs(cx);
                         this.sync_content_metadata_autocomplete(cx);
                     }
                     InputEvent::Blur => {
@@ -223,6 +226,46 @@ impl RecordDetailSidebar {
         cx.notify();
     }
 
+    fn refresh_record_view_state(&mut self, record: &Record) {
+        self.record_title = record.title.clone();
+        self.record_content = record.content.clone();
+        self.created_at = Some(record.created_at);
+        self.updated_at = Some(record.updated_at);
+        let inline_fields = parsing::parse_record_fields(record.title.as_deref(), &record.content);
+        self.tags = parsing::merge_inline_metadata(&record.tags, &inline_fields.tags);
+        self.persons = parsing::merge_inline_metadata(&record.persons, &inline_fields.people);
+        self.line = inline_fields.line.clone();
+        self.inline_tags = inline_fields.tags;
+        self.inline_persons = inline_fields.people;
+    }
+
+    fn sync_inline_metadata_from_inputs(&mut self, cx: &mut Context<Self>) {
+        let raw_title = self
+            .title_input
+            .as_ref()
+            .map(|input| {
+                let value = input.read(cx).value().to_string();
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })
+            .unwrap_or_else(|| self.record_title.clone());
+        let raw_content = self
+            .content_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_else(|| self.record_content.clone());
+        let parsed_fields = parsing::parse_record_fields(raw_title.as_deref(), &raw_content);
+        self.tags = parsing::reconcile_metadata(&self.tags, &self.inline_tags, &parsed_fields.tags);
+        self.persons =
+            parsing::reconcile_metadata(&self.persons, &self.inline_persons, &parsed_fields.people);
+        self.line = parsed_fields.line.clone();
+        self.inline_tags = parsed_fields.tags;
+        self.inline_persons = parsed_fields.people;
+    }
+
     /// 关闭侧边栏
     pub fn close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(cx);
@@ -230,6 +273,7 @@ impl RecordDetailSidebar {
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.current_record_id = None;
+        self.line = None;
         self.attachments.clear();
         self.active_attachment_preview = None;
         self.attachments_loading = false;
@@ -304,8 +348,13 @@ impl RecordDetailSidebar {
         cx.spawn(async move |view, cx| {
             let tags = store.get_tag_catalog().await.unwrap_or_default();
             let persons = store.get_person_catalog().await.unwrap_or_default();
+            let lines = store.get_line_catalog().await.unwrap_or_default();
             let _ = view.update(cx, |this, cx| {
-                let catalog = MetadataCatalog { tags, persons };
+                let catalog = MetadataCatalog {
+                    tags,
+                    persons,
+                    lines,
+                };
                 this.title_metadata_autocomplete
                     .set_catalog(catalog.clone());
                 this.content_metadata_autocomplete.set_catalog(catalog);
@@ -613,6 +662,7 @@ impl RecordDetailSidebar {
             self.record_content = parsed_fields.content.clone();
             self.tags = next_tags.clone();
             self.persons = next_persons.clone();
+            self.line = parsed_fields.line.clone();
             self.inline_tags = parsed_fields.tags.clone();
             self.inline_persons = parsed_fields.people.clone();
             self.editing_title = false;
@@ -624,6 +674,7 @@ impl RecordDetailSidebar {
                 content: parsed_fields.content,
                 tags: next_tags,
                 persons: next_persons,
+                line: parsed_fields.line,
             };
 
             if let Some(ref callback) = self.on_save {
@@ -1459,6 +1510,26 @@ impl Render for RecordDetailSidebar {
                                                 ),
                                             ),
                                     )
+                                    .when_some(self.line.as_ref(), |el, line| {
+                                        el.child(
+                                            v_flex()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x666666))
+                                                        .child("相关事务"),
+                                                )
+                                                .child(
+                                                    h_flex().gap(px(6.0)).flex_wrap().child(
+                                                        render_metadata_chip(
+                                                            MetadataChipKind::Line,
+                                                            &format_line_ref(line),
+                                                        ),
+                                                    ),
+                                                ),
+                                        )
+                                    })
                                     // 标签
                                     .when(!self.tags.is_empty(), |el| {
                                         el.child(
@@ -1619,5 +1690,12 @@ impl Render for RecordDetailSidebar {
                 el.child(overlay)
             })
             .into_any_element()
+    }
+}
+
+fn format_line_ref(line: &LineRef) -> String {
+    match line.project.as_deref() {
+        Some(project) => format!("~{project}/{}", line.name),
+        None => format!("~{}", line.name),
     }
 }

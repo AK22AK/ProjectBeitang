@@ -15,6 +15,7 @@ const MAX_VISIBLE_MATCHES: usize = 6;
 pub enum MetadataKind {
     Tag,
     Person,
+    Line,
 }
 
 impl MetadataKind {
@@ -22,6 +23,7 @@ impl MetadataKind {
         match self {
             Self::Tag => '#',
             Self::Person => '@',
+            Self::Line => '~',
         }
     }
 }
@@ -43,6 +45,7 @@ pub struct MetadataCompletionEdit {
 pub struct MetadataCatalog {
     pub tags: Vec<MetadataCatalogEntry>,
     pub persons: Vec<MetadataCatalogEntry>,
+    pub lines: Vec<MetadataCatalogEntry>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +183,12 @@ impl MetadataAutocompleteState {
         }
     }
 
+    pub fn upsert_lines(&mut self, lines: &[String]) {
+        for name in lines {
+            upsert_entry(&mut self.catalog.lines, name);
+        }
+    }
+
     fn apply_candidate(&self, text: &str, name: &str) -> Option<MetadataCompletionEdit> {
         let query = self.active_query.as_ref()?;
         Some(apply_metadata_completion(
@@ -194,6 +203,7 @@ impl MetadataAutocompleteState {
         match kind {
             MetadataKind::Tag => &self.catalog.tags,
             MetadataKind::Person => &self.catalog.persons,
+            MetadataKind::Line => &self.catalog.lines,
         }
     }
 }
@@ -228,7 +238,7 @@ pub fn detect_active_metadata_query(text: &str, cursor: usize) -> Option<ActiveM
         if ch.is_whitespace() {
             break;
         }
-        if ch == '#' || ch == '@' {
+        if ch == '#' || ch == '@' || ch == '~' || ch == '～' {
             marker_start = Some(idx);
             break;
         }
@@ -248,6 +258,7 @@ pub fn detect_active_metadata_query(text: &str, cursor: usize) -> Option<ActiveM
     let kind = match marker {
         '#' => MetadataKind::Tag,
         '@' => MetadataKind::Person,
+        '~' | '～' => MetadataKind::Line,
         _ => return None,
     };
 
@@ -260,7 +271,7 @@ pub fn detect_active_metadata_query(text: &str, cursor: usize) -> Option<ActiveM
     let query = &text[token_start..cursor];
     if query
         .chars()
-        .any(|ch| ch.is_whitespace() || ch == '#' || ch == '@')
+        .any(|ch| ch.is_whitespace() || ch == '#' || ch == '@' || ch == '~' || ch == '～')
     {
         return None;
     }
@@ -439,7 +450,7 @@ pub fn autocomplete_item(
 
 fn find_token_end(text: &str, start: usize) -> usize {
     for (rel_idx, ch) in text[start..].char_indices() {
-        if ch.is_whitespace() || ch == '#' || ch == '@' {
+        if ch.is_whitespace() || ch == '#' || ch == '@' || ch == '~' || ch == '～' {
             return start + rel_idx;
         }
     }
@@ -456,7 +467,7 @@ fn clip_to_char_boundary(text: &str, cursor: usize) -> usize {
 }
 
 fn disallow_inline_marker_after(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '#' || ch == '@'
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '#' || ch == '@' || ch == '~' || ch == '～'
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -596,10 +607,36 @@ mod tests {
                 usage_count: 3,
             }],
             persons: Vec::new(),
+            lines: Vec::new(),
         });
         state.sync("今天 #开", "今天 #开".len());
 
         let edit = state.apply_selected("今天 #开").unwrap();
         assert_eq!(edit.text, "今天 #开发 ");
+    }
+
+    #[test]
+    fn detect_query_for_line_marker() {
+        let query =
+            detect_active_metadata_query("推进 ~Robinne/事务", "推进 ~Robinne/事务".len()).unwrap();
+        assert_eq!(query.kind, MetadataKind::Line);
+        assert_eq!(query.query, "Robinne/事务");
+    }
+
+    #[test]
+    fn autocomplete_state_applies_line_candidate() {
+        let mut state = MetadataAutocompleteState::default();
+        state.set_catalog(MetadataCatalog {
+            tags: Vec::new(),
+            persons: Vec::new(),
+            lines: vec![MetadataCatalogEntry {
+                name: "Robinne/事务".to_string(),
+                usage_count: 2,
+            }],
+        });
+        state.sync("推进 ~Rob", "推进 ~Rob".len());
+
+        let edit = state.apply_selected("推进 ~Rob").unwrap();
+        assert_eq!(edit.text, "推进 ~Robinne/事务 ");
     }
 }

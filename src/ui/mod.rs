@@ -1,3 +1,4 @@
+pub mod ai_panel;
 pub mod attachment_draft;
 pub mod dashboard;
 pub mod data_management;
@@ -9,6 +10,7 @@ pub mod quick_add_context;
 pub mod record_detail_sidebar;
 pub mod search;
 pub mod sidebar;
+pub mod style;
 pub mod task_detail_sidebar;
 pub mod task_panel;
 pub mod timeline;

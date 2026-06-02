@@ -2,15 +2,14 @@ use crate::models::{Priority, Record, TaskStatus};
 use crate::store::Store;
 use crate::ui::parsing;
 use crate::ui::sidebar::{main_sidebar_layout_mode, main_sidebar_width};
-use crate::ui::task_detail_sidebar::TaskDetailSidebar;
-use crate::ui::tokenized_text::{
-    render_metadata_chip, render_tokenized_text, MetadataChipKind, TokenTextStyle,
-};
+use crate::ui::style::{ClaudeLikeColors, TaskTypography};
+use crate::ui::task_detail_sidebar::{TaskDetailPresentation, TaskDetailSidebar};
+use crate::ui::tokenized_text::{render_tokenized_text, MetadataChipKind, TokenTextStyle};
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use gpui::prelude::FluentBuilder as _;
 use gpui::StatefulInteractiveElement as _;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::Button;
 use gpui_component::date_picker::{DatePicker, DatePickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -23,6 +22,8 @@ actions!(
     [
         EditTaskAction,
         DeleteTaskAction,
+        ToggleCompleteTaskAction,
+        CancelTaskAction,
         SetReminderAction,
         SetReminderTodayAction,
         SetReminderTomorrowAction,
@@ -30,7 +31,7 @@ actions!(
     ]
 );
 
-const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(360.0);
+const TASK_DETAIL_SIDEBAR_WIDTH: Pixels = px(340.0);
 const TASK_PANEL_HORIZONTAL_PADDING: Pixels = px(32.0);
 const MATRIX_COLUMN_GAP: Pixels = px(8.0);
 const MIN_VISIBLE_QUADRANT_WIDTH: Pixels = px(280.0);
@@ -237,8 +238,10 @@ impl TaskPanel {
             available_tags: Vec::new(),
             tag_filter_mode: TagFilterMode::And,
             pending_deletion: None,
-            task_detail_sidebar: cx
-                .new(|cx| TaskDetailSidebar::new(sidebar_store.clone(), window, cx)),
+            task_detail_sidebar: cx.new(|cx| {
+                TaskDetailSidebar::new(sidebar_store.clone(), window, cx)
+                    .with_presentation(TaskDetailPresentation::Docked)
+            }),
         };
 
         let handle = cx.entity().clone();
@@ -265,6 +268,16 @@ impl TaskPanel {
                 handle.update(cx, |panel, cx| {
                     panel.handle_sidebar_close(cx);
                 });
+            });
+        });
+        let handle = cx.entity().clone();
+        panel.task_detail_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.on_reopen(move |task_id, cx| {
+                if let Ok(task_id) = Uuid::parse_str(&task_id) {
+                    handle.update(cx, |panel, cx| {
+                        panel.handle_reopen_task(task_id, cx);
+                    });
+                }
             });
         });
 
@@ -324,10 +337,11 @@ impl TaskPanel {
             task.sync_task_lifecycle_fields(previous_status, now);
 
             let updated_task = task.clone();
+            let line_ref = payload.line.clone();
             let store = self.store.clone();
             let sidebar = self.task_detail_sidebar.clone();
-            cx.spawn(
-                async move |view, cx| match store.update_record(updated_task).await {
+            cx.spawn(async move |view, cx| {
+                match store.update_record_with_line(updated_task, line_ref).await {
                     Ok(_) => {
                         view.update(cx, |panel, cx| {
                             panel.load_available_tags(cx);
@@ -340,8 +354,8 @@ impl TaskPanel {
                     Err(e) => {
                         eprintln!("[TaskPanel] Failed to update task: {}", e);
                     }
-                },
-            )
+                }
+            })
             .detach();
 
             cx.notify();
@@ -366,7 +380,7 @@ impl TaskPanel {
         self.tasks
             .iter()
             .filter(|t| self.priority_filter.matches(t.priority.clone()))
-            .filter(|t| t.completed_at.is_none() || self.show_completed)
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)) || self.show_completed)
             .filter(|t| self.matches_focus_preset(t))
             .filter(|t| self.matches_tag_filter(t))
             .cloned()
@@ -376,7 +390,7 @@ impl TaskPanel {
     fn matches_focus_preset(&self, task: &Record) -> bool {
         let today = Local::now().date_naive();
         let tomorrow = today + Duration::days(1);
-        let is_open = task.completed_at.is_none();
+        let is_open = !matches!(task.status, Some(TaskStatus::Done));
         let due_local = task
             .due_date
             .map(|dt| dt.with_timezone(&Local).date_naive());
@@ -422,7 +436,7 @@ impl TaskPanel {
         for task in self
             .get_filtered_tasks()
             .iter()
-            .filter(|t| t.completed_at.is_none())
+            .filter(|t| !matches!(t.status, Some(TaskStatus::Done)))
         {
             let quadrant = Self::categorize_quadrant(task);
             groups.entry(quadrant).or_default().push(task.clone());
@@ -821,7 +835,7 @@ impl TaskPanel {
                     "[TaskPanel] Fetching tasks from store... (attempt {})",
                     retries + 1
                 );
-                match store.get_tasks(false).await {
+                match store.get_tasks().await {
                     Ok(tasks) => break tasks,
                     Err(e) => {
                         eprintln!("[TaskPanel] Failed to load tasks: {}, retrying...", e);
@@ -895,6 +909,7 @@ impl TaskPanel {
             if task.completed_at.is_some() {
                 task.completed_at = None;
                 task.status = Some(TaskStatus::Todo);
+                task.notified_at = None;
             } else {
                 task.completed_at = Some(chrono::Utc::now());
                 task.status = Some(TaskStatus::Done);
@@ -918,6 +933,23 @@ impl TaskPanel {
             )
             .detach();
         }
+    }
+
+    fn handle_reopen_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(
+            async move |view, cx| match store.reopen_task(task_id).await {
+                Ok(_) => {
+                    view.update(cx, |panel, cx| {
+                        panel.load_tasks(cx);
+                        panel.handle_sidebar_close(cx);
+                    })
+                    .ok();
+                }
+                Err(e) => eprintln!("[TaskPanel] Failed to reopen task: {}", e),
+            },
+        )
+        .detach();
     }
 
     fn request_delete_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
@@ -990,7 +1022,7 @@ impl TaskPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(0xf5f5f5))
+                .bg(rgba(0x00000052))
                 .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
                     cx.stop_propagation();
                 }))
@@ -1000,9 +1032,9 @@ impl TaskPanel {
                         .max_w(px(360.0))
                         .p(px(20.0))
                         .rounded(px(12.0))
-                        .bg(rgb(0xffffff))
+                        .bg(ClaudeLikeColors::app_background())
                         .border_1()
-                        .border_color(rgb(0xe8e8e8))
+                        .border_color(ClaudeLikeColors::separator())
                         .shadow_lg()
                         .flex()
                         .flex_col()
@@ -1010,20 +1042,21 @@ impl TaskPanel {
                         .cursor_default()
                         .child(
                             div()
-                                .text_base()
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(TaskTypography::DETAIL_TITLE_SIZE))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ClaudeLikeColors::text_primary())
                                 .child(format!("删除{}", record_label)),
                         )
                         .child(
                             div()
-                                .text_sm()
-                                .text_color(rgb(0x666666))
+                                .text_size(px(13.0))
+                                .text_color(ClaudeLikeColors::text_secondary())
                                 .child(format!("确认删除“{}”？删除后无法恢复。", title)),
                         )
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(rgb(0x999999))
+                                .text_size(px(TaskTypography::META_SIZE))
+                                .text_color(ClaudeLikeColors::text_tertiary())
                                 .child("按 Enter 确认，按 Esc 取消"),
                         )
                         .child(
@@ -1040,7 +1073,7 @@ impl TaskPanel {
                                 .child(
                                     Button::new("task-delete-confirm-submit")
                                         .child("确认删除")
-                                        .text_color(rgb(0xff4d4f))
+                                        .text_color(ClaudeLikeColors::danger())
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.confirm_delete_task(cx);
                                         })),
@@ -1052,20 +1085,30 @@ impl TaskPanel {
     }
 
     fn render_custom_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (_task_id, position) = match (self.context_menu_task_id, self.context_menu_position) {
+        let (task_id, position) = match (self.context_menu_task_id, self.context_menu_position) {
             (Some(id), Some(pos)) => (id, pos),
             _ => return None,
         };
+        let task_status = self
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.status.clone());
+        let is_done_or_cancelled = matches!(
+            task_status,
+            Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+        );
+        let is_cancelled = matches!(task_status, Some(TaskStatus::Cancelled));
 
         Some(
             deferred(
                 anchored().position(position).child(
                     v_flex()
                         .id("custom-context-menu")
-                        .bg(rgb(0xffffff))
+                        .bg(ClaudeLikeColors::app_background())
                         .border_1()
-                        .border_color(rgb(0xe0e0e0))
-                        .rounded(px(8.0))
+                        .border_color(ClaudeLikeColors::separator())
+                        .rounded(px(12.0))
                         .shadow_md()
                         .min_w(px(200.0))
                         .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
@@ -1079,7 +1122,7 @@ impl TaskPanel {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0xaaaaaa))
+                                        .text_color(ClaudeLikeColors::text_tertiary())
                                         .mb_1()
                                         .child("日期"),
                                 )
@@ -1108,7 +1151,7 @@ impl TaskPanel {
                                         )),
                                 ),
                         )
-                        .child(div().h_px().bg(rgb(0xeeeeee)))
+                        .child(div().h_px().bg(ClaudeLikeColors::separator()))
                         .child(self.render_menu_item(
                             "设置提醒",
                             IconName::Bell,
@@ -1121,7 +1164,31 @@ impl TaskPanel {
                             EditTaskAction,
                             cx,
                         ))
-                        .child(div().h_px().bg(rgb(0xeeeeee)))
+                        .child(div().h_px().bg(ClaudeLikeColors::separator()))
+                        .child(if is_done_or_cancelled {
+                            self.render_menu_item(
+                                "重新打开",
+                                IconName::Undo,
+                                ToggleCompleteTaskAction,
+                                cx,
+                            )
+                        } else {
+                            self.render_menu_item(
+                                "标记完成",
+                                IconName::Check,
+                                ToggleCompleteTaskAction,
+                                cx,
+                            )
+                        })
+                        .when(!is_cancelled && !is_done_or_cancelled, |el| {
+                            el.child(self.render_menu_item(
+                                "取消任务",
+                                IconName::CircleX,
+                                CancelTaskAction,
+                                cx,
+                            ))
+                        })
+                        .child(div().h_px().bg(ClaudeLikeColors::separator()))
                         .child(self.render_menu_item(
                             "删除",
                             IconName::Delete,
@@ -1143,16 +1210,16 @@ impl TaskPanel {
         div()
             .id(("shortcut", icon.clone() as usize))
             .p(px(6.0))
-            .rounded(px(4.0))
-            .hover(|s| s.bg(rgb(0xf5f5f5)))
+            .rounded(px(7.0))
+            .hover(|s| s.bg(ClaudeLikeColors::hover_surface()))
             .cursor_pointer()
             .on_click(cx.listener(move |_, _event, window, cx| {
                 window.dispatch_action(action.boxed_clone(), cx);
             }))
             .child(
                 gpui_component::Icon::new(icon)
-                    .size(px(18.0))
-                    .text_color(rgb(0x666666)),
+                    .size(px(16.0))
+                    .text_color(ClaudeLikeColors::text_secondary()),
             )
     }
 
@@ -1169,7 +1236,7 @@ impl TaskPanel {
             .px(px(12.0))
             .py(px(8.0))
             .gap(px(10.0))
-            .hover(|s| s.bg(rgb(0xf5f5f5)))
+            .hover(|s| s.bg(ClaudeLikeColors::hover_surface()))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _event, window, cx| {
                 this.context_menu_task_id = None;
@@ -1180,30 +1247,62 @@ impl TaskPanel {
             .child(
                 gpui_component::Icon::new(icon)
                     .size(px(16.0))
-                    .text_color(rgb(0x666666)),
+                    .text_color(ClaudeLikeColors::text_secondary()),
             )
-            .child(div().text_sm().text_color(rgb(0x333333)).child(label))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(ClaudeLikeColors::text_primary())
+                    .child(label),
+            )
     }
 
     fn render_view_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .gap(px(4.0))
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(999.0))
+            .border_1()
+            .border_color(ClaudeLikeColors::separator())
+            .bg(ClaudeLikeColors::hover_surface())
             .child(
-                Button::new("view-list")
-                    .child(TaskView::List.label())
-                    .when(self.current_view == TaskView::List, |b| {
-                        b.with_variant(gpui_component::button::ButtonVariant::Primary)
+                div()
+                    .id("view-list")
+                    .px(px(11.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .when(self.current_view == TaskView::List, |el| {
+                        el.bg(ClaudeLikeColors::app_background())
                     })
+                    .text_size(px(TaskTypography::META_SIZE))
+                    .font_weight(TaskTypography::task_title_font_weight(
+                        self.current_view == TaskView::List,
+                    ))
+                    .text_color(ClaudeLikeColors::text_primary())
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                    .child(TaskView::List.label())
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_view(TaskView::List, window, cx);
                     })),
             )
             .child(
-                Button::new("view-matrix")
-                    .child(TaskView::Matrix.label())
-                    .when(self.current_view == TaskView::Matrix, |b| {
-                        b.with_variant(gpui_component::button::ButtonVariant::Primary)
+                div()
+                    .id("view-matrix")
+                    .px(px(11.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .when(self.current_view == TaskView::Matrix, |el| {
+                        el.bg(ClaudeLikeColors::app_background())
                     })
+                    .text_size(px(TaskTypography::META_SIZE))
+                    .font_weight(TaskTypography::task_title_font_weight(
+                        self.current_view == TaskView::Matrix,
+                    ))
+                    .text_color(ClaudeLikeColors::text_primary())
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                    .child(TaskView::Matrix.label())
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_view(TaskView::Matrix, window, cx);
                     })),
@@ -1212,43 +1311,122 @@ impl TaskPanel {
 
     fn render_priority_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .gap(px(4.0))
+            .gap(px(5.0))
             .child(
-                Button::new("filter-high")
-                    .child("高")
-                    .when(self.priority_filter == PriorityFilter::High, |b| {
-                        b.with_variant(gpui_component::button::ButtonVariant::Primary)
+                div()
+                    .id("filter-high")
+                    .px(px(9.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .border_1()
+                    .border_color(if self.priority_filter == PriorityFilter::High {
+                        ClaudeLikeColors::stronger_separator()
+                    } else {
+                        ClaudeLikeColors::separator()
                     })
+                    .bg(if self.priority_filter == PriorityFilter::High {
+                        ClaudeLikeColors::accent_surface()
+                    } else {
+                        ClaudeLikeColors::app_background()
+                    })
+                    .text_size(px(TaskTypography::META_SIZE))
+                    .text_color(if self.priority_filter == PriorityFilter::High {
+                        ClaudeLikeColors::accent()
+                    } else {
+                        ClaudeLikeColors::text_primary()
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                    .child("高")
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::High, window, cx);
                     })),
             )
             .child(
-                Button::new("filter-medium")
-                    .child("中")
-                    .when(self.priority_filter == PriorityFilter::Medium, |b| {
-                        b.with_variant(gpui_component::button::ButtonVariant::Primary)
+                div()
+                    .id("filter-medium")
+                    .px(px(9.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .border_1()
+                    .border_color(if self.priority_filter == PriorityFilter::Medium {
+                        ClaudeLikeColors::stronger_separator()
+                    } else {
+                        ClaudeLikeColors::separator()
                     })
+                    .bg(if self.priority_filter == PriorityFilter::Medium {
+                        ClaudeLikeColors::accent_surface()
+                    } else {
+                        ClaudeLikeColors::app_background()
+                    })
+                    .text_size(px(TaskTypography::META_SIZE))
+                    .text_color(if self.priority_filter == PriorityFilter::Medium {
+                        ClaudeLikeColors::accent()
+                    } else {
+                        ClaudeLikeColors::text_primary()
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                    .child("中")
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::Medium, window, cx);
                     })),
             )
             .child(
-                Button::new("filter-low")
-                    .child("低")
-                    .when(self.priority_filter == PriorityFilter::Low, |b| {
-                        b.with_variant(gpui_component::button::ButtonVariant::Primary)
+                div()
+                    .id("filter-low")
+                    .px(px(9.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .border_1()
+                    .border_color(if self.priority_filter == PriorityFilter::Low {
+                        ClaudeLikeColors::stronger_separator()
+                    } else {
+                        ClaudeLikeColors::separator()
                     })
+                    .bg(if self.priority_filter == PriorityFilter::Low {
+                        ClaudeLikeColors::accent_surface()
+                    } else {
+                        ClaudeLikeColors::app_background()
+                    })
+                    .text_size(px(TaskTypography::META_SIZE))
+                    .text_color(if self.priority_filter == PriorityFilter::Low {
+                        ClaudeLikeColors::accent()
+                    } else {
+                        ClaudeLikeColors::text_primary()
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                    .child("低")
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::Low, window, cx);
                     })),
             )
             .child(
-                Button::new("filter-all")
-                    .child("全部")
-                    .when(self.priority_filter == PriorityFilter::All, |b| {
-                        b.with_variant(gpui_component::button::ButtonVariant::Primary)
+                div()
+                    .id("filter-all")
+                    .px(px(9.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .border_1()
+                    .border_color(if self.priority_filter == PriorityFilter::All {
+                        ClaudeLikeColors::stronger_separator()
+                    } else {
+                        ClaudeLikeColors::separator()
                     })
+                    .bg(if self.priority_filter == PriorityFilter::All {
+                        ClaudeLikeColors::selected_surface()
+                    } else {
+                        ClaudeLikeColors::app_background()
+                    })
+                    .text_size(px(TaskTypography::META_SIZE))
+                    .font_weight(TaskTypography::task_title_font_weight(
+                        self.priority_filter == PriorityFilter::All,
+                    ))
+                    .text_color(ClaudeLikeColors::text_primary())
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
+                    .child("全部")
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.set_priority_filter(PriorityFilter::All, window, cx);
                     })),
@@ -1258,7 +1436,7 @@ impl TaskPanel {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .w_full()
-            .gap(px(8.0))
+            .gap(px(9.0))
             .when(self.focus_preset != TaskFocusPreset::None, |el| {
                 el.child(
                     h_flex()
@@ -1267,11 +1445,11 @@ impl TaskPanel {
                         .child(
                             div()
                                 .px(px(10.0))
-                                .py(px(6.0))
+                                .py(px(5.0))
                                 .rounded(px(999.0))
-                                .bg(rgb(0xe6f4ff))
-                                .text_color(rgb(0x1677ff))
-                                .text_sm()
+                                .bg(ClaudeLikeColors::accent_surface())
+                                .text_color(ClaudeLikeColors::accent())
+                                .text_size(px(TaskTypography::META_SIZE))
                                 .child(format!("首页筛选：{}", self.focus_preset.label())),
                         )
                         .child(
@@ -1283,8 +1461,20 @@ impl TaskPanel {
                         ),
                 )
             })
-            .child(self.render_view_switcher(cx))
-            .child(self.render_priority_filter(cx))
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .items_center()
+                    .child(self.render_view_switcher(cx))
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(18.0))
+                            .bg(ClaudeLikeColors::separator()),
+                    )
+                    .child(self.render_priority_filter(cx)),
+            )
     }
 
     fn render_tag_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1296,39 +1486,40 @@ impl TaskPanel {
             .when(!self.available_tags.is_empty(), |el| {
                 el.child(
                     h_flex()
-                        .gap(px(4.0))
+                        .gap(px(5.0))
                         .flex_wrap()
                         .children(self.available_tags.iter().enumerate().map(|(idx, tag)| {
                             let is_selected = self.selected_tags.contains(tag);
                             let tag_clone = tag.clone();
                             div()
                                 .id(("tag-filter", idx))
-                                .px(px(10.0))
+                                .px(px(9.0))
                                 .py(px(4.0))
-                                .rounded(px(12.0))
+                                .rounded(px(999.0))
                                 .cursor_pointer()
                                 .border_1()
                                 .border_color(if is_selected {
-                                    rgb(0x1890ff)
+                                    ClaudeLikeColors::stronger_separator()
                                 } else {
-                                    rgb(0xd9d9d9)
+                                    ClaudeLikeColors::separator()
                                 })
                                 .bg(if is_selected {
-                                    rgb(0xe6f7ff)
+                                    ClaudeLikeColors::selected_surface()
                                 } else {
-                                    rgb(0xffffff)
+                                    ClaudeLikeColors::app_background()
                                 })
                                 .text_color(if is_selected {
-                                    rgb(0x1890ff)
+                                    ClaudeLikeColors::text_primary()
                                 } else {
-                                    rgb(0x595959)
+                                    ClaudeLikeColors::text_secondary()
                                 })
-                                .text_sm()
+                                .text_size(px(TaskTypography::META_SIZE))
+                                .font_weight(TaskTypography::task_title_font_weight(is_selected))
                                 .hover(|s| {
                                     s.bg(if is_selected {
-                                        rgb(0xbae7ff)
+                                        ClaudeLikeColors::selected_surface()
                                     } else {
-                                        rgb(0xf5f5f5)
+                                        ClaudeLikeColors::hover_surface()
                                     })
                                 })
                                 .child(format!("#{}", tag))
@@ -1361,6 +1552,26 @@ impl TaskPanel {
             })
     }
 
+    fn render_quiet_metadata_chip(kind: MetadataChipKind, label: &str) -> AnyElement {
+        let label = match kind {
+            MetadataChipKind::Line => label.trim_start_matches('~').trim_start_matches('～'),
+            MetadataChipKind::Tag => label.trim_start_matches('#'),
+            MetadataChipKind::Person => label.trim_start_matches('@'),
+        };
+        let prefix = match kind {
+            MetadataChipKind::Line => "~",
+            MetadataChipKind::Tag => "#",
+            MetadataChipKind::Person => "@",
+        };
+
+        div()
+            .text_size(px(TaskTypography::META_SIZE))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(ClaudeLikeColors::text_secondary())
+            .child(format!("{}{}", prefix, label))
+            .into_any_element()
+    }
+
     fn render_task_card(
         &mut self,
         task: &Record,
@@ -1370,7 +1581,12 @@ impl TaskPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let task_id = task.id;
-        let is_completed = task.completed_at.is_some();
+        let is_done_or_cancelled = matches!(
+            task.status,
+            Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+        );
+        let is_cancelled = matches!(task.status, Some(TaskStatus::Cancelled));
+        let is_completed = is_done_or_cancelled;
         let sidebar_task_id = self
             .task_detail_sidebar
             .read(cx)
@@ -1384,9 +1600,9 @@ impl TaskPanel {
             Some(Priority::Low) | None => "",
         };
         let priority_color = match task.priority {
-            Some(Priority::High) => rgb(0xff4d4f),
-            Some(Priority::Medium) => rgb(0xfaad14),
-            Some(Priority::Low) | None => rgb(0x52c41a),
+            Some(Priority::High) => rgb(0xc65f45),
+            Some(Priority::Medium) => rgb(0xb8874f),
+            Some(Priority::Low) | None => rgb(0x7b8375),
         };
 
         let fmt_short = |dt: chrono::DateTime<chrono::Utc>| -> String {
@@ -1419,22 +1635,32 @@ impl TaskPanel {
             .id(("task-card", idx))
             .w_full()
             .min_w(px(0.0))
-            .p(px(if compact { 8.0 } else { 12.0 }))
-            .rounded(px(6.0))
-            .bg(if is_selected {
-                rgb(0xe6f7ff)
-            } else if is_completed {
-                rgb(0xf5f5f5)
-            } else {
-                rgb(0xffffff)
+            .relative()
+            .px(px(if compact { 9.0 } else { 12.0 }))
+            .py(px(if compact { 9.0 } else { 13.0 }))
+            .when(compact, |row| {
+                row.rounded(px(12.0))
+                    .border_1()
+                    .border_color(ClaudeLikeColors::separator())
+                    .bg(ClaudeLikeColors::app_background())
             })
-            .border_1()
-            .border_color(if is_selected {
-                rgb(0x1890ff)
-            } else {
-                rgb(0xe8e8e8)
+            .when(!compact, |row| {
+                row.rounded(px(if is_selected { 12.0 } else { 0.0 }))
+                    .border_b_1()
+                    .border_color(ClaudeLikeColors::separator())
+                    .bg(if is_selected {
+                        ClaudeLikeColors::hover_surface()
+                    } else {
+                        ClaudeLikeColors::task_workspace_background()
+                    })
             })
-            .hover(|s| s.bg(if is_selected { rgb(0xe6f7ff) } else { rgb(0xf6ffed) }))
+            .hover(|s| {
+                s.bg(if is_selected {
+                    ClaudeLikeColors::hover_surface()
+                } else {
+                    ClaudeLikeColors::hover_surface()
+                })
+            })
             .cursor_pointer()
             .on_click(cx.listener({
                 let task = task.clone();
@@ -1452,10 +1678,37 @@ impl TaskPanel {
                     .child(
                         div()
                             .id(("checkbox", idx))
+                            .mt(px(2.0))
+                            .w(px(15.0))
+                            .h(px(15.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(999.0))
+                            .border_1()
+                            .border_color(if is_completed {
+                                ClaudeLikeColors::text_secondary()
+                            } else {
+                                ClaudeLikeColors::stronger_separator()
+                            })
+                            .when(is_completed, |box_el| {
+                                box_el
+                                    .bg(ClaudeLikeColors::text_secondary())
+                                    .child(
+                                        div()
+                                            .w(px(5.0))
+                                            .h(px(5.0))
+                                            .rounded(px(1.0))
+                                            .bg(ClaudeLikeColors::app_background()),
+                                    )
+                            })
                             .cursor_pointer()
-                            .child(if is_completed { "☑" } else { "☐" })
                             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                this.toggle_task_complete(task_id, cx);
+                                if is_cancelled {
+                                    this.handle_reopen_task(task_id, cx);
+                                } else {
+                                    this.toggle_task_complete(task_id, cx);
+                                }
                                 cx.stop_propagation();
                             }))
                     )
@@ -1511,11 +1764,11 @@ impl TaskPanel {
                                                 .flex_1()
                                                 .appearance(false)
                                                 .focus_bordered(false)
-                                                .text_size(px(14.0))
+                                                .text_size(px(TaskTypography::TASK_TITLE_SIZE))
                                                 .text_color(if is_completed {
-                                                    rgb(0x999999)
+                                                    ClaudeLikeColors::text_tertiary()
                                                 } else {
-                                                    rgb(0x333333)
+                                                    ClaudeLikeColors::text_primary()
                                                 }),
                                         )
                                         .into_any_element()
@@ -1524,22 +1777,26 @@ impl TaskPanel {
                                         .flex_1()
                                         .min_w(px(0.0))
                                         .overflow_hidden()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_size(px(TaskTypography::TASK_TITLE_SIZE))
+                                        .font_weight(TaskTypography::task_title_font_weight(
+                                            is_selected,
+                                        ))
                                         .text_color(if is_completed {
-                                            rgb(0x999999)
+                                            ClaudeLikeColors::text_tertiary()
                                         } else {
-                                            rgb(0x333333)
+                                            ClaudeLikeColors::text_primary()
                                         })
                                         .child(render_tokenized_text(
                                             &display_title,
                                             TokenTextStyle::new(
                                                 if is_completed {
-                                                    rgb(0x999999)
+                                                    rgb(0x8c8c86)
                                                 } else {
-                                                    rgb(0x333333)
+                                                    rgb(0x242421)
                                                 },
-                                                FontWeight::MEDIUM,
+                                                TaskTypography::task_title_font_weight(
+                                                    is_selected,
+                                                ),
                                             ),
                                         ))
                                         .into_any_element()
@@ -1560,7 +1817,7 @@ impl TaskPanel {
                                                 el.child(
                                                     div()
                                                         .text_xs()
-                                                        .font_weight(FontWeight::BOLD)
+                                                        .font_weight(FontWeight::MEDIUM)
                                                         .text_color(priority_color)
                                                         .child(priority_marker)
                                                 )
@@ -1571,13 +1828,13 @@ impl TaskPanel {
                                         el.child(
                                             div()
                                                 .min_w(px(0.0))
-                                                .text_sm()
-                                                .text_color(rgb(0x888888))
+                                                .text_size(px(TaskTypography::META_SIZE))
+                                                .text_color(ClaudeLikeColors::text_secondary())
                                                 .line_height(relative(1.35))
                                                 .child(render_tokenized_text(
                                                     &content_preview,
                                                     TokenTextStyle::new(
-                                                        rgb(0x888888),
+                                                        rgb(0x777771),
                                                         FontWeight::NORMAL,
                                                     ),
                                                 ))
@@ -1589,26 +1846,26 @@ impl TaskPanel {
                                     div()
                                         .flex()
                                         .min_w(px(0.0))
-                                        .gap(px(8.0))
+                                        .gap(px(6.0))
                                         .flex_wrap()
-                                        .text_xs()
-                                        .text_color(rgb(0xbbbbbb))
+                                        .text_size(px(TaskTypography::META_SIZE))
+                                        .text_color(ClaudeLikeColors::text_secondary())
                                         .children(task.due_date.map(|t| {
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0xff4d4f))
-                                                .child(format!("⏰ {}", fmt_short(t)))
+                                                .text_color(ClaudeLikeColors::due_text())
+                                                .child(format!("截止 {}", fmt_short(t)))
                                         }))
                                         .children(task.scheduled_for.map(|t| {
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x1890ff))
-                                                .child(format!("📅 {}", fmt_short(t)))
+                                                .text_color(ClaudeLikeColors::schedule_text())
+                                                .child(format!("提醒 {}", fmt_short(t)))
                                         }))
                                         .children(task.tags.iter().enumerate().map(|(idx, tag)| {
                                             div()
                                                 .id(("task-tag", idx))
-                                                .child(render_metadata_chip(
+                                                .child(Self::render_quiet_metadata_chip(
                                                     MetadataChipKind::Tag,
                                                     tag,
                                                 ))
@@ -1616,7 +1873,7 @@ impl TaskPanel {
                                         .children(task.persons.iter().enumerate().map(|(idx, person)| {
                                             div()
                                                 .id(("task-person", idx))
-                                                .child(render_metadata_chip(
+                                                .child(Self::render_quiet_metadata_chip(
                                                     MetadataChipKind::Person,
                                                     person,
                                                 ))
@@ -1633,8 +1890,8 @@ impl TaskPanel {
                                 div()
                                     .cursor_pointer()
                                     .px(px(4.0))
-                                    .text_color(rgb(0x888888))
-                                    .hover(|style| style.text_color(rgb(0xff4d4f)))
+                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                    .hover(|style| style.text_color(rgb(0xd86f4b)))
                                     .child("×")
                                     .id(("task-delete", idx))
                                     .on_click(cx.listener(
@@ -1772,15 +2029,15 @@ impl TaskPanel {
 
         v_flex()
             .flex_1()
-            .rounded(px(8.0))
+            .rounded(px(10.0))
             .border_1()
-            .border_color(quadrant_color.opacity(0.3))
-            .bg(quadrant_color.opacity(0.05))
+            .border_color(ClaudeLikeColors::separator())
+            .bg(ClaudeLikeColors::app_background())
             .child(
                 div()
                     .p(px(12.0))
                     .border_b_1()
-                    .border_color(quadrant_color.opacity(0.2))
+                    .border_color(ClaudeLikeColors::separator())
                     .child(
                         h_flex()
                             .items_center()
@@ -1795,14 +2052,14 @@ impl TaskPanel {
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(quadrant_color)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ClaudeLikeColors::text_primary())
                                     .child(quadrant.label()),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x999999))
+                                    .text_color(ClaudeLikeColors::text_tertiary())
                                     .child(format!("({})", task_count)),
                             ),
                     ),
@@ -1836,15 +2093,15 @@ impl TaskPanel {
         };
 
         v_flex()
-            .rounded(px(8.0))
+            .rounded(px(10.0))
             .border_1()
-            .border_color(quadrant_color.opacity(0.3))
-            .bg(quadrant_color.opacity(0.05))
+            .border_color(ClaudeLikeColors::separator())
+            .bg(ClaudeLikeColors::app_background())
             .child(
                 div()
                     .p(px(12.0))
                     .border_b_1()
-                    .border_color(quadrant_color.opacity(0.2))
+                    .border_color(ClaudeLikeColors::separator())
                     .child(
                         h_flex()
                             .items_center()
@@ -1859,14 +2116,14 @@ impl TaskPanel {
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(quadrant_color)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ClaudeLikeColors::text_primary())
                                     .child(quadrant.label()),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x999999))
+                                    .text_color(ClaudeLikeColors::text_tertiary())
                                     .child(format!("({})", task_count)),
                             ),
                     ),
@@ -1893,7 +2150,7 @@ impl TaskPanel {
         let (pending_tasks, completed_tasks): (Vec<_>, Vec<_>) = filtered_tasks
             .iter()
             .cloned()
-            .partition(|task| task.completed_at.is_none());
+            .partition(|task| !matches!(task.status, Some(TaskStatus::Done)));
 
         let pending_count = pending_tasks.len();
         let completed_count = completed_tasks.len();
@@ -1904,8 +2161,8 @@ impl TaskPanel {
             .min_w(px(0.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .pr(px(16.0))
+            .gap(px(0.0))
+            .pr(px(0.0))
             .overflow_y_scrollbar()
             .children({
                 let mut elements: Vec<AnyElement> = Vec::new();
@@ -1913,9 +2170,10 @@ impl TaskPanel {
                 if pending_count > 0 {
                     elements.push(
                         div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x666666))
+                            .text_size(px(TaskTypography::META_SIZE))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(ClaudeLikeColors::text_tertiary())
+                            .pb(px(8.0))
                             .child(format!("待办任务 ({})", pending_count))
                             .into_any_element(),
                     );
@@ -1941,8 +2199,8 @@ impl TaskPanel {
                                 div().flex().items_center().gap(px(4.0)).child(
                                     div()
                                         .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0x999999))
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(ClaudeLikeColors::text_tertiary())
                                         .child(format!(
                                             "{} 已完成 ({})",
                                             if self.show_completed { "▼" } else { "▶" },
@@ -1977,7 +2235,7 @@ impl Render for TaskPanel {
 
         let (pending_count, completed_count): (usize, usize) =
             self.tasks.iter().fold((0, 0), |(p, c), task| {
-                if task.completed_at.is_some() {
+                if matches!(task.status, Some(TaskStatus::Done)) {
                     (p, c + 1)
                 } else {
                     (p + 1, c)
@@ -2075,15 +2333,59 @@ impl Render for TaskPanel {
                     }
                 }),
             )
+            .on_action(
+                cx.listener(|this, _action: &ToggleCompleteTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let is_done_or_cancelled = this
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == task_id)
+                            .map(|task| {
+                                matches!(
+                                    task.status,
+                                    Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                                )
+                            })
+                            .unwrap_or(false);
+                        if is_done_or_cancelled {
+                            this.handle_reopen_task(task_id, cx);
+                        } else {
+                            this.toggle_task_complete(task_id, cx);
+                        }
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _action: &CancelTaskAction, _window, cx| {
+                    if let Some(task_id) = this.context_menu_task_id {
+                        let store = this.store.clone();
+                        cx.spawn(async move |view, cx| {
+                            match store.cancel_task(task_id, None).await {
+                                Ok(_) => {
+                                    view.update(cx, |panel, cx| {
+                                        panel.load_tasks(cx);
+                                    })
+                                    .ok();
+                                }
+                                Err(e) => {
+                                    eprintln!("[TaskPanel] Failed to cancel task: {}", e);
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }),
+            )
             .child(
                 div()
                     .id("task-panel-main")
                     .flex_1()
                     .min_w(px(0.0))
+                    .h_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(16.0))
-                    .p(px(16.0))
+                    .justify_start()
+                    .bg(ClaudeLikeColors::app_background())
+                    .font_family(TaskTypography::SYSTEM_FONT_FAMILY)
                     .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                         if this
                             .task_detail_sidebar
@@ -2098,145 +2400,183 @@ impl Render for TaskPanel {
                         }
                     }))
                     .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!(
-                                "任务 ({} 待办 / {} 已完成)",
-                                pending_count, completed_count
-                            )),
-                    )
-                    .child(self.render_toolbar(cx))
-                    .child(self.render_tag_filter(cx))
-                    .when(self.reminder_task_id.is_some(), |el| {
-                        if let (Some(ref dp), Some(ref ti)) =
-                            (&self.reminder_date_picker, &self.reminder_time_input)
-                        {
-                            let dp_clone = dp.clone();
-                            let ti_clone = ti.clone();
-                            let task_name = self
-                                .reminder_task_id
-                                .and_then(|id| self.tasks.iter().find(|t| t.id == id))
-                                .map(|t| t.content.clone())
-                                .unwrap_or_default();
-                            el.child(
-                                div()
-                                    .p(px(16.0))
-                                    .mx(px(4.0))
-                                    .my(px(8.0))
-                                    .bg(rgb(0xf0f5ff))
-                                    .border_1()
-                                    .border_color(rgb(0xadc6ff))
-                                    .rounded(px(8.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(12.0))
+                        v_flex()
+                            .id("task-workspace-column")
+                            .w_full()
+                            .h_full()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .gap(px(16.0))
+                            .px(px(42.0))
+                            .pt(px(22.0))
+                            .pb(px(34.0))
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .items_start()
+                                    .gap(px(18.0))
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
+                                        v_flex()
+                                            .id("task-panel-title")
+                                            .gap(px(5.0))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(
+                                                |this, _event: &ClickEvent, _window, cx| {
+                                                    this.show_completed = !this.show_completed;
+                                                    cx.stop_propagation();
+                                                    cx.notify();
+                                                },
+                                            ))
                                             .child(
                                                 div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child("⏰ 设置提醒时间"),
+                                                    .text_size(px(TaskTypography::META_SIZE))
+                                                    .font_weight(FontWeight::NORMAL)
+                                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                                    .child(format!(
+                                                        "任务 · {} 待办 / {} 已完成",
+                                                        pending_count, completed_count
+                                                    )),
                                             )
                                             .child(
                                                 div()
-                                                    .text_sm()
-                                                    .text_color(rgb(0x666666))
-                                                    .child(task_name),
+                                                    .text_size(px(TaskTypography::PAGE_TITLE_SIZE))
+                                                    .font_weight(TaskTypography::heading_font_weight())
+                                                    .text_color(ClaudeLikeColors::text_primary())
+                                                    .child("任务"),
                                             ),
                                     )
-                                    .child(
+                            )
+                            .child(self.render_toolbar(cx))
+                            .child(self.render_tag_filter(cx))
+                            .when(self.reminder_task_id.is_some(), |el| {
+                                if let (Some(ref dp), Some(ref ti)) =
+                                    (&self.reminder_date_picker, &self.reminder_time_input)
+                                {
+                                    let dp_clone = dp.clone();
+                                    let ti_clone = ti.clone();
+                                    let task_name = self
+                                        .reminder_task_id
+                                        .and_then(|id| self.tasks.iter().find(|t| t.id == id))
+                                        .map(|t| t.content.clone())
+                                        .unwrap_or_default();
+                                    el.child(
                                         div()
+                                            .p(px(14.0))
+                                            .bg(ClaudeLikeColors::accent_surface())
+                                            .border_1()
+                                            .border_color(ClaudeLikeColors::stronger_separator())
+                                            .rounded(px(14.0))
                                             .flex()
+                                            .flex_col()
                                             .gap(px(12.0))
-                                            .items_end()
                                             .child(
                                                 div()
-                                                    .flex_1()
                                                     .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
+                                                    .items_center()
+                                                    .justify_between()
                                                     .child(
                                                         div()
-                                                            .text_xs()
-                                                            .text_color(rgb(0x888888))
-                                                            .child("日期"),
+                                                            .text_size(px(13.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(ClaudeLikeColors::text_primary())
+                                                            .child("设置提醒时间"),
                                                     )
                                                     .child(
-                                                        DatePicker::new(&dp_clone)
-                                                            .cleanable(true)
-                                                            .number_of_months(1),
+                                                        div()
+                                                            .text_size(px(TaskTypography::META_SIZE))
+                                                            .text_color(ClaudeLikeColors::text_secondary())
+                                                            .child(task_name),
                                                     ),
                                             )
                                             .child(
                                                 div()
-                                                    .w(px(100.0))
                                                     .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
+                                                    .gap(px(10.0))
+                                                    .items_end()
                                                     .child(
                                                         div()
-                                                            .text_xs()
-                                                            .text_color(rgb(0x888888))
-                                                            .child("时间 (HH:MM)"),
+                                                            .flex_1()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(4.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                                                    .child("日期"),
+                                                            )
+                                                            .child(
+                                                                DatePicker::new(&dp_clone)
+                                                                    .cleanable(true)
+                                                                    .number_of_months(1),
+                                                            ),
                                                     )
-                                                    .child(Input::new(&ti_clone)),
+                                                    .child(
+                                                        div()
+                                                            .w(px(92.0))
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(4.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(ClaudeLikeColors::text_tertiary())
+                                                                    .child("时间"),
+                                                            )
+                                                            .child(Input::new(&ti_clone)),
+                                                    ),
+                                            )
+                                            .children(self.reminder_error_message.as_ref().map(|err_msg| {
+                                                div()
+                                                    .text_size(px(13.0))
+                                                    .text_color(ClaudeLikeColors::danger())
+                                                    .child(err_msg.clone())
+                                            }))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .justify_end()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Button::new("cancel-reminder")
+                                                            .child("取消")
+                                                            .on_click(cx.listener(
+                                                                |this, _event, window, cx| {
+                                                                    this.cancel_reminder(window, cx);
+                                                                },
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        Button::new("save-reminder")
+                                                            .child("设定")
+                                                            .on_click(cx.listener(
+                                                                |this, _event, window, cx| {
+                                                                    this.save_reminder(window, cx);
+                                                                },
+                                                            )),
+                                                    ),
                                             ),
                                     )
-                                    .children(self.reminder_error_message.as_ref().map(|err_msg| {
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(0xff4d4f))
-                                            .child(err_msg.clone())
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_end()
-                                            .gap(px(8.0))
-                                            .child(
-                                                Button::new("cancel-reminder")
-                                                    .child("取消")
-                                                    .on_click(cx.listener(
-                                                        |this, _event, window, cx| {
-                                                            this.cancel_reminder(window, cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("save-reminder")
-                                                    .child("设定")
-                                                    .on_click(cx.listener(
-                                                        |this, _event, window, cx| {
-                                                            this.save_reminder(window, cx);
-                                                        },
-                                                    )),
-                                            ),
-                                    ),
-                            )
-                        } else {
-                            el
-                        }
-                    })
-                    .child(
-                        div()
-                            .id("task-view-container")
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .child(match self.current_view {
-                                TaskView::List => {
-                                    self.render_list_view(window, cx).into_any_element()
+                                } else {
+                                    el
                                 }
-                                TaskView::Matrix => self.render_matrix_view(window, cx),
-                            }),
+                            })
+                            .child(
+                                div()
+                                    .id("task-view-container")
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .child(match self.current_view {
+                                        TaskView::List => {
+                                            self.render_list_view(window, cx).into_any_element()
+                                        }
+                                        TaskView::Matrix => self.render_matrix_view(window, cx),
+                                    }),
+                            ),
+                            )
+                            .children(self.render_custom_context_menu(cx)),
                     )
-                    .children(self.render_custom_context_menu(cx)),
-            )
             .child(self.task_detail_sidebar.clone())
             .children(self.render_delete_confirmation(cx))
             .into_any_element()

@@ -1,4 +1,4 @@
-use crate::models::Priority;
+use crate::models::{LineRef, Priority};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +8,7 @@ pub struct ParsedTaskDraft {
     pub priority: Priority,
     pub tags: Vec<String>,
     pub people: Vec<String>,
+    pub line: Option<LineRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub struct ParsedRecordDraft {
     pub content: String,
     pub tags: Vec<String>,
     pub people: Vec<String>,
+    pub line: Option<LineRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub struct ParsedRecordFields {
     pub content: String,
     pub tags: Vec<String>,
     pub people: Vec<String>,
+    pub line: Option<LineRef>,
 }
 
 /// 解析任务输入，返回 (内容, 优先级, 标签列表, 人物列表)
@@ -54,6 +57,7 @@ pub fn parse_record_fields(title: Option<&str>, content: &str) -> ParsedRecordFi
         content: normalized_content,
         tags: dedup_preserving_order(title_tags.into_iter().chain(content_tags)),
         people: dedup_preserving_order(title_people.into_iter().chain(content_people)),
+        line: parse_line_ref([title.unwrap_or_default(), content].join("\n").as_str()),
     }
 }
 
@@ -72,6 +76,10 @@ pub fn reconcile_metadata(
     dedup_preserving_order(preserved.chain(new_inline.iter().cloned()))
 }
 
+pub fn merge_inline_metadata(existing: &[String], inline: &[String]) -> Vec<String> {
+    dedup_preserving_order(inline.iter().cloned().chain(existing.iter().cloned()))
+}
+
 pub fn parse_task_draft(input: &str) -> ParsedTaskDraft {
     let normalized = normalize_multiline_input(input);
     let Some(first_line) = normalized.first() else {
@@ -81,6 +89,7 @@ pub fn parse_task_draft(input: &str) -> ParsedTaskDraft {
             priority: Priority::Low,
             tags: Vec::new(),
             people: Vec::new(),
+            line: None,
         };
     };
 
@@ -94,6 +103,7 @@ pub fn parse_task_draft(input: &str) -> ParsedTaskDraft {
         priority,
         tags: inline_fields.tags,
         people: inline_fields.people,
+        line: inline_fields.line,
     }
 }
 
@@ -105,6 +115,7 @@ pub fn parse_record_draft(input: &str) -> ParsedRecordDraft {
             content: String::new(),
             tags: Vec::new(),
             people: Vec::new(),
+            line: None,
         },
         [single] => {
             let content = single.to_string();
@@ -114,6 +125,7 @@ pub fn parse_record_draft(input: &str) -> ParsedRecordDraft {
                 content,
                 tags,
                 people,
+                line: parse_line_ref(single),
             }
         }
         [title, rest @ ..] => {
@@ -124,9 +136,44 @@ pub fn parse_record_draft(input: &str) -> ParsedRecordDraft {
                 content: inline_fields.content,
                 tags: inline_fields.tags,
                 people: inline_fields.people,
+                line: inline_fields.line,
             }
         }
     }
+}
+
+pub fn parse_line_ref(input: &str) -> Option<LineRef> {
+    extract_metadata_tokens(input)
+        .into_iter()
+        .filter(|(marker, _)| *marker == '~' || *marker == '～')
+        .filter_map(|(marker, value)| parse_line_token(&format!("{marker}{value}")))
+        .next()
+}
+
+fn parse_line_token(token: &str) -> Option<LineRef> {
+    let value = token
+        .strip_prefix('~')
+        .or_else(|| token.strip_prefix('～'))?;
+    if value.is_empty() || value.matches('/').count() > 1 {
+        return None;
+    }
+
+    let (project, name) = if let Some((project, name)) = value.split_once('/') {
+        let project = project.trim();
+        let name = name.trim();
+        if project.is_empty() || name.is_empty() {
+            return None;
+        }
+        (Some(project.to_string()), name.to_string())
+    } else {
+        let name = value.trim();
+        if name.is_empty() {
+            return None;
+        }
+        (None, name.to_string())
+    };
+
+    Some(LineRef::new(project, name))
 }
 
 /// 解析优先级，返回 (去除优先级的内容, 优先级)
@@ -193,19 +240,86 @@ pub fn extract_tags_and_people(input: &str) -> (Vec<String>, Vec<String>) {
     let mut tags = Vec::new();
     let mut people = Vec::new();
 
-    for word in input.split_whitespace() {
-        if let Some(tag) = word.strip_prefix('#') {
-            if !tag.is_empty() {
-                tags.push(tag.to_string());
-            }
-        } else if let Some(person) = word.strip_prefix('@') {
-            if !person.is_empty() {
-                people.push(person.to_string());
-            }
+    for (marker, value) in extract_metadata_tokens(input) {
+        match marker {
+            '#' if !value.is_empty() => tags.push(value),
+            '@' if !value.is_empty() => people.push(value),
+            _ => {}
         }
     }
 
     (dedup_preserving_order(tags), dedup_preserving_order(people))
+}
+
+fn extract_metadata_tokens(input: &str) -> Vec<(char, String)> {
+    let mut tokens = Vec::new();
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((_, ch)) = chars.next() {
+        if !is_metadata_marker(ch) {
+            continue;
+        }
+
+        let mut value = String::new();
+        while let Some(&(_, next)) = chars.peek() {
+            if is_metadata_delimiter(next) {
+                break;
+            }
+            value.push(next);
+            chars.next();
+        }
+
+        if !value.is_empty() {
+            tokens.push((ch, value));
+        }
+    }
+
+    tokens
+}
+
+fn is_metadata_marker(ch: char) -> bool {
+    matches!(ch, '#' | '@' | '~' | '～')
+}
+
+fn is_metadata_delimiter(ch: char) -> bool {
+    ch.is_whitespace()
+        || is_metadata_marker(ch)
+        || matches!(
+            ch,
+            ',' | '，'
+                | '.'
+                | '。'
+                | '!'
+                | '！'
+                | '?'
+                | '？'
+                | ';'
+                | '；'
+                | ':'
+                | '：'
+                | '、'
+                | '('
+                | ')'
+                | '（'
+                | '）'
+                | '['
+                | ']'
+                | '【'
+                | '】'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '《'
+                | '》'
+                | '"'
+                | '\''
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '`'
+        )
 }
 
 /// 批量解析多个标签（从逗号或空白分隔的字符串）

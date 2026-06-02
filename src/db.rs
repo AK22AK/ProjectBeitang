@@ -2,15 +2,16 @@ use crate::data_management::{
     AttachmentHealthSummary, AttachmentListItem, AttachmentStorageBackend, StorageUsageSummary,
 };
 use crate::models::{
-    Attachment, AttachmentStatus, MetadataCatalogEntry, Person, Priority, Record, RecordType, Tag,
-    TaskStatus, TimelineQuery,
+    Attachment, AttachmentStatus, Line, LineGraphData, LineGraphStats, LineOverview, LineRef,
+    LineStatus, MetadataCatalogEntry, Person, Priority, Record, RecordType, Tag, TaskStatus,
+    TimelineQuery,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, Result};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const SEARCH_RANK_FALLBACK: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Clone)]
@@ -70,8 +71,23 @@ impl Database {
         )?;
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS lines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                UNIQUE(project, name)
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS records (
                 id TEXT PRIMARY KEY,
+                line_id TEXT,
                 title TEXT,
                 content TEXT NOT NULL,
                 priority INTEGER,
@@ -84,7 +100,8 @@ impl Database {
                 due_date TEXT,
                 notified_at TEXT,
                 cancelled_reason TEXT,
-                record_type TEXT NOT NULL
+                record_type TEXT NOT NULL,
+                FOREIGN KEY (line_id) REFERENCES lines(id) ON DELETE SET NULL
             )",
             [],
         )?;
@@ -150,6 +167,19 @@ impl Database {
             [],
         )?;
 
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lines_project_name ON lines(project, name)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lines_unique_scope
+             ON lines(COALESCE(project, ''), name)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lines_status ON lines(status)",
+            [],
+        )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_records_type ON records(record_type)",
             [],
@@ -302,6 +332,10 @@ impl Database {
             self.migrate_v6_to_v7()?;
         }
 
+        if version < 8 {
+            self.migrate_v7_to_v8()?;
+        }
+
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO schema_version (version, updated_at) VALUES (?1, ?2)
@@ -436,6 +470,34 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v7_to_v8(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS lines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            )",
+            [],
+        )?;
+        let _ = self
+            .conn
+            .execute("ALTER TABLE records ADD COLUMN line_id TEXT", []);
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lines_unique_scope
+             ON lines(COALESCE(project, ''), name)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_records_line_id ON records(line_id)",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn create_record(&self, record: &Record) -> Result<()> {
         let priority_val = record.priority.as_ref().map(|p| match p {
             Priority::High => 0i64,
@@ -465,9 +527,10 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO records (id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO records (id, line_id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
+                line_id = excluded.line_id,
                 title = excluded.title,
                 content = excluded.content,
                 priority = excluded.priority,
@@ -481,6 +544,7 @@ impl Database {
                 updated_at = excluded.updated_at",
             [
                 &record.id.to_string() as &dyn rusqlite::ToSql,
+                &record.line_id.map(|id| id.to_string()) as &dyn rusqlite::ToSql,
                 &record.title as &dyn rusqlite::ToSql,
                 &record.content as &dyn rusqlite::ToSql,
                 &priority_val as &dyn rusqlite::ToSql,
@@ -532,6 +596,21 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_record_notified_at(
+        &self,
+        id: uuid::Uuid,
+        notified_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE records SET notified_at = ?1 WHERE id = ?2",
+            [
+                &notified_at.to_rfc3339() as &dyn rusqlite::ToSql,
+                &id.to_string() as &dyn rusqlite::ToSql,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn get_or_create_tag_internal(&self, tx: &rusqlite::Transaction, name: &str) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
 
@@ -562,7 +641,259 @@ impl Database {
         Ok(id)
     }
 
-    pub fn get_tasks(&self, _completed: bool) -> Result<Vec<Record>> {
+    pub fn get_or_create_line(&self, line_ref: &LineRef) -> Result<Line> {
+        if let Some(line) = self.find_line(line_ref)? {
+            return Ok(line);
+        }
+
+        let now = Utc::now();
+        let line = Line {
+            id: Uuid::new_v4(),
+            name: line_ref.name.clone(),
+            project: line_ref.project.clone(),
+            status: LineStatus::Open,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        self.upsert_line(&line)?;
+        Ok(line)
+    }
+
+    pub fn upsert_line(&self, line: &Line) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO lines (id, name, project, status, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                project = excluded.project,
+                status = excluded.status,
+                updated_at = excluded.updated_at,
+                completed_at = excluded.completed_at",
+            [
+                &line.id.to_string() as &dyn rusqlite::ToSql,
+                &line.name as &dyn rusqlite::ToSql,
+                &line.project as &dyn rusqlite::ToSql,
+                &line.status.as_db_value() as &dyn rusqlite::ToSql,
+                &line.created_at.to_rfc3339() as &dyn rusqlite::ToSql,
+                &line.updated_at.to_rfc3339() as &dyn rusqlite::ToSql,
+                &line.completed_at.map(|value| value.to_rfc3339()) as &dyn rusqlite::ToSql,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_line(&self, line_ref: &LineRef) -> Result<Option<Line>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, project, status, created_at, updated_at, completed_at
+             FROM lines
+             WHERE COALESCE(project, '') = COALESCE(?1, '') AND name = ?2",
+        )?;
+        let mut rows = stmt.query([
+            &line_ref.project as &dyn rusqlite::ToSql,
+            &line_ref.name as &dyn rusqlite::ToSql,
+        ])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::line_from_row(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_line_by_id(&self, id: Uuid) -> Result<Option<Line>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, project, status, created_at, updated_at, completed_at
+             FROM lines WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id.to_string()])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::line_from_row(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_lines(&self, project: Option<&str>, include_completed: bool) -> Result<Vec<Line>> {
+        let mut sql = String::from(
+            "SELECT id, name, project, status, created_at, updated_at, completed_at FROM lines",
+        );
+        let mut clauses = Vec::new();
+        let mut params = Vec::new();
+        if let Some(project) = project {
+            clauses.push("project = ?".to_string());
+            params.push(Value::Text(project.to_string()));
+        }
+        if !include_completed {
+            clauses.push("status = 'open'".to_string());
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY COALESCE(project, ''), updated_at DESC, name ASC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let lines = stmt.query_map(params_from_iter(params), |row| Self::line_from_row(row))?;
+        lines.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_projects(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT project FROM lines
+             WHERE project IS NOT NULL AND project != ''
+             ORDER BY project ASC",
+        )?;
+        let projects = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        projects.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_line_catalog(&self) -> Result<Vec<MetadataCatalogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.name, l.project, COUNT(r.id) AS usage_count
+             FROM lines l
+             LEFT JOIN records r ON r.line_id = l.id
+             WHERE l.status = 'open'
+             GROUP BY l.id
+             ORDER BY usage_count DESC, COALESCE(l.project, '') ASC, l.name ASC",
+        )?;
+        let entries = stmt.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let project: Option<String> = row.get(1)?;
+            let usage_count: i64 = row.get(2)?;
+            let label = match project.as_deref() {
+                Some(project) if !project.is_empty() => format!("{project}/{name}"),
+                _ => name,
+            };
+            Ok(MetadataCatalogEntry {
+                name: label,
+                usage_count: usage_count.max(0) as usize,
+            })
+        })?;
+        entries.collect::<Result<Vec<_>>>()
+    }
+
+    pub fn get_line_graph(&self, project: Option<&str>) -> Result<LineGraphData> {
+        let lines = self.get_lines(project, false)?;
+        let projects = self.get_projects()?;
+        let mut overviews = Vec::with_capacity(lines.len());
+        let mut stats = LineGraphStats {
+            project_count: projects.len(),
+            open_line_count: lines.len(),
+            completed_line_count: self.count_completed_lines()?,
+            ..LineGraphStats::default()
+        };
+
+        for line in lines {
+            let records = self.get_records_for_line(line.id)?;
+            let next_action = derive_next_action(&records);
+            let latest_record = records.first().cloned();
+            let open_task_count = records
+                .iter()
+                .filter(|record| is_open_record_task(record))
+                .count();
+            stats.record_count += records.len();
+            stats.open_task_count += open_task_count;
+            if next_action.is_some() {
+                stats.lines_with_next_action_count += 1;
+            }
+            overviews.push(LineOverview {
+                line,
+                record_count: records.len(),
+                open_task_count,
+                records,
+                next_action,
+                latest_record,
+            });
+        }
+
+        let unassigned_records = self.get_unassigned_records(50)?;
+        stats.unassigned_record_count = self.count_unassigned_records()?;
+        stats.record_count += stats.unassigned_record_count;
+
+        Ok(LineGraphData {
+            lines: overviews,
+            projects,
+            stats,
+            unassigned_records,
+        })
+    }
+
+    pub fn get_records_for_line(&self, line_id: Uuid) -> Result<Vec<Record>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+             FROM records
+             WHERE line_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let records = stmt.query_map([line_id.to_string()], |row| self.row_to_record(row))?;
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    pub fn get_unassigned_records(&self, limit: usize) -> Result<Vec<Record>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
+             FROM records
+             WHERE line_id IS NULL
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let records = stmt.query_map([limit as i64], |row| self.row_to_record(row))?;
+        let mut result = Vec::new();
+        for record in records {
+            let mut record = record?;
+            self.load_record_associations(&mut record)?;
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    pub fn complete_line(&self, line_id: Uuid) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE lines
+             SET status = 'completed', completed_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            [&now, &line_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_line(&self, line_id: Uuid) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE records SET line_id = NULL, updated_at = ?1 WHERE line_id = ?2",
+            [&Utc::now().to_rfc3339(), &line_id.to_string()],
+        )?;
+        tx.execute("DELETE FROM lines WHERE id = ?1", [&line_id.to_string()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn count_completed_lines(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM lines WHERE status = 'completed'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    fn count_unassigned_records(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM records WHERE line_id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn get_tasks(&self) -> Result<Vec<Record>> {
         eprintln!("[DB] get_tasks called");
         let mut stmt = self.conn.prepare(
             "SELECT id, title, content, priority, status, created_at, updated_at, started_at, completed_at, scheduled_for, due_date, notified_at, cancelled_reason, record_type
@@ -890,6 +1221,7 @@ impl Database {
         tx.execute("DELETE FROM tags", [])?;
         tx.execute("DELETE FROM persons", [])?;
         tx.execute("DELETE FROM records", [])?;
+        tx.execute("DELETE FROM lines", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -931,24 +1263,6 @@ impl Database {
         tx.execute("DELETE FROM records WHERE id = ?1", [&id.to_string()])?;
         tx.commit()?;
         eprintln!("[DB] delete_record succeeded");
-        Ok(())
-    }
-
-    pub fn mark_task_completed(&self, id: Uuid, completed_at: DateTime<Utc>) -> Result<()> {
-        eprintln!("[DB] mark_task_completed called for id: {}", id);
-        self.conn.execute(
-            "UPDATE records
-             SET completed_at = ?1,
-                 status = 'done',
-                 started_at = COALESCE(started_at, updated_at),
-                 updated_at = ?2
-             WHERE id = ?3",
-            [
-                &completed_at.to_rfc3339() as &dyn rusqlite::ToSql,
-                &Utc::now().to_rfc3339() as &dyn rusqlite::ToSql,
-                &id.to_string() as &dyn rusqlite::ToSql,
-            ],
-        )?;
         Ok(())
     }
 
@@ -1636,6 +1950,7 @@ impl Database {
 
         Ok(Record {
             id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+            line_id: None,
             title,
             content,
             priority: priority_int.map(|p| match p {
@@ -1694,10 +2009,86 @@ impl Database {
     }
 
     fn load_record_associations(&self, record: &mut Record) -> Result<()> {
+        record.line_id = self.get_record_line_id(record.id)?;
         record.tags = self.get_record_tags(record.id)?;
         record.persons = self.get_record_persons(record.id)?;
         Ok(())
     }
+
+    fn get_record_line_id(&self, record_id: Uuid) -> Result<Option<Uuid>> {
+        let line_id: Option<String> = self.conn.query_row(
+            "SELECT line_id FROM records WHERE id = ?1",
+            [record_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(line_id.and_then(|value| Uuid::parse_str(&value).ok()))
+    }
+
+    fn line_from_row(row: &rusqlite::Row) -> Result<Line> {
+        let id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let project: Option<String> = row.get(2)?;
+        let status: String = row.get(3)?;
+        let created_at: String = row.get(4)?;
+        let updated_at: String = row.get(5)?;
+        let completed_at: Option<String> = row.get(6)?;
+
+        Ok(Line {
+            id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::new_v4()),
+            name,
+            project,
+            status: LineStatus::from_db_value(&status),
+            created_at: DateTime::parse_from_rfc3339(&created_at)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc),
+            completed_at: completed_at
+                .filter(|value| !value.is_empty())
+                .and_then(|value| {
+                    DateTime::parse_from_rfc3339(&value)
+                        .ok()
+                        .map(|date| date.with_timezone(&Utc))
+                }),
+        })
+    }
+}
+
+fn is_open_record_task(record: &Record) -> bool {
+    matches!(
+        record.status,
+        Some(TaskStatus::Todo) | Some(TaskStatus::InProgress)
+    ) && record.completed_at.is_none()
+}
+
+fn derive_next_action(records: &[Record]) -> Option<Record> {
+    let mut tasks = records
+        .iter()
+        .filter(|record| record.record_type == RecordType::Task && is_open_record_task(record))
+        .cloned()
+        .collect::<Vec<_>>();
+    tasks.sort_by(|left, right| {
+        priority_rank(left.priority.as_ref())
+            .cmp(&priority_rank(right.priority.as_ref()))
+            .then_with(|| {
+                optional_date_rank(left.due_date).cmp(&optional_date_rank(right.due_date))
+            })
+            .then_with(|| right.created_at.cmp(&left.created_at))
+    });
+    tasks.into_iter().next()
+}
+
+fn priority_rank(priority: Option<&Priority>) -> u8 {
+    match priority {
+        Some(Priority::High) => 0,
+        Some(Priority::Medium) => 1,
+        _ => 2,
+    }
+}
+
+fn optional_date_rank(value: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    value.unwrap_or_else(|| Utc::now() + chrono::Duration::days(3650))
 }
 
 fn display_title_from_fields(
@@ -1707,6 +2098,7 @@ fn display_title_from_fields(
 ) -> String {
     let record = Record {
         id: Uuid::nil(),
+        line_id: None,
         title,
         content,
         priority: None,
@@ -1749,7 +2141,7 @@ mod tests {
         );
         db.create_record(&record).unwrap();
 
-        let tasks = db.get_tasks(false).unwrap();
+        let tasks = db.get_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, Some("Test Title".to_string()));
         assert_eq!(tasks[0].content, "Test task");

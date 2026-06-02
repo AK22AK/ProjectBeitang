@@ -876,9 +876,10 @@ impl SearchPanel {
             task.sync_task_lifecycle_fields(previous_status, now);
 
             let updated_task = task.clone();
+            let line_ref = payload.line.clone();
             let store = self.store.clone();
             cx.spawn(async move |_view, _cx| {
-                if let Err(e) = store.update_record(updated_task).await {
+                if let Err(e) = store.update_record_with_line(updated_task, line_ref).await {
                     eprintln!("[SearchPanel] Failed to update task: {}", e);
                 }
             })
@@ -903,9 +904,13 @@ impl SearchPanel {
             record.updated_at = chrono::Utc::now();
 
             let updated_record = record.clone();
+            let line_ref = payload.line.clone();
             let store = self.store.clone();
             cx.spawn(async move |_view, _cx| {
-                if let Err(e) = store.update_record(updated_record).await {
+                if let Err(e) = store
+                    .update_record_with_line(updated_record, line_ref)
+                    .await
+                {
                     eprintln!("[SearchPanel] Failed to update record: {}", e);
                 }
             })
@@ -1100,12 +1105,12 @@ impl SearchPanel {
                     TextTokenSegment::Plain(text) => {
                         self.highlight_match_text(text, base_color, base_weight)
                     }
-                    TextTokenSegment::Tag(_) | TextTokenSegment::Person(_) => {
-                        render_inline_token_text(
-                            segment,
-                            TokenTextStyle::new(base_color, base_weight),
-                        )
-                    }
+                    TextTokenSegment::Line(_)
+                    | TextTokenSegment::Tag(_)
+                    | TextTokenSegment::Person(_) => render_inline_token_text(
+                        segment,
+                        TokenTextStyle::new(base_color, base_weight),
+                    ),
                 }))
         };
 

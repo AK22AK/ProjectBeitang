@@ -237,6 +237,7 @@ impl Dashboard {
         let store = self.store.clone();
         let payload = payload.clone();
         cx.spawn(async move |view, cx| {
+            let line_ref = payload.line.clone();
             let Some(mut task) = store.get_record_by_id(task_id).await.ok().flatten() else {
                 return;
             };
@@ -255,7 +256,7 @@ impl Dashboard {
             task.updated_at = now;
             task.sync_task_lifecycle_fields(previous_status, now);
 
-            if let Err(err) = store.update_record(task).await {
+            if let Err(err) = store.update_record_with_line(task, line_ref).await {
                 eprintln!("[Dashboard] Failed to update task: {}", err);
                 return;
             }
@@ -275,6 +276,7 @@ impl Dashboard {
         let store = self.store.clone();
         let payload = payload.clone();
         cx.spawn(async move |view, cx| {
+            let line_ref = payload.line.clone();
             let Some(mut record) = store.get_record_by_id(record_id).await.ok().flatten() else {
                 return;
             };
@@ -285,7 +287,7 @@ impl Dashboard {
             record.persons = payload.persons.clone();
             record.updated_at = Utc::now();
 
-            if let Err(err) = store.update_record(record).await {
+            if let Err(err) = store.update_record_with_line(record, line_ref).await {
                 eprintln!("[Dashboard] Failed to update record: {}", err);
                 return;
             }
@@ -701,7 +703,7 @@ impl Dashboard {
                                                     );
                                                 },
                                             ))
-                                            .child("查看完整时间线"),
+                                            .child("查看事务"),
                                     ),
                             )
                             .child(

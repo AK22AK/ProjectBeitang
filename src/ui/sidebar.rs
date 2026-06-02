@@ -3,6 +3,8 @@ use gpui::*;
 use gpui_component::{tooltip::Tooltip, IconName};
 use std::sync::Arc;
 
+use crate::ui::style::{ClaudeLikeColors, TaskTypography};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Panel {
     Dashboard,
@@ -20,7 +22,7 @@ impl Panel {
             Self::Dashboard => "看板",
             Self::Tasks => "任务",
             Self::Records => "记录",
-            Self::Timeline => "时间线",
+            Self::Timeline => "事务",
             Self::AI => "AI",
             Self::Search => "搜索",
             Self::Settings => "设置",
@@ -98,12 +100,21 @@ fn render_sidebar_item(
     div()
         .id(id)
         .w_full()
-        .px(px(if is_compact { 0.0 } else { 12.0 }))
-        .py(px(8.0))
-        .rounded(px(6.0))
+        .px(px(if is_compact { 0.0 } else { 10.0 }))
+        .py(px(7.0))
+        .rounded(px(10.0))
         .cursor_pointer()
-        .when(is_active, |this| this.bg(rgb(0xd0d0d0)))
-        .hover(|style| style.bg(rgb(0xe0e0e0)))
+        .text_size(px(TaskTypography::SIDEBAR_ITEM_SIZE))
+        .font_weight(if is_active {
+            TaskTypography::heading_font_weight()
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(ClaudeLikeColors::text_primary())
+        .when(is_active, |this| {
+            this.bg(ClaudeLikeColors::selected_surface())
+        })
+        .hover(|style| style.bg(ClaudeLikeColors::hover_surface()))
         .flex()
         .items_center()
         .when(is_compact, |this| this.justify_center())
@@ -113,8 +124,8 @@ fn render_sidebar_item(
         })
         .child(
             gpui_component::Icon::new(icon)
-                .size(px(18.0))
-                .text_color(rgb(0x555555)),
+                .size(px(16.0))
+                .text_color(ClaudeLikeColors::text_primary()),
         )
         .when(!is_compact, |this| this.child(label))
         .on_click(move |_event, window, cx| on_click(panel, window, cx))
@@ -130,7 +141,7 @@ impl RenderOnce for Sidebar {
             (Panel::Dashboard, "看板", IconName::GalleryVerticalEnd),
             (Panel::Tasks, "任务", IconName::Check),
             (Panel::Records, "记录", IconName::File),
-            (Panel::Timeline, "时间线", IconName::Calendar),
+            (Panel::Timeline, "事务", IconName::Calendar),
             (Panel::AI, "AI", IconName::Bot),
         ];
 
@@ -146,44 +157,49 @@ impl RenderOnce for Sidebar {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xf5f5f5))
-            .text_color(rgb(0x333333))
-            .p(px(12.0))
+            .bg(ClaudeLikeColors::sidebar_background())
+            .overflow_hidden()
+            .text_color(ClaudeLikeColors::text_primary())
+            .font_family(TaskTypography::SYSTEM_FONT_FAMILY)
             .child(
-                div().flex().flex_col().gap(px(4.0)).flex_1().children(
-                    main_items
-                        .into_iter()
-                        .enumerate()
-                        .map(move |(idx, (panel, label, icon))| {
-                            render_sidebar_item(
-                                panel,
-                                label,
-                                icon,
-                                current_panel,
-                                layout_mode,
-                                idx,
-                                on_panel_select_for_main.clone(),
-                            )
-                        }),
-                ),
-            )
-            .child(
-                div().flex().flex_col().gap(px(4.0)).pt(px(16.0)).children(
-                    bottom_items
-                        .into_iter()
-                        .enumerate()
-                        .map(move |(idx, (panel, label, icon))| {
-                            render_sidebar_item(
-                                panel,
-                                label,
-                                icon,
-                                current_panel,
-                                layout_mode,
-                                idx + 100,
-                                on_panel_select.clone(),
-                            )
-                        }),
-                ),
+                div()
+                    .h_full()
+                    .min_h(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .px(px(12.0))
+                    .pt(px(20.0))
+                    .pb(px(12.0))
+                    .child(div().flex().flex_col().gap(px(3.0)).flex_1().children(
+                        main_items.into_iter().enumerate().map(
+                            move |(idx, (panel, label, icon))| {
+                                render_sidebar_item(
+                                    panel,
+                                    label,
+                                    icon,
+                                    current_panel,
+                                    layout_mode,
+                                    idx,
+                                    on_panel_select_for_main.clone(),
+                                )
+                            },
+                        ),
+                    ))
+                    .child(div().flex().flex_col().gap(px(3.0)).pt(px(16.0)).children(
+                        bottom_items.into_iter().enumerate().map(
+                            move |(idx, (panel, label, icon))| {
+                                render_sidebar_item(
+                                    panel,
+                                    label,
+                                    icon,
+                                    current_panel,
+                                    layout_mode,
+                                    idx + 100,
+                                    on_panel_select.clone(),
+                                )
+                            },
+                        ),
+                    )),
             )
     }
 }

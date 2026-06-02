@@ -13,7 +13,8 @@ use crate::git_sync::{
     GitRemoteSyncPullResult, GitRemoteSyncPushResult, GitRemoteSyncState, GitRemoteVerification,
 };
 use crate::models::{
-    Attachment, MetadataCatalogEntry, Person, Record, Tag, TaskStatus, TimelineQuery,
+    Attachment, Line, LineGraphData, LineRef, MetadataCatalogEntry, Person, Record, Tag,
+    TaskStatus, TimelineQuery,
 };
 use crate::settings::{load_app_settings, save_app_settings};
 use async_channel::{unbounded, Receiver, Sender};
@@ -78,18 +79,47 @@ pub enum StoreCommand {
         record: Record,
         respond_to: Sender<Result<(), String>>,
     },
+    CreateRecordWithLine {
+        record: Record,
+        line_ref: Option<LineRef>,
+        respond_to: Sender<Result<(), String>>,
+    },
     UpdateRecord {
         record: Record,
+        respond_to: Sender<Result<(), String>>,
+    },
+    UpdateRecordWithLine {
+        record: Record,
+        line_ref: Option<LineRef>,
         respond_to: Sender<Result<(), String>>,
     },
     DeleteRecord {
         id: uuid::Uuid,
         respond_to: Sender<Result<(), String>>,
     },
-    // 时间线查询
+    // 历史记录查询（保留给搜索/兼容入口）
     GetTimeline {
         query: TimelineQuery,
         respond_to: Sender<Result<Vec<Record>, String>>,
+    },
+    GetLineGraph {
+        project: Option<String>,
+        respond_to: Sender<Result<LineGraphData, String>>,
+    },
+    GetLineCatalog {
+        respond_to: Sender<Result<Vec<MetadataCatalogEntry>, String>>,
+    },
+    CompleteLine {
+        line_id: uuid::Uuid,
+        respond_to: Sender<Result<(), String>>,
+    },
+    DeleteLine {
+        line_id: uuid::Uuid,
+        respond_to: Sender<Result<(), String>>,
+    },
+    GetOrCreateLine {
+        line_ref: LineRef,
+        respond_to: Sender<Result<Line, String>>,
     },
     // 全文搜索
     SearchRecords {
@@ -130,6 +160,10 @@ pub enum StoreCommand {
     CancelTask {
         id: uuid::Uuid,
         reason: Option<String>,
+        respond_to: Sender<Result<(), String>>,
+    },
+    ReopenTask {
+        id: uuid::Uuid,
         respond_to: Sender<Result<(), String>>,
     },
     // 标签操作
@@ -305,17 +339,20 @@ fn derive_task_stats(tasks: &[Record], now: DateTime<Local>) -> DerivedTaskStats
             }
         }
 
-        if let Some(completed_at) = task.completed_at {
-            let completed_date = completed_at.with_timezone(&Local).date_naive();
-            if completed_date == today {
-                stats.completed_today_count += 1;
-            }
+        if task.status == Some(TaskStatus::Done) {
+            if let Some(completed_at) = task.completed_at {
+                let completed_date = completed_at.with_timezone(&Local).date_naive();
+                if completed_date == today {
+                    stats.completed_today_count += 1;
+                }
 
-            let days_from_start = completed_date.signed_duration_since(today - Duration::days(6));
-            if (0..=6).contains(&days_from_start.num_days()) {
-                let idx = days_from_start.num_days() as usize;
-                if let Some(bucket) = last_7_days_completed.get_mut(idx) {
-                    bucket.count += 1;
+                let days_from_start =
+                    completed_date.signed_duration_since(today - Duration::days(6));
+                if (0..=6).contains(&days_from_start.num_days()) {
+                    let idx = days_from_start.num_days() as usize;
+                    if let Some(bucket) = last_7_days_completed.get_mut(idx) {
+                        bucket.count += 1;
+                    }
                 }
             }
         }
@@ -334,24 +371,13 @@ impl StoreRuntime {
         }
     }
 
-    fn normalize_record_for_persistence(&self, mut record: Record) -> Result<Record, String> {
+    fn normalize_record_for_persistence(
+        &self,
+        mut record: Record,
+        previous_status: Option<TaskStatus>,
+    ) -> Result<Record, String> {
         if record.record_type != crate::models::RecordType::Task {
             return Ok(record);
-        }
-
-        let existing = match &self.db {
-            Some(db) => db
-                .get_record_by_id(record.id)
-                .map_err(|e| format!("Database error: {}", e))?,
-            None => return Err("Database not initialized".to_string()),
-        };
-
-        let previous_status = existing.as_ref().and_then(|stored| stored.status.clone());
-        if record.started_at.is_none() {
-            record.started_at = existing.as_ref().and_then(|stored| stored.started_at);
-        }
-        if record.completed_at.is_none() {
-            record.completed_at = existing.as_ref().and_then(|stored| stored.completed_at);
         }
 
         record.sync_task_lifecycle_fields(previous_status, chrono::Utc::now());
@@ -385,7 +411,7 @@ impl StoreRuntime {
                         let notifications_enabled = load_app_settings()
                             .map(|settings| settings.reminders.notifications_enabled)
                             .unwrap_or(true);
-                        for mut record in records {
+                        for record in records {
                             eprintln!("[Store] Processing reminder for task: {}", record.id);
                             if !notifications_enabled {
                                 continue;
@@ -393,8 +419,10 @@ impl StoreRuntime {
                             match crate::platform::send_reminder(&record) {
                                 Ok(_) => {
                                     eprintln!("[Store] Notification sent successfully");
-                                    record.notified_at = Some(chrono::Utc::now());
-                                    if let Err(e) = db_clone.create_record(&record) {
+                                    let now = chrono::Utc::now();
+                                    if let Err(e) =
+                                        db_clone.update_record_notified_at(record.id, now)
+                                    {
                                         eprintln!("[Store] Failed to update notified_at: {}", e);
                                     }
                                 }
@@ -432,8 +460,24 @@ impl StoreRuntime {
                     let result = self.handle_create_record(record).await;
                     let _ = respond_to.send(result).await;
                 }
+                StoreCommand::CreateRecordWithLine {
+                    record,
+                    line_ref,
+                    respond_to,
+                } => {
+                    let result = self.handle_create_record_with_line(record, line_ref).await;
+                    let _ = respond_to.send(result).await;
+                }
                 StoreCommand::UpdateRecord { record, respond_to } => {
                     let result = self.handle_update_record(record).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::UpdateRecordWithLine {
+                    record,
+                    line_ref,
+                    respond_to,
+                } => {
+                    let result = self.handle_update_record_with_line(record, line_ref).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::DeleteRecord { id, respond_to } => {
@@ -442,6 +486,38 @@ impl StoreRuntime {
                 }
                 StoreCommand::GetTimeline { query, respond_to } => {
                     let result = self.handle_get_timeline(query).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetLineGraph {
+                    project,
+                    respond_to,
+                } => {
+                    let result = self.handle_get_line_graph(project).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetLineCatalog { respond_to } => {
+                    let result = self.handle_get_line_catalog().await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::CompleteLine {
+                    line_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_complete_line(line_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::DeleteLine {
+                    line_id,
+                    respond_to,
+                } => {
+                    let result = self.handle_delete_line(line_id).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::GetOrCreateLine {
+                    line_ref,
+                    respond_to,
+                } => {
+                    let result = self.handle_get_or_create_line(line_ref).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::SearchRecords { query, respond_to } => {
@@ -486,6 +562,10 @@ impl StoreRuntime {
                     respond_to,
                 } => {
                     let result = self.handle_cancel_task(id, reason).await;
+                    let _ = respond_to.send(result).await;
+                }
+                StoreCommand::ReopenTask { id, respond_to } => {
+                    let result = self.handle_reopen_task(id).await;
                     let _ = respond_to.send(result).await;
                 }
                 StoreCommand::GetAllTags { respond_to } => {
@@ -647,7 +727,7 @@ impl StoreRuntime {
         match &self.db {
             Some(db) => {
                 eprintln!("[Store] Database exists, querying...");
-                match db.get_tasks(false) {
+                match db.get_tasks() {
                     Ok(tasks) => {
                         eprintln!("[Store] Found {} tasks", tasks.len());
                         Ok(tasks)
@@ -668,7 +748,28 @@ impl StoreRuntime {
     async fn handle_create_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
             Some(db) => {
-                let record = self.normalize_record_for_persistence(record)?;
+                let record = self.normalize_record_for_persistence(record, None)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_create_record_with_line(
+        &self,
+        mut record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => {
+                if let Some(line_ref) = line_ref {
+                    let line = db
+                        .get_or_create_line(&line_ref)
+                        .map_err(|e| format!("Database error: {}", e))?;
+                    record.line_id = Some(line.id);
+                }
+                let record = self.normalize_record_for_persistence(record, None)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -679,7 +780,40 @@ impl StoreRuntime {
     async fn handle_update_record(&self, record: Record) -> Result<(), String> {
         match &self.db {
             Some(db) => {
-                let record = self.normalize_record_for_persistence(record)?;
+                let previous_status = db
+                    .get_record_by_id(record.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.status);
+                let record = self.normalize_record_for_persistence(record, previous_status)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_update_record_with_line(
+        &self,
+        mut record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        match &self.db {
+            Some(db) => {
+                record.line_id = match line_ref {
+                    Some(line_ref) => Some(
+                        db.get_or_create_line(&line_ref)
+                            .map_err(|e| format!("Database error: {}", e))?
+                            .id,
+                    ),
+                    None => record.line_id,
+                };
+                let previous_status = db
+                    .get_record_by_id(record.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.status);
+                let record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -736,6 +870,54 @@ impl StoreRuntime {
                     Err(format!("Database error: {}", e))
                 }
             },
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_line_graph(
+        &self,
+        project: Option<String>,
+    ) -> Result<LineGraphData, String> {
+        match &self.db {
+            Some(db) => db
+                .get_line_graph(project.as_deref())
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_line_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        match &self.db {
+            Some(db) => db
+                .get_line_catalog()
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_complete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .complete_line(line_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_delete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        match &self.db {
+            Some(db) => db
+                .delete_line(line_id)
+                .map_err(|e| format!("Database error: {}", e)),
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_get_or_create_line(&self, line_ref: LineRef) -> Result<Line, String> {
+        match &self.db {
+            Some(db) => db
+                .get_or_create_line(&line_ref)
+                .map_err(|e| format!("Database error: {}", e)),
             None => Err("Database not initialized".to_string()),
         }
     }
@@ -830,7 +1012,7 @@ impl StoreRuntime {
         eprintln!("[Store] handle_get_dashboard called");
         match &self.db {
             Some(db) => {
-                let tasks = match db.get_tasks(false) {
+                let tasks = match db.get_tasks() {
                     Ok(tasks) => tasks,
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
@@ -884,7 +1066,7 @@ impl StoreRuntime {
         match &self.db {
             Some(db) => {
                 let tasks = db
-                    .get_tasks(false)
+                    .get_tasks()
                     .map_err(|e| format!("Database error: {}", e))?;
                 let derived = derive_task_stats(&tasks, Local::now());
                 Ok(StatsData {
@@ -912,9 +1094,10 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
+                let previous_status = record.status.clone();
                 record.status = Some(TaskStatus::InProgress);
                 record.updated_at = chrono::Utc::now();
-                record = self.normalize_record_for_persistence(record)?;
+                record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -932,9 +1115,10 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
+                let previous_status = record.status.clone();
                 record.status = Some(TaskStatus::Done);
                 record.updated_at = chrono::Utc::now();
-                record = self.normalize_record_for_persistence(record)?;
+                record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -956,10 +1140,34 @@ impl StoreRuntime {
                     Err(e) => return Err(format!("Database error: {}", e)),
                 };
 
+                let previous_status = record.status.clone();
                 record.status = Some(TaskStatus::Cancelled);
                 record.cancelled_reason = reason;
                 record.updated_at = chrono::Utc::now();
-                record = self.normalize_record_for_persistence(record)?;
+                record = self.normalize_record_for_persistence(record, previous_status)?;
+                db.create_record(&record)
+                    .map_err(|e| format!("Database error: {}", e))
+            }
+            None => Err("Database not initialized".to_string()),
+        }
+    }
+
+    async fn handle_reopen_task(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] handle_reopen_task called for id: {}", id);
+        match &self.db {
+            Some(db) => {
+                let mut record = match db.get_record_by_id(id) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => return Err("Task not found".to_string()),
+                    Err(e) => return Err(format!("Database error: {}", e)),
+                };
+
+                let previous_status = record.status.clone();
+                record.status = Some(TaskStatus::Todo);
+                record.completed_at = None;
+                record.cancelled_reason = None;
+                record.updated_at = chrono::Utc::now();
+                record = self.normalize_record_for_persistence(record, previous_status)?;
                 db.create_record(&record)
                     .map_err(|e| format!("Database error: {}", e))
             }
@@ -1357,13 +1565,13 @@ pub fn create_store() -> (Store, StoreRuntime) {
 }
 
 impl Store {
-    pub async fn get_tasks(&self, completed: bool) -> Result<Vec<Record>, String> {
-        eprintln!("[Store] get_tasks called with completed={}", completed);
+    pub async fn get_tasks(&self) -> Result<Vec<Record>, String> {
+        eprintln!("[Store] get_tasks called");
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
             .send(StoreCommand::GetTasks {
-                completed,
+                completed: false,
                 respond_to: tx,
             })
             .await;
@@ -1387,12 +1595,46 @@ impl Store {
         rx.recv().await.unwrap_or(Ok(()))
     }
 
+    pub async fn create_record_with_line(
+        &self,
+        record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::CreateRecordWithLine {
+                record,
+                line_ref,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
     pub async fn update_record(&self, record: Record) -> Result<(), String> {
         let (tx, rx) = async_channel::unbounded();
         let _ = self
             .sender
             .send(StoreCommand::UpdateRecord {
                 record,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn update_record_with_line(
+        &self,
+        record: Record,
+        line_ref: Option<LineRef>,
+    ) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::UpdateRecordWithLine {
+                record,
+                line_ref,
                 respond_to: tx,
             })
             .await;
@@ -1443,6 +1685,67 @@ impl Store {
             result.as_ref().map(|v| v.len())
         );
         result
+    }
+
+    pub async fn get_line_graph(&self, project: Option<String>) -> Result<LineGraphData, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetLineGraph {
+                project,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Ok(LineGraphData::default()))
+    }
+
+    pub async fn get_line_catalog(&self) -> Result<Vec<MetadataCatalogEntry>, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetLineCatalog { respond_to: tx })
+            .await;
+        rx.recv().await.unwrap_or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn complete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::CompleteLine {
+                line_id,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn delete_line(&self, line_id: uuid::Uuid) -> Result<(), String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::DeleteLine {
+                line_id,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
+    pub async fn get_or_create_line(&self, line_ref: LineRef) -> Result<Line, String> {
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::GetOrCreateLine {
+                line_ref,
+                respond_to: tx,
+            })
+            .await;
+        rx.recv()
+            .await
+            .unwrap_or_else(|_| Err("Failed to get or create line".to_string()))
     }
 
     pub async fn search_records(&self, query: &str) -> Result<Vec<Record>, String> {
@@ -1871,6 +2174,16 @@ impl Store {
         rx.recv().await.unwrap_or(Ok(()))
     }
 
+    pub async fn reopen_task(&self, id: uuid::Uuid) -> Result<(), String> {
+        eprintln!("[Store] reopen_task called for id: {}", id);
+        let (tx, rx) = async_channel::unbounded();
+        let _ = self
+            .sender
+            .send(StoreCommand::ReopenTask { id, respond_to: tx })
+            .await;
+        rx.recv().await.unwrap_or(Ok(()))
+    }
+
     pub async fn get_all_tags(&self) -> Result<Vec<Tag>, String> {
         eprintln!("[Store] get_all_tags called");
         let (tx, rx) = async_channel::unbounded();
@@ -2037,6 +2350,7 @@ mod tests {
 
         Record {
             id: Uuid::new_v4(),
+            line_id: None,
             title: Some("task".to_string()),
             content: String::new(),
             priority,
@@ -2101,7 +2415,7 @@ mod tests {
         assert_eq!(stats.high_priority_open_count, 1);
         assert_eq!(stats.completed_today_count, 1);
         assert_eq!(stats.last_7_days_completed.len(), 7);
-        assert_eq!(stats.last_7_days_completed[0].count, 1);
+        assert_eq!(stats.last_7_days_completed[0].count, 0);
         assert_eq!(stats.last_7_days_completed[3].count, 1);
         assert_eq!(stats.last_7_days_completed[6].count, 1);
     }
@@ -2134,6 +2448,6 @@ mod tests {
         assert_eq!(stats.due_tomorrow_count, 0);
         assert_eq!(stats.overdue_count, 0);
         assert_eq!(stats.high_priority_open_count, 0);
-        assert_eq!(stats.completed_today_count, 1);
+        assert_eq!(stats.completed_today_count, 0);
     }
 }
